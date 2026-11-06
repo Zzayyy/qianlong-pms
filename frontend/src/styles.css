@@ -1,0 +1,65 @@
+:root {
+  --pms-bg: #f5f7fa;
+  --pms-primary: #3370ff;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--pms-bg);
+  font-family: 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+}
+
+.pms-page {
+  padding: 16px;
+}
+
+.pms-card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+.pms-kpi {
+  text-align: center;
+}
+
+.pms-kpi-value {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--pms-primary);
+}
+
+.pms-kpi-label {
+  margin-top: 4px;
+  color: #909399;
+  font-size: 13px;
+}
+
+.pms-mobile-hide {
+  display: table-cell;
+}
+
+/* 响应式：窄屏隐藏次要列、卡片内边距收紧 */
+@media (max-width: 768px) {
+  .pms-page {
+    padding: 8px;
+  }
+
+  .pms-card {
+    padding: 10px;
+  }
+
+  .pms-mobile-hide {
+    display: none;
+  }
+
+  .pms-kpi-value {
+    font-size: 20px;
+  }
+}

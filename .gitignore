@@ -1,0 +1,19 @@
+# 仓库级忽略规则；backend/ 与 frontend/ 各自维护专属规则
+
+# ---- 备份与文档归档（只追加，不入库）----
+backups/
+doc/full/archive/
+
+# ---- 根目录虚拟环境兜底（正式环境在 backend/.venv）----
+.venv/
+venv/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+
+doc

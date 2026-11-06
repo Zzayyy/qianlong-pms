@@ -1,0 +1,66 @@
+[project]
+name = "pms"
+version = "1.1.2"
+description = "项目全周期管理与变更系统（周期管理 / 变更管理 / 工作日志 / 统计看板 / 权限）"
+requires-python = "==3.12.*"
+readme = { text = "PMS 后端服务（FastAPI + SQLAlchemy 异步 + Alembic）。完整说明见仓库根 README.md", content-type = "text/markdown" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "aiomysql>=0.2.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "alembic>=1.13",
+    "redis>=5.0",
+    "apscheduler>=3.10",
+    "python-jose>=3.3",
+    "bcrypt>=4.1",
+    "python-multipart>=0.0.9",
+]
+
+[project.scripts]
+pms = "pms.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "aiosqlite>=0.20",
+    "types-passlib",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = []
+ignore_missing_imports = true
+warn_unused_ignores = false
+disallow_untyped_decorators = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# 数据库引擎为进程级单例，测试用例必须共用同一个事件循环，
+# 否则第二个异步用例会复用已关闭循环里的连接（'NoneType' has no attribute 'send'）
+asyncio_default_fixture_loop_scope = "session"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+markers = ["integration: 需要真实 MySQL（.env 配置）"]

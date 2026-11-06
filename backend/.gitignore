@@ -1,0 +1,46 @@
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- 密钥与本地配置（.env.example 必须保留）----
+.env
+.env.*
+!.env.example
+
+# ---- Python 字节码与缓存 ----
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# ---- 打包 / 安装产物 ----
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+
+# ---- 测试与覆盖率 ----
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# ---- 运行期数据（附件、日志、本地库）----
+data/uploads/
+logs/
+*.log
+*.db
+*.sqlite3
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
