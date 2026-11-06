@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pms.common.exceptions import ForbiddenError, UnauthorizedError
 from pms.core.context import AuthContext
 from pms.core.database import get_session
-from pms.core.redis import blacklist_contains
+from pms.core.redis import blacklist_contains, get_user_epoch
 from pms.core.security import decode_access_token
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -43,6 +43,15 @@ async def get_current_user(
         raise UnauthorizedError("登录已失效")
     payload = decode_access_token(token)
     user_id = int(str(payload.get("sub", "0")))
+
+    # 会话版本校验：停用账号、改密、变更角色/部门后旧令牌立即失效
+    try:
+        token_epoch = int(str(payload.get("epoch", 0)))
+    except ValueError:
+        token_epoch = -1
+    if token_epoch != await get_user_epoch(user_id):
+        raise UnauthorizedError("登录状态已变更，请重新登录")
+
     roles = frozenset(str(item) for item in payload.get("roles", []) or [])
     dept_id = int(str(payload.get("dept", "0")))
     dept_path = str(payload.get("deptPath", ""))

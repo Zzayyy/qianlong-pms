@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Final
+from urllib.parse import quote
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -60,8 +61,8 @@ class Settings(BaseSettings):
 
     @property
     def redis_url(self) -> str:
-        """Redis 连接串。"""
-        auth = f":{self.redis_password}@" if self.redis_password else ""
+        """Redis 连接串（密码做 URL 编码，避免 @ / & 等字符破坏解析）。"""
+        auth = f":{quote(self.redis_password, safe='')}@" if self.redis_password else ""
         return f"redis://{auth}{self.redis_host}:{self.redis_port}/{self.redis_db}"
 
     @property

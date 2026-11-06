@@ -70,13 +70,13 @@ const stages = ref<any[]>([])
 const tasks = ref<any[]>([])
 const milestones = ref<any[]>([])
 const members = ref<any[]>([])
-const newPmId = ref(0)
+const newPmId = ref('')
 const addMemberId = ref<number | null>(null)
 
 /* 项目节点与文档 */
 const canManageStage = computed(() => store.has('project:stage:edit'))
 const directors = ref<any[]>([])
-const directorIds = ref<number[]>([])
+const directorIds = ref<string[]>([])
 const docs = ref<any[]>([])
 const docBizType = ref<'PROJECT' | 'STAGE' | 'MILESTONE'>('PROJECT')
 const docBizId = ref(0)
@@ -86,7 +86,7 @@ const stageForm = ref<any>({ id: 0, stageName: '', weight: 1, seq: 1, planStart:
 
 const loadNodeData = async () => {
   directors.value = await projectDirectors(detail.value.id)
-  directorIds.value = directors.value.map((item: any) => Number(item.userId))
+  directorIds.value = directors.value.map((item: any) => String(item.userId))
   docs.value = await projectAttachments(detail.value.id)
 }
 
@@ -186,12 +186,12 @@ const uploadDoc = async () => {
 }
 
 const downloadDoc = async (row: any) => {
-  await downloadProjectFile(Number(row.fileId), row.fileName)
+  await downloadProjectFile(String(row.fileId), row.fileName)
 }
 
 const removeDoc = async (row: any) => {
   await ElMessageBox.confirm(`确认删除文档「${row.fileName}」？`, '提示', { type: 'warning' })
-  await deleteProjectFile(Number(row.fileId))
+  await deleteProjectFile(String(row.fileId))
   ElMessage.success('文档已删除')
   docs.value = await projectAttachments(detail.value.id)
 }
@@ -249,7 +249,7 @@ const doCreate = async () => {
 
 const openDetail = async (row: any) => {
   detail.value = await projectDetail(row.id)
-  newPmId.value = Number(detail.value.pmId || 0)
+  newPmId.value = String(detail.value.pmId || '')
   addMemberId.value = null
   stages.value = await listStages(row.id)
   tasks.value = await listTasks(row.id)
@@ -262,18 +262,18 @@ const openDetail = async (row: any) => {
 const refreshDetail = async () => {
   detail.value = await projectDetail(detail.value.id)
   members.value = await listMembers(detail.value.id)
-  newPmId.value = Number(detail.value.pmId || 0)
+  newPmId.value = String(detail.value.pmId || '')
 }
 
 const doChangePm = async () => {
-  await changeProjectPm(detail.value.id, Number(newPmId.value))
+  await changeProjectPm(detail.value.id, newPmId.value)
   ElMessage.success('负责人已变更')
   await refreshDetail()
   await load()
 }
 
 const claimProject = async () => {
-  await changeProjectPm(detail.value.id, Number(store.profile?.id || 0))
+  await changeProjectPm(detail.value.id, String(store.profile?.id || ''))
   ElMessage.success('已认领为自己的项目')
   await refreshDetail()
   await load()

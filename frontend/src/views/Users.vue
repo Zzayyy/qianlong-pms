@@ -9,6 +9,7 @@ import {
   listRoles,
   listUsers,
   resetUserPassword,
+  unlockUser,
   updateUser,
   userRoleIds,
   type Page
@@ -58,16 +59,33 @@ const load = async () => {
     const data: Page<Record<string, unknown>> = await listUsers({
       pageNum: page.value.pageNum,
       pageSize: page.value.pageSize,
-      keyword: keyword.value
+      keyword: keyword.value,
+      deptId: filterDeptId.value || undefined
     })
-    const list = (data.list || []) as any[]
-    rows.value = filterDeptId.value
-      ? list.filter((item) => Number(item.deptId) === Number(filterDeptId.value))
-      : list
+    rows.value = (data.list || []) as any[]
     total.value = Number(data.total || 0)
   } finally {
     loading.value = false
   }
+}
+
+/** 筛选条件变化后回到第一页（服务端筛选，避免分页与总数不一致）。 */
+const onSearch = () => {
+  page.value.pageNum = 1
+  load()
+}
+
+/** 是否处于登录失败锁定中。 */
+const isLocked = (row: any) => {
+  if (!row.lockedUntil) return false
+  const until = new Date(String(row.lockedUntil).replace(' ', 'T'))
+  return until.getTime() > Date.now()
+}
+
+const doUnlock = async (row: any) => {
+  await unlockUser(row.id)
+  ElMessage.success('账号已解锁')
+  await load()
 }
 
 const loadBase = async () => {
@@ -177,16 +195,28 @@ onMounted(async () => {
     <div class="pms-card">
       <el-row :gutter="8">
         <el-col :xs="24" :sm="8" :md="6">
-          <el-input v-model="keyword" placeholder="按姓名搜索" clearable />
+          <el-input
+            v-model="keyword"
+            placeholder="按姓名或账号搜索"
+            clearable
+            @keyup.enter="onSearch"
+            @clear="onSearch"
+          />
         </el-col>
         <el-col :xs="24" :sm="8" :md="6">
-          <el-select v-model="filterDeptId" placeholder="按部门筛选" clearable style="width: 100%">
+          <el-select
+            v-model="filterDeptId"
+            placeholder="按部门筛选"
+            clearable
+            style="width: 100%"
+            @change="onSearch"
+          >
             <el-option label="全部部门" :value="0" />
             <el-option v-for="dept in depts" :key="dept.id" :label="dept.deptName" :value="dept.id" />
           </el-select>
         </el-col>
         <el-col :xs="24" :sm="8" :md="12">
-          <el-button @click="load">查询</el-button>
+          <el-button @click="onSearch">查询</el-button>
           <el-button type="primary" :disabled="!canManage" @click="openCreate">新增人员</el-button>
         </el-col>
       </el-row>
@@ -201,12 +231,37 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column prop="mobile" label="手机" min-width="130" class-name="pms-mobile-hide" />
         <el-table-column prop="email" label="邮箱" min-width="180" class-name="pms-mobile-hide" />
-        <el-table-column prop="status" label="状态" width="110" />
-        <el-table-column label="操作" min-width="300">
+        <el-table-column label="角色" min-width="150" class-name="pms-mobile-hide">
+          <template #default="{ row }">
+            <span v-if="row.roles?.length">{{ row.roles.join(' / ') }}</span>
+            <span v-else class="cell-muted">未分配</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="150">
+          <template #default="{ row }">
+            <el-tag :type="row.status === 'ENABLED' ? 'success' : 'info'" size="small" effect="plain">
+              {{ row.status === 'ENABLED' ? '启用' : '停用' }}
+            </el-tag>
+            <el-tag v-if="isLocked(row)" class="lock-tag" type="danger" size="small" effect="plain">
+              已锁定
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" min-width="340">
           <template #default="{ row }">
             <el-button size="small" :disabled="!canManage" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" :disabled="!canManage" @click="openRoles(row)">角色</el-button>
             <el-button size="small" :disabled="!canManage" @click="openPwd(row)">重置密码</el-button>
+            <el-button
+              v-if="isLocked(row)"
+              size="small"
+              type="warning"
+              plain
+              :disabled="!canManage"
+              @click="doUnlock(row)"
+            >
+              解锁
+            </el-button>
             <el-button
               size="small"
               :type="row.status === 'ENABLED' ? 'danger' : 'success'"
@@ -296,3 +351,19 @@ onMounted(async () => {
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.cell-muted {
+  color: var(--pms-text-3);
+  font-size: 12.5px;
+}
+
+.lock-tag {
+  margin-left: 6px;
+}
+
+:deep(.el-pagination) {
+  margin-top: 14px;
+  justify-content: flex-end;
+}
+</style>

@@ -11,15 +11,21 @@ import pytest_asyncio
 
 from pms.common.trace import new_trace_id, set_trace_id
 from pms.core.database import dispose_engine
+from pms.core.redis import close_redis
 
 BACKEND_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 
 
 @pytest_asyncio.fixture(autouse=True)
 async def _engine() -> AsyncIterator[None]:
-    """每个用例结束后释放连接池，避免跨事件循环复用已关闭的连接。"""
+    """每个用例结束后释放连接池，避免跨事件循环复用已关闭的连接。
+
+    Redis 客户端是进程级单例，事件循环切换后必须一并关闭，
+    否则会报 `Event loop is closed`（Redis 在线时才会暴露）。
+    """
     yield
     await dispose_engine()
+    await close_redis()
 
 
 @pytest.fixture(autouse=True)

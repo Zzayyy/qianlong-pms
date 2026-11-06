@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch, type Component } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, type Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   BarChart3,
   Briefcase,
@@ -12,6 +12,7 @@ import {
   FolderKanban,
   GitPullRequest,
   House,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -22,11 +23,13 @@ import {
   ScrollText,
   Settings2,
   ShieldAlert,
+  ShieldCheck,
   SlidersHorizontal,
   Users,
   X
 } from 'lucide-vue-next'
-import { logout } from '@/api'
+import { changePassword, logout } from '@/api'
+import { firstAccessiblePath } from '@/router'
 import { useUserStore } from '@/stores/user'
 
 interface NavLeaf {
@@ -92,6 +95,7 @@ const navSections: NavSection[] = [
     key: 'system',
     label: '系统',
     items: [
+      { path: '/roles', label: '角色权限', icon: ShieldCheck, permission: 'org:role:view' },
       { path: '/configs', label: '规则参数', icon: SlidersHorizontal, permission: 'sys:config' },
       { path: '/audit', label: '审计留痕', icon: ScrollText, permission: 'sys:log:view' }
     ]
@@ -195,8 +199,55 @@ const closeTab = (tab: TabItem) => {
 const realName = computed(() => store.profile?.realName || '未登录')
 const username = computed(() => store.profile?.username || '')
 const initial = computed(() => (realName.value || username.value || 'U').slice(0, 1).toUpperCase())
+const homePath = computed(() => firstAccessiblePath((code) => store.has(code)))
+const userSubtitle = computed(() => {
+  const parts = [username.value, store.profile?.deptName].filter(Boolean)
+  return parts.length ? parts.join(' · ') : '系统用户'
+})
+
+const pwdVisible = ref(false)
+const pwdSaving = ref(false)
+const pwdForm = reactive({ oldPassword: '', newPassword: '', confirmPassword: '' })
+
+const openPassword = () => {
+  pwdForm.oldPassword = ''
+  pwdForm.newPassword = ''
+  pwdForm.confirmPassword = ''
+  pwdVisible.value = true
+}
+
+const savePassword = async () => {
+  if (pwdSaving.value) return
+  if (!pwdForm.oldPassword) {
+    ElMessage.warning('请输入原密码')
+    return
+  }
+  if (pwdForm.newPassword.length < 8) {
+    ElMessage.warning('新密码长度至少 8 位')
+    return
+  }
+  if (pwdForm.newPassword !== pwdForm.confirmPassword) {
+    ElMessage.warning('两次输入的新密码不一致')
+    return
+  }
+  pwdSaving.value = true
+  try {
+    await changePassword(pwdForm.oldPassword, pwdForm.newPassword)
+    pwdVisible.value = false
+    ElMessage.success('密码已修改，请重新登录')
+    store.logout()
+    tabs.value = []
+    router.push('/login')
+  } finally {
+    pwdSaving.value = false
+  }
+}
 
 const onUserCommand = async (command: string) => {
+  if (command === 'password') {
+    openPassword()
+    return
+  }
   if (command !== 'logout') return
   try {
     await ElMessageBox.confirm('确认退出当前账号？', '退出登录', {
@@ -221,7 +272,7 @@ const onUserCommand = async (command: string) => {
 <template>
   <div class="app">
     <aside v-if="!isCompact" class="app-side" :class="{ 'is-collapsed': collapsed }">
-      <button class="side-brand" type="button" @click="go('/dashboard')">
+      <button class="side-brand" type="button" @click="go(homePath)">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
         <span v-if="!collapsed" class="brand-text">
           <span class="brand-name">钱龙 PMS</span>
@@ -299,13 +350,17 @@ const onUserCommand = async (command: string) => {
                   <span class="pu-avatar">{{ initial }}</span>
                   <span class="pu-text">
                     <span class="pu-name">{{ realName }}</span>
-                    <span class="pu-sub">{{ username || '系统用户' }}</span>
-                  </span>
-                </div>
-                <el-dropdown-item divided command="logout">
-                  <LogOut :size="15" :stroke-width="1.75" class="dd-icon" />
-                  <span>退出登录</span>
-                </el-dropdown-item>
+                    <span class="pu-sub">{{ userSubtitle }}</span>
+                    </span>
+                    </div>
+                    <el-dropdown-item command="password">
+                    <KeyRound :size="15" :stroke-width="1.75" class="dd-icon" />
+                    <span>修改密码</span>
+                    </el-dropdown-item>
+                    <el-dropdown-item divided command="logout">
+                    <LogOut :size="15" :stroke-width="1.75" class="dd-icon" />
+                    <span>退出登录</span>
+                    </el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
@@ -342,6 +397,44 @@ const onUserCommand = async (command: string) => {
         </RouterView>
       </main>
     </div>
+
+    <el-dialog v-model="pwdVisible" title="修改密码" width="90%" style="max-width: 420px">
+      <el-form label-position="top" @submit.prevent="savePassword">
+        <el-form-item label="原密码">
+          <el-input
+            v-model="pwdForm.oldPassword"
+            type="password"
+            show-password
+            autocomplete="current-password"
+            placeholder="请输入当前密码"
+          />
+        </el-form-item>
+        <el-form-item label="新密码">
+          <el-input
+            v-model="pwdForm.newPassword"
+            type="password"
+            show-password
+            autocomplete="new-password"
+            placeholder="至少 8 位"
+          />
+        </el-form-item>
+        <el-form-item label="确认新密码">
+          <el-input
+            v-model="pwdForm.confirmPassword"
+            type="password"
+            show-password
+            autocomplete="new-password"
+            placeholder="再次输入新密码"
+            @keyup.enter="savePassword"
+          />
+        </el-form-item>
+      </el-form>
+      <p class="pwd-tip">修改后需要重新登录，其他设备的登录状态也会失效。</p>
+      <template #footer>
+        <el-button @click="pwdVisible = false">取消</el-button>
+        <el-button type="primary" :loading="pwdSaving" @click="savePassword">保存</el-button>
+      </template>
+    </el-dialog>
 
     <el-drawer v-model="drawer" direction="ltr" size="264px" :with-header="false">
       <div class="drawer-head">
@@ -775,6 +868,13 @@ const onUserCommand = async (command: string) => {
 }
 
 /* ---------------- 抽屉导航 ---------------- */
+.pwd-tip {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--pms-text-3);
+}
+
 .drawer-head {
   height: 56px;
   display: flex;

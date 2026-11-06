@@ -67,11 +67,11 @@ const loadOptions = async () => {
   options.value = await worklogOptions()
 }
 
-const loadTasks = async (projectId: number) => {
+const loadTasks = async (projectId: string | number) => {
   tasks.value = []
   if (!projectId) return
   try {
-    tasks.value = (await listTasks(projectId)) as any[]
+    tasks.value = (await listTasks(String(projectId))) as any[]
   } catch {
     tasks.value = []
   }

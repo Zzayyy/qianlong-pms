@@ -21,8 +21,11 @@ const loadDept = async () => {
   loading.value = true
   try {
     const ids = deptIds.value
-      ? deptIds.value.split(',').map((item) => Number(item.trim())).filter(Boolean)
-      : [store.profile?.deptId || 0]
+      ? deptIds.value
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean)
+      : [String(store.profile?.deptId || '')].filter(Boolean)
     board.value = await deptBoard(ids)
     summary.value = board.value.summary || {}
     projects.value = (board.value.projects as any[]) || []

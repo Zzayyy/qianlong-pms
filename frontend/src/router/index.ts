@@ -12,6 +12,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'dashboard', name: 'dashboard', component: () => import('@/views/Dashboard.vue'), meta: { title: '公司看板', permission: 'report:view' } },
       { path: 'users', name: 'users', component: () => import('@/views/Users.vue'), meta: { title: '人员管理', permission: 'org:user:view' } },
       { path: 'depts', name: 'depts', component: () => import('@/views/Depts.vue'), meta: { title: '部门架构', permission: 'org:dept:view' } },
+      { path: 'roles', name: 'roles', component: () => import('@/views/Roles.vue'), meta: { title: '角色权限', permission: 'org:role:view' } },
       { path: 'projects', name: 'projects', component: () => import('@/views/Projects.vue'), meta: { title: '项目周期', permission: 'project:view' } },
       { path: 'changes', name: 'changes', component: () => import('@/views/Changes.vue'), meta: { title: '变更管理', permission: 'change:view' } },
       { path: 'worklogs', name: 'worklogs', component: () => import('@/views/Worklogs.vue'), meta: { title: '工作日志', permission: 'worklog:view' } },
@@ -23,6 +24,19 @@ const routes: RouteRecordRaw[] = [
     ]
   }
 ]
+
+const layoutRoute = routes.find((route) => route.path === '/')
+
+/** 按权限点找到第一个可访问的页面（登录落地页 / 403 兜底）。 */
+export const firstAccessiblePath = (has: (code: string) => boolean): string => {
+  for (const child of layoutRoute?.children ?? []) {
+    const permission = child.meta?.permission as string | undefined
+    if (!permission || has(permission)) {
+      return `/${String(child.path)}`
+    }
+  }
+  return '/403'
+}
 
 export const router = createRouter({
   history: createWebHashHistory(),
@@ -48,8 +62,9 @@ router.beforeEach(async (to) => {
   // 页面级权限：无对应权限点时不进该页（后端仍会二次校验）
   const required = to.meta.permission as string | undefined
   if (required && !store.has(required)) {
+    const fallback = firstAccessiblePath((code) => store.has(code))
     ElMessage.warning('无权访问该页面')
-    return { path: '/403' }
+    return { path: fallback === to.path ? '/403' : fallback }
   }
   return true
 })

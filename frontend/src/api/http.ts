@@ -33,7 +33,10 @@ http.interceptors.response.use(
   (response) => {
     const body = response.data as ApiEnvelope<unknown>
     if (body && body.code !== 0) {
-      ElMessage.error(`${body.code} ${body.message}`)
+      // 登录接口的错误由页面内联展示，避免 toast 与表单提示重复
+      if (!response.config.url?.includes('/auth/login')) {
+        ElMessage.error(`${body.code} ${body.message}`)
+      }
       return Promise.reject(new Error(body.message))
     }
     return response
@@ -41,13 +44,19 @@ http.interceptors.response.use(
   (error: AxiosError<ApiEnvelope<unknown>>) => {
     const status = error.response?.status ?? 0
     const body = error.response?.data
+    const isLogin = error.config?.url?.includes('/auth/login') ?? false
     if (status === 401 || body?.code === 40101 || body?.code === 40301) {
       localStorage.removeItem('pms_token')
       if (!location.hash.startsWith('#/login')) {
-        location.href = '#/login'
+        const current = location.hash.replace(/^#/, '') || '/dashboard'
+        ElMessage.warning(body?.message || '登录已失效，请重新登录')
+        location.href = `#/login?redirect=${encodeURIComponent(current)}`
+        return Promise.reject(error)
       }
     }
-    ElMessage.error(body?.message || error.message)
+    if (!isLogin) {
+      ElMessage.error(body?.message || error.message)
+    }
     return Promise.reject(error)
   }
 )

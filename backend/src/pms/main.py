@@ -24,7 +24,7 @@ from pms.change import api as change_api
 from pms.common.codes import ErrorCode
 from pms.common.exceptions import BizError
 from pms.common.logging import get_logger, setup_logging
-from pms.common.response import ApiResponse, now_text, ok
+from pms.common.response import ApiResponse, SafeJSONResponse, now_text, ok
 from pms.common.trace import get_trace_id, new_trace_id, set_trace_id
 from pms.core.config import get_settings
 from pms.core.database import dispose_engine
@@ -121,6 +121,7 @@ def create_app() -> FastAPI:
         version=__version__,
         description="周期管理 / 变更管理 / 工作日志 / 统计看板 / 四维权限",
         lifespan=lifespan,
+        default_response_class=SafeJSONResponse,
     )
     # 审计留痕中间件（写操作全量 + 读操作异常/拒绝），注册在 CORS 之后、业务之前
     app.add_middleware(AuditMiddleware)

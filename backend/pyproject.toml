@@ -60,6 +60,8 @@ asyncio_mode = "auto"
 # 数据库引擎为进程级单例，测试用例必须共用同一个事件循环，
 # 否则第二个异步用例会复用已关闭循环里的连接（'NoneType' has no attribute 'send'）
 asyncio_default_fixture_loop_scope = "session"
+# 用例与夹具必须共用同一个事件循环，否则引擎/Redis 连接在已关闭的循环上释放
+asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q"

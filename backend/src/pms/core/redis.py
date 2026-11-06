@@ -23,6 +23,7 @@ _next_retry_at: float = 0.0
 SESSION_BLACKLIST: Final[str] = "pms:session:blacklist:"
 CONFIG_CACHE: Final[str] = "pms:config:"
 PERM_CACHE: Final[str] = "pms:perm:user:"
+USER_EPOCH: Final[str] = "pms:user:epoch:"
 IDEMPOTENCY: Final[str] = "pms:idem:"
 
 # 连接/读写超时（秒）：本地 Redis 远快于此；未部署 Redis 时也能快速失败
@@ -133,3 +134,29 @@ async def blacklist_contains(token: str) -> bool:
     if token in _memory_blacklist:
         return True
     return bool(await cache_get(f"{SESSION_BLACKLIST}{token}"))
+
+
+# ---------------- 用户会话版本 ----------------
+# 令牌中携带 epoch：停用账号、改密、变更角色/部门等操作会递增版本，
+# 旧令牌因此立即失效（权限与数据范围不再等到令牌过期才刷新）。
+# Redis 不可用时退化为进程内计数，单进程部署同样生效。
+_memory_epoch: dict[int, int] = {}
+
+
+async def get_user_epoch(user_id: int) -> int:
+    """读取用户当前会话版本（缺省 0）。"""
+    raw = await cache_get(f"{USER_EPOCH}{user_id}")
+    if raw is not None:
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning("会话版本值非法，回退内存：user=%s value=%s", user_id, raw)
+    return _memory_epoch.get(user_id, 0)
+
+
+async def bump_user_epoch(user_id: int) -> int:
+    """递增用户会话版本，使已签发的令牌立即失效。"""
+    value = await get_user_epoch(user_id) + 1
+    _memory_epoch[user_id] = value
+    await cache_set(f"{USER_EPOCH}{user_id}", str(value), ttl=30 * 24 * 3600)
+    return value

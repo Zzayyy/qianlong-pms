@@ -22,7 +22,7 @@ from pms.core.deps import (
 from pms.core.redis import blacklist_add
 from pms.core.security import decode_access_token
 from pms.org import service
-from pms.org.models import SysDept, SysRole, SysUser
+from pms.org.models import SysDept, SysUser
 
 router = APIRouter(prefix="/api/v1", tags=["组织与权限"])
 
@@ -124,6 +124,26 @@ class PasswordIn(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
+class RoleCreateIn(BaseModel):
+    """新增角色入参。"""
+
+    roleCode: str = Field(min_length=2, max_length=64)
+    roleName: str = Field(min_length=1, max_length=64)
+    dataScope: str = "SELF"
+    customDeptIds: str = ""
+    sort: int = 0
+
+
+class RoleUpdateIn(BaseModel):
+    """修改角色入参（仅传需要改的字段）。"""
+
+    roleName: str | None = Field(default=None, max_length=64)
+    dataScope: str | None = None
+    customDeptIds: str | None = None
+    sort: int | None = None
+    status: str | None = None
+
+
 @router.post("/auth/login", summary="登录")
 async def login(
     body: LoginIn,
@@ -191,19 +211,49 @@ async def logout(body: LogoutIn, request: Request) -> object:
 @router.get("/auth/profile", summary="当前用户")
 async def profile(
     context: Annotated[AuthContext, Depends(require_permissions())],
+    session: Annotated[AsyncSession, Depends(get_session)],
 ) -> object:
     """返回当前用户的身份、部门、角色与权限。"""
+    user = await session.get(SysUser, context.user_id)
+    dept_name = ""
+    if user is not None and user.dept_id:
+        dept = await session.get(SysDept, user.dept_id)
+        dept_name = dept.dept_name if dept is not None else ""
     return ok(
         {
             "id": context.user_id,
             "username": context.username,
             "realName": context.real_name,
             "deptId": context.dept_id,
+            "deptName": dept_name,
+            "mobile": user.mobile if user is not None else "",
+            "email": user.email if user is not None else "",
             "roles": sorted(context.roles),
             "permissions": sorted(context.permissions),
             "allScope": context.is_all_scope,
         }
     )
+
+
+class PasswordChangeIn(BaseModel):
+    """本人修改密码入参。"""
+
+    oldPassword: str = Field(min_length=1, max_length=128)
+    newPassword: str = Field(min_length=8, max_length=128)
+
+
+@router.put("/auth/password", summary="修改本人密码")
+async def change_password(
+    body: PasswordChangeIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions())],
+) -> object:
+    """校验原密码后修改；成功后该用户已签发的令牌全部失效。"""
+    await service.change_password(
+        session, context.user_id, body.oldPassword, body.newPassword
+    )
+    await session.commit()
+    return ok(message="密码已修改，请重新登录")
 
 
 @router.get("/depts/tree", summary="部门树")
@@ -295,15 +345,17 @@ async def user_list(
     context: Annotated[AuthContext, Depends(require_permissions("org:user:view"))],
     pagination: Annotated[Pagination, Depends(get_pagination)],
     keyword: Annotated[str, Query()] = "",
+    dept_id: Annotated[int, Query(alias="deptId")] = 0,
 ) -> object:
     """分页查询用户，**结果受数据范围约束**（设计稿 03 维度 ②）。"""
     visible = (
         None if context.visible_dept_ids is None else set(context.visible_dept_ids)
     )
-    total = await service.count_users(session, visible, keyword)
+    total = await service.count_users(session, visible, keyword, dept_id)
     users: list[SysUser] = await service.list_users(
-        session, visible, keyword, pagination.offset, pagination.limit
+        session, visible, keyword, pagination.offset, pagination.limit, dept_id
     )
+    role_names = await service.list_user_role_names(session, [user.id for user in users])
     items = [
         {
             "id": user.id,
@@ -313,6 +365,8 @@ async def user_list(
             "mobile": user.mobile,
             "email": user.email,
             "status": user.status,
+            "lockedUntil": user.locked_until,
+            "roles": role_names.get(user.id, []),
         }
         for user in users
     ]
@@ -390,6 +444,18 @@ async def user_status(
     return ok({"id": user.id, "status": user.status})
 
 
+@router.post("/users/{user_id}/unlock", summary="解锁账号")
+async def user_unlock(
+    user_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("org:user:manage"))],
+) -> object:
+    """清除登录失败锁定，无需重置密码。"""
+    user = await service.unlock_user(session, user_id, operator_id=context.user_id)
+    await session.commit()
+    return ok({"id": user.id, "lockedUntil": None})
+
+
 @router.put("/users/{user_id}/password", summary="重置密码")
 async def user_password(
     user_id: int,
@@ -423,26 +489,73 @@ async def role_list(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("org:role:view"))],
 ) -> object:
-    """返回角色及其数据范围配置。"""
-    from sqlalchemy import select
+    """返回角色、数据范围、用户数与权限数。"""
+    return ok(await service.list_roles_with_stats(session))
 
-    result = await session.execute(
-        select(SysRole).where(SysRole.deleted == 0).order_by(SysRole.sort, SysRole.id)
+
+@router.post("/roles", summary="新增角色")
+async def role_create(
+    body: RoleCreateIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("org:role:manage"))],
+) -> object:
+    """新增角色（编码唯一，数据范围可在后续调整）。"""
+    role = await service.create_role(
+        session,
+        role_code=body.roleCode,
+        role_name=body.roleName,
+        data_scope=body.dataScope,
+        custom_dept_ids=body.customDeptIds,
+        sort=body.sort,
+        operator_id=context.user_id,
     )
-    roles = result.scalars().all()
-    return ok(
-        [
-            {
-                "id": role.id,
-                "roleCode": role.role_code,
-                "roleName": role.role_name,
-                "dataScope": role.data_scope,
-                "customDeptIds": role.custom_dept_ids,
-                "builtin": role.builtin,
-            }
-            for role in roles
-        ]
+    await session.commit()
+    return ok({"id": role.id, "roleCode": role.role_code})
+
+
+@router.put("/roles/{role_id}", summary="修改角色")
+async def role_update(
+    role_id: int,
+    body: RoleUpdateIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("org:role:manage"))],
+) -> object:
+    """修改角色名称 / 数据范围 / 排序 / 启停（内置角色数据范围锁定）。"""
+    role = await service.update_role(
+        session,
+        role_id,
+        role_name=body.roleName,
+        data_scope=body.dataScope,
+        custom_dept_ids=body.customDeptIds,
+        sort=body.sort,
+        status=body.status,
+        operator_id=context.user_id,
     )
+    await session.commit()
+    return ok({"id": role.id, "roleName": role.role_name, "dataScope": role.data_scope})
+
+
+@router.delete("/roles/{role_id}", summary="删除角色")
+async def role_delete(
+    role_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("org:role:manage"))],
+) -> object:
+    """删除自定义角色；内置角色或仍有用户关联时拒绝。"""
+    await service.delete_role(session, role_id, operator_id=context.user_id)
+    await session.commit()
+    return ok(message="角色已删除")
+
+
+@router.get("/roles/{role_id}/permissions", summary="角色已授权权限点")
+async def role_permission_ids(
+    role_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("org:role:view"))],
+) -> object:
+    """返回角色当前权限点 ID 列表（授权页回显）。"""
+    perm_ids = await service.list_role_permission_ids(session, role_id)
+    return ok({"roleId": role_id, "permIds": perm_ids})
 
 
 @router.put("/roles/{role_id}/permissions", summary="角色授权")

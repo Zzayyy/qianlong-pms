@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pms.common.exceptions import (
@@ -18,7 +18,14 @@ from pms.common.exceptions import (
 )
 from pms.common.logging import get_logger
 from pms.core.config import get_settings
-from pms.core.redis import PERM_CACHE, cache_delete, cache_get, cache_set
+from pms.core.redis import (
+    PERM_CACHE,
+    bump_user_epoch,
+    cache_delete,
+    cache_get,
+    cache_set,
+    get_user_epoch,
+)
 from pms.core.security import create_access_token, hash_password, verify_password
 from pms.org.models import (
     SysDept,
@@ -190,6 +197,7 @@ async def authenticate(
     await session.flush()
 
     payload, permissions, _visible = await build_auth_payload(session, user)
+    payload["epoch"] = await get_user_epoch(user.id)
     token = create_access_token(str(user.id), payload)
 
     dept_name = ""
@@ -222,13 +230,29 @@ async def list_dept_tree(session: AsyncSession) -> list[SysDept]:
     return list(result.scalars().all())
 
 
-async def count_users(session: AsyncSession, visible: set[int] | None, keyword: str) -> int:
-    """统计用户数（受数据范围约束）。"""
-    stmt = select(func.count(SysUser.id)).where(SysUser.deleted == 0)
+def _user_filters(
+    visible: set[int] | None, keyword: str, dept_id: int
+) -> list[ColumnElement[bool]]:
+    """组装用户列表过滤条件（数据范围 / 关键字 / 部门）。"""
+    filters: list[ColumnElement[bool]] = [SysUser.deleted == 0]
     if visible is not None:
-        stmt = stmt.where(SysUser.dept_id.in_(visible))
+        filters.append(SysUser.dept_id.in_(visible))
+    if dept_id:
+        filters.append(SysUser.dept_id == dept_id)
     if keyword:
-        stmt = stmt.where(SysUser.real_name.like(f"%{keyword}%"))
+        pattern = f"%{keyword}%"
+        filters.append(SysUser.real_name.like(pattern) | SysUser.username.like(pattern))
+    return filters
+
+
+async def count_users(
+    session: AsyncSession,
+    visible: set[int] | None,
+    keyword: str,
+    dept_id: int = 0,
+) -> int:
+    """统计用户数（受数据范围约束）。"""
+    stmt = select(func.count(SysUser.id)).where(*_user_filters(visible, keyword, dept_id))
     result = await session.execute(stmt)
     return int(result.scalar_one())
 
@@ -239,16 +263,40 @@ async def list_users(
     keyword: str,
     offset: int,
     limit: int,
+    dept_id: int = 0,
 ) -> list[SysUser]:
     """分页查询用户（受数据范围约束）。"""
-    stmt = select(SysUser).where(SysUser.deleted == 0)
-    if visible is not None:
-        stmt = stmt.where(SysUser.dept_id.in_(visible))
-    if keyword:
-        stmt = stmt.where(SysUser.real_name.like(f"%{keyword}%"))
-    stmt = stmt.order_by(SysUser.id).offset(offset).limit(limit)
+    stmt = (
+        select(SysUser)
+        .where(*_user_filters(visible, keyword, dept_id))
+        .order_by(SysUser.id)
+        .offset(offset)
+        .limit(limit)
+    )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def list_user_role_names(
+    session: AsyncSession, user_ids: list[int]
+) -> dict[int, list[str]]:
+    """批量查询用户角色名称（列表页展示用，避免 N+1）。"""
+    if not user_ids:
+        return {}
+    stmt = (
+        select(SysUserRole.user_id, SysRole.role_name)
+        .join(SysRole, SysRole.id == SysUserRole.role_id)
+        .where(
+            SysUserRole.user_id.in_(user_ids),
+            SysUserRole.deleted == 0,
+            SysRole.deleted == 0,
+        )
+        .order_by(SysRole.sort, SysRole.id)
+    )
+    result: dict[int, list[str]] = {}
+    for user_id, role_name in (await session.execute(stmt)).all():
+        result.setdefault(int(user_id), []).append(str(role_name))
+    return result
 
 
 async def count_users_by_dept(session: AsyncSession) -> dict[int, int]:
@@ -498,14 +546,17 @@ async def update_user(
         NotFoundError: 用户不存在或目标部门不存在。
     """
     user = await get_user(session, user_id)
+    scope_changed = False
     if dept_id is not None:
         dept = await session.get(SysDept, dept_id) if dept_id else None
         if dept_id and (dept is None or dept.deleted != 0):
             raise NotFoundError("部门不存在")
+        scope_changed = dept_id != user.dept_id
         user.dept_id = dept_id
     if real_name is not None:
         user.real_name = real_name
     if manager_id is not None:
+        scope_changed = scope_changed or manager_id != user.manager_id
         user.manager_id = manager_id
     if mobile is not None:
         user.mobile = mobile
@@ -517,6 +568,9 @@ async def update_user(
         user.cost_rate = cost_rate
     user.update_by = operator_id
     await session.flush()
+    if scope_changed:
+        # 部门/上级变化会影响数据范围，旧令牌需重新登录以刷新
+        await bump_user_epoch(user_id)
     return user
 
 
@@ -538,6 +592,9 @@ async def change_user_status(
         user.login_fail_count = 0
         user.locked_until = None
     await session.flush()
+    if status == "DISABLED":
+        # 停用后立即踢下线，不等令牌过期
+        await bump_user_epoch(user_id)
     return user
 
 
@@ -558,7 +615,51 @@ async def reset_user_password(
     user.locked_until = None
     user.update_by = operator_id
     await session.flush()
+    await bump_user_epoch(user_id)
     logger.info("管理员重置密码：user=%s operator=%s", user_id, operator_id)
+
+
+async def change_password(
+    session: AsyncSession,
+    user_id: int,
+    old_password: str,
+    new_password: str,
+) -> None:
+    """用户自助修改密码（校验原密码，成功后旧令牌全部失效）。
+
+    Raises:
+        NotFoundError: 用户不存在。
+        BizRuleError: 原密码错误、新密码过短或与原密码相同。
+    """
+    user = await get_user(session, user_id)
+    if not verify_password(old_password, user.password_hash):
+        raise BizRuleError("原密码不正确")
+    if len(new_password) < 8:
+        raise BizRuleError("新密码长度至少 8 位")
+    if old_password == new_password:
+        raise BizRuleError("新密码不能与原密码相同")
+    user.password_hash = hash_password(new_password)
+    user.login_fail_count = 0
+    user.locked_until = None
+    user.update_by = user_id
+    await session.flush()
+    await bump_user_epoch(user_id)
+    logger.info("用户修改密码：user=%s", user_id)
+
+
+async def unlock_user(session: AsyncSession, user_id: int, operator_id: int = 0) -> SysUser:
+    """解除登录失败锁定。
+
+    Raises:
+        NotFoundError: 用户不存在。
+    """
+    user = await get_user(session, user_id)
+    user.login_fail_count = 0
+    user.locked_until = None
+    user.update_by = operator_id
+    await session.flush()
+    logger.info("账号已解锁：user=%s operator=%s", user_id, operator_id)
+    return user
 
 
 async def list_user_role_ids(session: AsyncSession, user_id: int) -> list[int]:
@@ -585,6 +686,8 @@ async def assign_roles(
         session.add(SysUserRole(user_id=user_id, role_id=role_id, create_by=operator_id))
     await session.flush()
     await invalidate_user_permissions(user_id)
+    # 角色变化会同时影响权限点与数据范围，强制重新登录
+    await bump_user_epoch(user_id)
 
 
 async def set_role_permissions(
@@ -614,3 +717,228 @@ async def set_role_permissions(
     )
     for user_id in users.scalars().all():
         await invalidate_user_permissions(user_id)
+
+
+# ---------------- 角色管理 ----------------
+_ROLE_STATUS: Final[frozenset[str]] = frozenset({"ENABLED", "DISABLED"})
+_DATA_SCOPES: Final[frozenset[str]] = frozenset(item.value for item in DataScope)
+
+
+def _normalize_data_scope(scope: str) -> str:
+    """校验并规范化数据范围。
+
+    Raises:
+        BizRuleError: 取值不在枚举内。
+    """
+    value = (scope or "").strip().upper()
+    if value not in _DATA_SCOPES:
+        raise BizRuleError(f"非法的数据范围：{scope}")
+    return value
+
+
+async def get_role(session: AsyncSession, role_id: int) -> SysRole:
+    """取角色；不存在或已删除抛 `NotFoundError`。"""
+    role = await session.get(SysRole, role_id)
+    if role is None or role.deleted != 0:
+        raise NotFoundError("角色不存在")
+    return role
+
+
+async def list_roles_with_stats(session: AsyncSession) -> list[dict[str, object]]:
+    """角色列表（附用户数与权限数，供管理页展示）。"""
+    roles = list(
+        (
+            await session.execute(
+                select(SysRole).where(SysRole.deleted == 0).order_by(SysRole.sort, SysRole.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    user_counts = {
+        int(role_id): int(count)
+        for role_id, count in (
+            await session.execute(
+                select(SysUserRole.role_id, func.count(SysUserRole.id))
+                .where(SysUserRole.deleted == 0)
+                .group_by(SysUserRole.role_id)
+            )
+        ).all()
+    }
+    perm_counts = {
+        int(role_id): int(count)
+        for role_id, count in (
+            await session.execute(
+                select(SysRolePermission.role_id, func.count(SysRolePermission.id))
+                .where(SysRolePermission.deleted == 0)
+                .group_by(SysRolePermission.role_id)
+            )
+        ).all()
+    }
+    return [
+        {
+            "id": role.id,
+            "roleCode": role.role_code,
+            "roleName": role.role_name,
+            "dataScope": role.data_scope,
+            "customDeptIds": role.custom_dept_ids,
+            "builtin": role.builtin,
+            "sort": role.sort,
+            "status": role.status,
+            "userCount": user_counts.get(role.id, 0),
+            "permCount": perm_counts.get(role.id, 0),
+        }
+        for role in roles
+    ]
+
+
+async def create_role(
+    session: AsyncSession,
+    *,
+    role_code: str,
+    role_name: str,
+    data_scope: str = "SELF",
+    custom_dept_ids: str = "",
+    sort: int = 0,
+    operator_id: int = 0,
+) -> SysRole:
+    """新增角色（编码唯一）。
+
+    Raises:
+        BizRuleError: 编码为空/重复或数据范围非法。
+    """
+    code = role_code.strip().upper()
+    name = role_name.strip()
+    if not code:
+        raise BizRuleError("角色编码不能为空")
+    if not name:
+        raise BizRuleError("角色名称不能为空")
+    exists = await session.execute(
+        select(SysRole.id).where(SysRole.role_code == code, SysRole.deleted == 0)
+    )
+    if exists.scalar_one_or_none() is not None:
+        raise BizRuleError(f"角色编码已存在：{code}")
+    scope = _normalize_data_scope(data_scope)
+    role = SysRole(
+        role_code=code,
+        role_name=name,
+        data_scope=scope,
+        custom_dept_ids=custom_dept_ids if scope == DataScope.CUSTOM else "",
+        sort=sort,
+        status="ENABLED",
+        builtin=0,
+        create_by=operator_id,
+    )
+    session.add(role)
+    await session.flush()
+    return role
+
+
+async def update_role(
+    session: AsyncSession,
+    role_id: int,
+    *,
+    role_name: str | None = None,
+    data_scope: str | None = None,
+    custom_dept_ids: str | None = None,
+    sort: int | None = None,
+    status: str | None = None,
+    operator_id: int = 0,
+) -> SysRole:
+    """修改角色（内置角色不允许改数据范围）。
+
+    Raises:
+        NotFoundError: 角色不存在。
+        BizRuleError: 数据范围非法或修改内置角色的数据范围。
+    """
+    role = await get_role(session, role_id)
+    scope_changed = False
+    if data_scope is not None:
+        scope = _normalize_data_scope(data_scope)
+        if role.builtin and scope != role.data_scope:
+            raise BizRuleError("内置角色的数据范围不允许修改")
+        scope_changed = scope != role.data_scope
+        role.data_scope = scope
+    if role_name is not None and role_name.strip():
+        role.role_name = role_name.strip()
+    if custom_dept_ids is not None:
+        scope_changed = scope_changed or custom_dept_ids != role.custom_dept_ids
+        role.custom_dept_ids = custom_dept_ids
+    if sort is not None:
+        role.sort = sort
+    if status is not None:
+        if status not in _ROLE_STATUS:
+            raise BizRuleError(f"非法的角色状态：{status}")
+        if role.builtin and status != "ENABLED":
+            raise BizRuleError("内置角色不允许停用")
+        role.status = status
+    role.update_by = operator_id
+    await session.flush()
+
+    if scope_changed or status is not None:
+        # 数据范围/启停变化会影响该角色下所有用户，强制刷新权限与登录态
+        await _refresh_role_users(session, role_id, force_relogin=scope_changed)
+    return role
+
+
+async def delete_role(session: AsyncSession, role_id: int, operator_id: int = 0) -> None:
+    """删除角色（内置角色不可删；仍有用户使用时拒绝）。
+
+    Raises:
+        NotFoundError: 角色不存在。
+        BizRuleError: 内置角色或仍有用户关联。
+    """
+    role = await get_role(session, role_id)
+    if role.builtin:
+        raise BizRuleError("内置角色不允许删除")
+    count = (
+        await session.execute(
+            select(func.count(SysUserRole.id)).where(
+                SysUserRole.role_id == role_id, SysUserRole.deleted == 0
+            )
+        )
+    ).scalar_one()
+    if int(count):
+        raise BizRuleError(f"仍有 {int(count)} 个用户使用该角色，请先解除关联")
+    role.deleted = 1
+    role.update_by = operator_id
+    relations = (
+        await session.execute(
+            select(SysRolePermission).where(
+                SysRolePermission.role_id == role_id, SysRolePermission.deleted == 0
+            )
+        )
+    ).scalars()
+    for relation in relations.all():
+        relation.deleted = 1
+        relation.update_by = operator_id
+    await session.flush()
+    logger.info("角色已删除：role=%s operator=%s", role_id, operator_id)
+
+
+async def list_role_permission_ids(session: AsyncSession, role_id: int) -> list[int]:
+    """查询角色已授权的权限点 ID（授权页回显）。"""
+    await get_role(session, role_id)
+    result = await session.execute(
+        select(SysRolePermission.perm_id).where(
+            SysRolePermission.role_id == role_id, SysRolePermission.deleted == 0
+        )
+    )
+    return [int(perm_id) for perm_id in result.scalars().all()]
+
+
+async def _refresh_role_users(
+    session: AsyncSession, role_id: int, *, force_relogin: bool
+) -> int:
+    """刷新角色下所有用户的权限缓存，必要时使其重新登录。"""
+    result = await session.execute(
+        select(SysUserRole.user_id).where(
+            SysUserRole.role_id == role_id, SysUserRole.deleted == 0
+        )
+    )
+    user_ids = [int(user_id) for user_id in result.scalars().all()]
+    for user_id in user_ids:
+        await invalidate_user_permissions(user_id)
+        if force_relogin:
+            await bump_user_epoch(user_id)
+    return len(user_ids)

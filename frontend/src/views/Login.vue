@@ -1,20 +1,35 @@
 <script setup lang="ts">
 import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import type { FormInstance, FormRules } from 'element-plus'
+import { firstAccessiblePath } from '@/router'
 import { useUserStore } from '@/stores/user'
+
+const REMEMBER_KEY = 'pms_remember_username'
+const remembered = localStorage.getItem(REMEMBER_KEY) || ''
 
 const route = useRoute()
 const router = useRouter()
 const store = useUserStore()
 
 const formRef = ref<FormInstance>()
-const form = reactive({ username: 'admin', password: 'Pms@12345' })
+const form = reactive({
+  username: remembered || 'admin',
+  password: remembered ? '' : 'Pms@12345',
+})
+const remember = ref(true)
 const loading = ref(false)
+const errorText = ref('')
 
 const rules: FormRules = {
   username: [{ required: true, message: '请输入账号', trigger: 'blur' }],
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
+}
+
+/** 兼容业务错误（Error.message）与 HTTP 错误（response.data.message）。 */
+const readError = (error: unknown) => {
+  const detail = error as { response?: { data?: { message?: string } }; message?: string }
+  return detail?.response?.data?.message || detail?.message || '登录失败，请稍后重试'
 }
 
 const onSubmit = () => {
@@ -22,13 +37,19 @@ const onSubmit = () => {
   formRef.value?.validate(async (valid) => {
     if (!valid) return
     loading.value = true
+    errorText.value = ''
     try {
       await store.login(form.username, form.password)
-      const redirect = (route.query.redirect as string) || '/dashboard'
-      router.push(redirect)
-      ElMessage.success('登录成功')
-    } catch {
-      /* 错误提示由请求拦截器统一弹出，此处不再重复提示 */
+      if (remember.value) {
+        localStorage.setItem(REMEMBER_KEY, form.username)
+      } else {
+        localStorage.removeItem(REMEMBER_KEY)
+      }
+      const redirect = (route.query.redirect as string) || ''
+      // 落地页取第一个有权限的菜单，避免直接落到 403
+      router.push(redirect || firstAccessiblePath((code) => store.has(code)))
+    } catch (error) {
+      errorText.value = readError(error)
     } finally {
       loading.value = false
     }
@@ -89,6 +110,12 @@ const onSubmit = () => {
               @keyup.enter="onSubmit"
             />
           </el-form-item>
+
+          <div class="auth-meta">
+            <el-checkbox v-model="remember">记住账号</el-checkbox>
+          </div>
+
+          <p v-if="errorText" class="auth-error" role="alert">{{ errorText }}</p>
 
           <el-button
             type="primary"
@@ -391,6 +418,25 @@ const onSubmit = () => {
 .submit:focus-visible {
   outline: 2px solid rgba(36, 83, 207, 0.4);
   outline-offset: 2px;
+}
+
+.auth-meta {
+  display: flex;
+  align-items: center;
+  margin: -2px 0 14px;
+}
+
+.auth-meta :deep(.el-checkbox__label) {
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+/* 登录失败提示：表单内联、克制，不叠加全局 toast */
+.auth-error {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #b2352b;
 }
 
 .auth-hint {
