@@ -238,6 +238,8 @@ const savePassword = async () => {
     store.logout()
     tabs.value = []
     router.push('/login')
+  } catch {
+    /* 错误提示由请求拦截器统一弹出，避免未处理的 Promise 拒绝 */
   } finally {
     pwdSaving.value = false
   }

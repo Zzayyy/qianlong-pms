@@ -121,6 +121,8 @@ const savePermissions = async () => {
     // 可能改到自己所属角色，刷新一次当前用户权限
     await store.loadProfile()
     await load()
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
   } finally {
     saving.value = false
   }
@@ -154,18 +156,22 @@ const submitCreate = async () => {
     ElMessage.warning('请输入角色名称')
     return
   }
-  const created = await createRole({
-    roleCode: createForm.roleCode,
-    roleName: createForm.roleName,
-    dataScope: createForm.dataScope,
-    customDeptIds: createForm.customDeptIds.join(','),
-    sort: createForm.sort
-  })
-  createVisible.value = false
-  ElMessage.success('角色已创建')
-  await load()
-  currentId.value = created.id
-  await loadChecked(created.id)
+  try {
+    const created = await createRole({
+      roleCode: createForm.roleCode,
+      roleName: createForm.roleName,
+      dataScope: createForm.dataScope,
+      customDeptIds: createForm.customDeptIds.join(','),
+      sort: createForm.sort
+    })
+    createVisible.value = false
+    ElMessage.success('角色已创建')
+    await load()
+    currentId.value = created.id
+    await loadChecked(created.id)
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
+  }
 }
 
 const editVisible = ref(false)
@@ -196,16 +202,20 @@ const submitEdit = async () => {
     ElMessage.warning('请输入角色名称')
     return
   }
-  await updateRole(editForm.id, {
-    roleName: editForm.roleName,
-    dataScope: editForm.builtin ? undefined : editForm.dataScope,
-    customDeptIds: editForm.builtin ? undefined : editForm.customDeptIds.join(','),
-    sort: editForm.sort,
-    status: editForm.builtin ? undefined : editForm.status
-  })
-  editVisible.value = false
-  ElMessage.success('角色已更新')
-  await load()
+  try {
+    await updateRole(editForm.id, {
+      roleName: editForm.roleName,
+      dataScope: editForm.builtin ? undefined : editForm.dataScope,
+      customDeptIds: editForm.builtin ? undefined : editForm.customDeptIds.join(','),
+      sort: editForm.sort,
+      status: editForm.builtin ? undefined : editForm.status
+    })
+    editVisible.value = false
+    ElMessage.success('角色已更新')
+    await load()
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
+  }
 }
 
 const removeRole = async () => {
@@ -219,11 +229,15 @@ const removeRole = async () => {
   } catch {
     return
   }
-  await deleteRole(current.value.id)
-  ElMessage.success('角色已删除')
-  currentId.value = ''
-  checked.value = []
-  await load()
+  try {
+    await deleteRole(current.value.id)
+    ElMessage.success('角色已删除')
+    currentId.value = ''
+    checked.value = []
+    await load()
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
+  }
 }
 
 onMounted(load)

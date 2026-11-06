@@ -110,16 +110,20 @@ const openEdit = (row: any) => {
 }
 
 const saveEdit = async () => {
-  await updateUser(editForm.value.id, {
-    realName: editForm.value.realName,
-    deptId: editForm.value.deptId,
-    managerId: editForm.value.managerId || null,
-    mobile: editForm.value.mobile,
-    email: editForm.value.email
-  })
-  editVisible.value = false
-  ElMessage.success('人员信息已更新')
-  await load()
+  try {
+    await updateUser(editForm.value.id, {
+      realName: editForm.value.realName,
+      deptId: editForm.value.deptId,
+      managerId: editForm.value.managerId || null,
+      mobile: editForm.value.mobile,
+      email: editForm.value.email
+    })
+    editVisible.value = false
+    ElMessage.success('人员信息已更新')
+    await load()
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
+  }
 }
 
 const toggleStatus = async (row: any) => {
@@ -178,10 +182,20 @@ const openPwd = (row: any) => {
 }
 
 const doResetPwd = async () => {
-  await ElMessageBox.confirm(`确认重置「${pwdForm.value.realName}」的密码？`, '提示', { type: 'warning' })
-  await resetUserPassword(pwdForm.value.id, pwdForm.value.password)
-  pwdVisible.value = false
-  ElMessage.success('密码已重置并解锁')
+  try {
+    await ElMessageBox.confirm(`确认重置「${pwdForm.value.realName}」的密码？`, '提示', {
+      type: 'warning'
+    })
+  } catch {
+    return
+  }
+  try {
+    await resetUserPassword(pwdForm.value.id, pwdForm.value.password)
+    pwdVisible.value = false
+    ElMessage.success('密码已重置并解锁')
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
+  }
 }
 
 onMounted(async () => {
