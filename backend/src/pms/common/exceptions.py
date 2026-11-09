@@ -53,6 +53,13 @@ class DataForbiddenError(BizError):
         super().__init__(ErrorCode.DATA_FORBIDDEN, message)
 
 
+class PasswordChangeRequiredError(BizError):
+    """初始密码未修改，需先完成改密。"""
+
+    def __init__(self, message: str = "请先修改初始密码后再继续操作") -> None:
+        super().__init__(ErrorCode.PASSWORD_CHANGE_REQUIRED, message)
+
+
 class NotFoundError(BizError):
     """资源不存在或不可见（对外统一表述，避免信息泄漏）。"""
 

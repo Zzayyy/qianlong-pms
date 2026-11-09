@@ -14,7 +14,8 @@ export const useUserStore = defineStore('user', {
   getters: {
     isLogin: (state) => Boolean(state.token),
     permissions: (state) => state.profile?.permissions ?? [],
-    roles: (state) => state.profile?.roles ?? []
+    roles: (state) => state.profile?.roles ?? [],
+    mustChangePassword: (state) => Boolean(state.profile?.mustChangePassword)
   },
   actions: {
     async login(username: string, password: string) {

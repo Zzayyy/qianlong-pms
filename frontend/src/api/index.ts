@@ -10,6 +10,7 @@ export interface LoginResult {
   user: { id: string; username: string; realName: string; deptId: string; status: string }
   roles: string[]
   permissions: string[]
+  mustChangePassword?: boolean
 }
 
 export interface Profile {
@@ -23,6 +24,7 @@ export interface Profile {
   roles: string[]
   permissions: string[]
   allScope: boolean
+  mustChangePassword?: boolean
 }
 
 export const login = (username: string, password: string) =>

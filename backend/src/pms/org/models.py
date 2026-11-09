@@ -53,6 +53,7 @@ class SysUser(Base, CommonMixin):
     status: Mapped[str] = mapped_column(String(16), default="ENABLED")
     login_fail_count: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[str | None] = mapped_column(String(32), default=None)
+    must_change_password: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class SysRole(Base, CommonMixin):

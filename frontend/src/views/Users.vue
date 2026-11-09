@@ -472,11 +472,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <span v-else class="cell-muted">未分配</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="110" class-name="pms-mobile-hide">
+        <el-table-column label="状态" width="140" class-name="pms-mobile-hide">
           <template #default="{ row }">
             <span class="status-tags">
               <el-tag :type="row.status === 'ENABLED' ? 'success' : 'info'" size="small" effect="plain">
                 {{ row.status === 'ENABLED' ? '启用' : '停用' }}
+              </el-tag>
+              <el-tag v-if="row.mustChangePassword" type="warning" size="small" effect="plain">
+                待改密
               </el-tag>
               <el-tag v-if="isLocked(row)" type="danger" size="small" effect="plain">已锁定</el-tag>
             </span>
@@ -619,6 +622,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-input v-model="createForm.email" placeholder="选填" />
         </el-form-item>
       </el-form>
+      <p class="form-tip">新账号首次登录时会被要求修改初始密码。</p>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
         <el-button type="primary" @click="doCreate">创建</el-button>
@@ -730,7 +734,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-input v-model="pwdForm.password" show-password placeholder="输入新密码" />
         </el-form-item>
       </el-form>
-      <p class="form-tip">重置后该账号所有登录状态立即失效，需使用新密码重新登录。</p>
+      <p class="form-tip">
+        重置后该账号所有登录状态立即失效；使用新密码首次登录时，还需再设置一次自己的密码。
+      </p>
       <template #footer>
         <el-button @click="pwdVisible = false">取消</el-button>
         <el-button type="primary" @click="doResetPwd">确认重置</el-button>

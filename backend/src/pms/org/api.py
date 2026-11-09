@@ -52,6 +52,7 @@ class LoginOut(BaseModel):
     user: UserBrief
     roles: list[str]
     permissions: list[str]
+    mustChangePassword: bool = False
 
 
 class UserCreateIn(BaseModel):
@@ -197,6 +198,7 @@ async def login(
         ),
         roles=result.roles,
         permissions=result.permissions,
+        mustChangePassword=result.must_change_password,
     )
     return ok(payload)
 
@@ -245,6 +247,7 @@ async def profile(
             "roles": sorted(context.roles),
             "permissions": sorted(context.permissions),
             "allScope": context.is_all_scope,
+            "mustChangePassword": bool(user.must_change_password) if user is not None else False,
         }
     )
 
@@ -385,6 +388,7 @@ async def user_list(
             "email": user.email,
             "status": user.status,
             "lockedUntil": user.locked_until,
+            "mustChangePassword": bool(user.must_change_password),
             "roles": role_names.get(user.id, []),
         }
         for user in users

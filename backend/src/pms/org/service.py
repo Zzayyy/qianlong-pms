@@ -65,6 +65,7 @@ class LoginResult:
     dept_name: str
     roles: list[str]
     permissions: list[str]
+    must_change_password: bool = False
 
 
 async def resolve_user_permissions(session: AsyncSession, user_id: int) -> set[str]:
@@ -156,6 +157,7 @@ async def build_auth_payload(
         "dept": user.dept_id,
         "roles": role_codes,
         "mdepth": manager_depth,
+        "mustChangePassword": bool(user.must_change_password),
     }
     if visible is not None:
         payload["vdepts"] = sorted(visible)
@@ -216,6 +218,7 @@ async def authenticate(
         dept_name=dept_name,
         roles=list(payload.get("roles", [])),  # type: ignore[arg-type]
         permissions=sorted(permissions),
+        must_change_password=bool(user.must_change_password),
     )
 
 
@@ -517,6 +520,7 @@ async def create_user(
         manager_id=manager_id,
         mobile=mobile,
         email=email,
+        must_change_password=1,
         create_by=operator_id,
     )
     session.add(user)
@@ -625,6 +629,7 @@ async def reset_user_password(
     user.password_hash = hash_password(password)
     user.login_fail_count = 0
     user.locked_until = None
+    user.must_change_password = 1
     user.update_by = operator_id
     await session.flush()
     await bump_user_epoch(user_id)
@@ -653,6 +658,7 @@ async def change_password(
     user.password_hash = hash_password(new_password)
     user.login_fail_count = 0
     user.locked_until = None
+    user.must_change_password = 0
     user.update_by = user_id
     await session.flush()
     await bump_user_epoch(user_id)

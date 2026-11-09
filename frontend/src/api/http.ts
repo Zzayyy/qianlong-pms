@@ -45,6 +45,14 @@ http.interceptors.response.use(
     const status = error.response?.status ?? 0
     const body = error.response?.data
     const isLogin = error.config?.url?.includes('/auth/login') ?? false
+    // 初始密码未修改：保留登录态，引导到改密页
+    if (body?.code === 40303) {
+      if (!location.hash.startsWith('#/change-password')) {
+        ElMessage.warning(body.message || '请先修改初始密码')
+        location.href = '#/change-password'
+      }
+      return Promise.reject(error)
+    }
     if (status === 401 || body?.code === 40101 || body?.code === 40301) {
       localStorage.removeItem('pms_token')
       if (!location.hash.startsWith('#/login')) {

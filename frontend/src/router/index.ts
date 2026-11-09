@@ -5,6 +5,12 @@ import { useUserStore } from '@/stores/user'
 const routes: RouteRecordRaw[] = [
   { path: '/login', name: 'login', component: () => import('@/views/Login.vue') },
   {
+    path: '/change-password',
+    name: 'change-password',
+    component: () => import('@/views/ChangePassword.vue'),
+    meta: { title: '修改初始密码' }
+  },
+  {
     path: '/',
     component: () => import('@/layout/index.vue'),
     redirect: '/dashboard',
@@ -59,6 +65,14 @@ router.beforeEach(async (to) => {
       return { path: '/login' }
     }
   }
+  // 初始密码未修改：强制留在改密页，其余页面一律拦回
+  if (store.mustChangePassword) {
+    return to.path === '/change-password' ? true : { path: '/change-password' }
+  }
+  if (to.path === '/change-password') {
+    return { path: firstAccessiblePath((code) => store.has(code)) }
+  }
+
   // 页面级权限：无对应权限点时不进该页（后端仍会二次校验）
   const required = to.meta.permission as string | undefined
   if (required && !store.has(required)) {

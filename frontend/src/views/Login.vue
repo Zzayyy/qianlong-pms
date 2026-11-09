@@ -45,8 +45,12 @@ const onSubmit = () => {
       } else {
         localStorage.removeItem(REMEMBER_KEY)
       }
+      // 初始密码未修改时先强制改密，其余情况落在第一个有权限的菜单
+      if (store.mustChangePassword) {
+        router.push('/change-password')
+        return
+      }
       const redirect = (route.query.redirect as string) || ''
-      // 落地页取第一个有权限的菜单，避免直接落到 403
       router.push(redirect || firstAccessiblePath((code) => store.has(code)))
     } catch (error) {
       errorText.value = readError(error)

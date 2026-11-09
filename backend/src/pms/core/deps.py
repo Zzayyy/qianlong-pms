@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Final
 
 from fastapi import Depends, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pms.common.exceptions import ForbiddenError, UnauthorizedError
+from pms.common.exceptions import (
+    ForbiddenError,
+    PasswordChangeRequiredError,
+    UnauthorizedError,
+)
 from pms.core.context import AuthContext
 from pms.core.database import get_session
 from pms.core.redis import blacklist_contains, get_user_epoch
@@ -18,6 +22,15 @@ from pms.core.security import decode_access_token
 bearer_scheme = HTTPBearer(auto_error=False)
 
 TOKEN_SEPARATOR = " "
+
+# 初始密码未修改时，仅放行改密、查看本人信息与登出
+_PASSWORD_CHANGE_ALLOWLIST: Final[frozenset[str]] = frozenset(
+    {
+        "/api/v1/auth/password",
+        "/api/v1/auth/profile",
+        "/api/v1/auth/logout",
+    }
+)
 
 
 async def _extract_token(
@@ -51,6 +64,10 @@ async def get_current_user(
         token_epoch = -1
     if token_epoch != await get_user_epoch(user_id):
         raise UnauthorizedError("登录状态已变更，请重新登录")
+
+    # 初始密码未修改时只允许改密相关接口，前端会引导到改密页
+    if payload.get("mustChangePassword") and request.url.path not in _PASSWORD_CHANGE_ALLOWLIST:
+        raise PasswordChangeRequiredError()
 
     roles = frozenset(str(item) for item in payload.get("roles", []) or [])
     dept_id = int(str(payload.get("dept", "0")))
