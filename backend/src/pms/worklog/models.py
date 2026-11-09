@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Date, Integer, Numeric, String, Text
+from datetime import datetime
+
+from sqlalchemy import BigInteger, Date, DateTime, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pms.core.database import Base, CommonMixin
@@ -30,6 +32,7 @@ class WlWorklog(Base, CommonMixin):
     late_days: Mapped[int] = mapped_column(Integer, default=0)
     risk_flag: Mapped[int] = mapped_column(Integer, default=0)
     submit_time: Mapped[str | None] = mapped_column(Date, default=None)
+    submit_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     confirm_by: Mapped[int] = mapped_column(BigInteger, default=0)
     confirm_time: Mapped[str | None] = mapped_column(Date, default=None)
     reject_reason: Mapped[str] = mapped_column(String(500), default="")

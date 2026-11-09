@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Final
 
 from sqlalchemy import ColumnElement, func, or_, select, update
@@ -207,17 +207,36 @@ async def submit(session: AsyncSession, worklog_id: int, user_id: int = 0) -> Wl
 
     day = late_days(_as_date(worklog.log_date))
     late_max = await config.get_int("worklog.late.maxDays")
+    deadline_hour = max(
+        0, min(24, await config.get_int("worklog.daily.deadlineHour"))
+    )
+    confirm_required = await config.get_bool("worklog.confirm.required")
+    now = datetime.now()
+    same_day = now.date() == _as_date(worklog.log_date)
+    after_deadline = (
+        same_day
+        and deadline_hour < 24
+        and now.time() > time(hour=deadline_hour)
+    )
+    worklog.is_late = 1 if day > 0 or after_deadline else 0
+    worklog.late_days = day
+    worklog.submit_time = date.today()
+    worklog.submit_at = now
+    worklog.update_by = user_id
+
     if worklog.log_type == "PERSONAL":
         # 个人日志不进入团队确认队列，提交即生效
         worklog.status = WorklogStatus.CONFIRMED
         worklog.confirm_by = user_id or worklog.user_id
         worklog.confirm_time = date.today()
+    elif not confirm_required:
+        # 参数关闭确认：提交即确认，并立即回填任务工时/进度
+        worklog.status = WorklogStatus.CONFIRMED
+        worklog.confirm_by = user_id or worklog.user_id
+        worklog.confirm_time = date.today()
+        await _apply_confirm_effects(session, worklog, user_id or worklog.user_id)
     else:
         worklog.status = submit_status(day, late_max)
-    worklog.is_late = 1 if day > 0 else 0
-    worklog.late_days = day
-    worklog.submit_time = date.today()
-    worklog.update_by = user_id
     await session.flush()
     return worklog
 
@@ -322,16 +341,10 @@ async def project_names(
     return {int(project_id): str(name) for project_id, name in result.all()}
 
 
-async def confirm(session: AsyncSession, worklog_id: int, operator_id: int) -> WlWorklog:
-    """PM 确认：回填任务工时与进度、生成风险项、重算项目进度（07 §6）。"""
-    worklog = await _get(session, worklog_id)
-    if worklog.status not in _STATUS_CONFIRMABLE:
-        raise ConflictError(f"状态 {worklog.status} 不可确认")
-    worklog.status = WorklogStatus.CONFIRMED
-    worklog.confirm_by = operator_id
-    worklog.confirm_time = date.today()
-    worklog.update_by = operator_id
-
+async def _apply_confirm_effects(
+    session: AsyncSession, worklog: WlWorklog, operator_id: int
+) -> None:
+    """确认生效：回填任务工时/进度、生成风险项、重算项目进度。"""
     for item in await list_items(session, worklog.id):
         if item.task_id:
             task = await session.get(PrjTask, item.task_id)
@@ -356,6 +369,18 @@ async def confirm(session: AsyncSession, worklog_id: int, operator_id: int) -> W
     for item in await list_items(session, worklog.id):
         if item.project_id:
             await project_service.recalc_progress(session, item.project_id)
+
+
+async def confirm(session: AsyncSession, worklog_id: int, operator_id: int) -> WlWorklog:
+    """PM 确认：回填任务工时与进度、生成风险项、重算项目进度（07 §6）。"""
+    worklog = await _get(session, worklog_id)
+    if worklog.status not in _STATUS_CONFIRMABLE:
+        raise ConflictError(f"状态 {worklog.status} 不可确认")
+    worklog.status = WorklogStatus.CONFIRMED
+    worklog.confirm_by = operator_id
+    worklog.confirm_time = date.today()
+    worklog.update_by = operator_id
+    await _apply_confirm_effects(session, worklog, operator_id)
     return worklog
 
 
@@ -909,6 +934,10 @@ async def period_summary(
         sum(float(row.total_hours) for row in rows), limits.step
     )
     filled_days = len({row.log_date for row in rows if row.log_date})
+    late_days_set = {
+        row.log_date for row in rows if row.log_date and row.is_late
+    }
+    on_time_days = max(0, filled_days - len(late_days_set))
     today = date.today()
     calc_end = min(date_to, today)
     required_days = workdays_between(date_from, calc_end) if calc_end >= date_from else 0
@@ -922,6 +951,7 @@ async def period_summary(
         "filledDays": filled_days,
         "requiredDays": required_days,
         "fillRate": fill_rate(filled_days, required_days),
+        "onTimeRate": on_time_rate(on_time_days, filled_days),
         "avgHoursPerWorkday": (
             round(total_hours / required_days, 2) if required_days > 0 else 0.0
         ),

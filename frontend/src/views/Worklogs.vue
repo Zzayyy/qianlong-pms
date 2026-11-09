@@ -156,6 +156,7 @@ interface WorklogSummary {
   filledDays: number
   requiredDays: number
   fillRate: number
+  onTimeRate: number
   avgHoursPerWorkday: number
   lateCount: number
   warnHours: number
@@ -1056,7 +1057,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <div class="kpi">
             <span class="kpi-label">日志条数</span>
             <span class="kpi-value">{{ summary?.logCount ?? 0 }}<i>条</i></span>
-            <span class="kpi-sub">补填 {{ summary?.lateCount ?? 0 }} 条</span>
+            <span class="kpi-sub">
+              补填 {{ summary?.lateCount ?? 0 }} 条 · 及时率
+              {{ summary?.onTimeRate ?? 0 }}%
+            </span>
           </div>
           <div class="kpi">
             <span class="kpi-label">填报天数</span>
