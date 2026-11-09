@@ -586,6 +586,13 @@ async def change_user_status(
     if status not in _USER_STATUS:
         raise BizRuleError(f"非法的账号状态：{status}")
     user = await get_user(session, user_id)
+    if status == "DISABLED":
+        if user.id == operator_id:
+            raise BizRuleError("不能停用当前登录账号")
+        if await _has_admin_role(session, user.id) and (
+            await _remaining_enabled_admins(session, [user.id]) == 0
+        ):
+            raise BizRuleError("至少保留一个启用状态的管理员")
     user.status = status
     user.update_by = operator_id
     if status == "ENABLED":
@@ -660,6 +667,191 @@ async def unlock_user(session: AsyncSession, user_id: int, operator_id: int = 0)
     await session.flush()
     logger.info("账号已解锁：user=%s operator=%s", user_id, operator_id)
     return user
+
+
+async def _has_admin_role(session: AsyncSession, user_id: int) -> bool:
+    """判断用户是否持有 ADMIN 角色。"""
+    stmt = (
+        select(SysUserRole.id)
+        .join(SysRole, SysRole.id == SysUserRole.role_id)
+        .where(
+            SysUserRole.user_id == user_id,
+            SysUserRole.deleted == 0,
+            SysRole.deleted == 0,
+            SysRole.role_code == "ADMIN",
+        )
+    )
+    return (await session.execute(stmt)).first() is not None
+
+
+async def _remaining_enabled_admins(
+    session: AsyncSession, exclude_user_ids: list[int]
+) -> int:
+    """统计排除指定用户后，仍处于启用状态的 ADMIN 账号数。"""
+    stmt = (
+        select(func.count(func.distinct(SysUser.id)))
+        .select_from(SysUser)
+        .join(SysUserRole, SysUserRole.user_id == SysUser.id)
+        .join(SysRole, SysRole.id == SysUserRole.role_id)
+        .where(
+            SysRole.role_code == "ADMIN",
+            SysRole.deleted == 0,
+            SysUserRole.deleted == 0,
+            SysUser.deleted == 0,
+            SysUser.status == "ENABLED",
+            SysUser.id.notin_(exclude_user_ids),
+        )
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def delete_user(session: AsyncSession, user_id: int, operator_id: int = 0) -> None:
+    """逻辑删除用户（解除角色关联并使登录态失效）。
+
+    Raises:
+        NotFoundError: 用户不存在。
+        BizRuleError: 删除自己、或删除后没有可用的管理员。
+    """
+    user = await get_user(session, user_id)
+    if user.id == operator_id:
+        raise BizRuleError("不能删除当前登录账号")
+    if await _has_admin_role(session, user.id):
+        if await _remaining_enabled_admins(session, [user.id]) == 0:
+            raise BizRuleError("至少保留一个启用状态的管理员")
+    await _soft_delete_users(session, [user.id], operator_id)
+    logger.info("用户已删除：user=%s operator=%s", user_id, operator_id)
+
+
+async def batch_delete_users(
+    session: AsyncSession, user_ids: list[int], operator_id: int = 0
+) -> int:
+    """批量逻辑删除用户，返回删除数量。
+
+    Raises:
+        BizRuleError: 未选择用户、包含当前账号、或删除后管理员为空。
+        NotFoundError: 部分用户不存在。
+    """
+    ids = sorted({int(user_id) for user_id in user_ids})
+    if not ids:
+        raise BizRuleError("请选择要删除的用户")
+    if operator_id in ids:
+        raise BizRuleError("不能删除当前登录账号")
+    users = list(
+        (
+            await session.execute(
+                select(SysUser).where(SysUser.id.in_(ids), SysUser.deleted == 0)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(users) != len(ids):
+        raise NotFoundError("部分用户不存在或已删除")
+    admin_ids = [user.id for user in users if await _has_admin_role(session, user.id)]
+    if admin_ids and await _remaining_enabled_admins(session, ids) == 0:
+        raise BizRuleError("至少保留一个启用状态的管理员")
+    await _soft_delete_users(session, ids, operator_id)
+    logger.info("批量删除用户：%s 个 operator=%s", len(ids), operator_id)
+    return len(ids)
+
+
+async def _soft_delete_users(
+    session: AsyncSession, user_ids: list[int], operator_id: int
+) -> None:
+    """标记用户与其角色关联为删除，并使其令牌失效。"""
+    users = (
+        await session.execute(
+            select(SysUser).where(SysUser.id.in_(user_ids), SysUser.deleted == 0)
+        )
+    ).scalars()
+    for user in users.all():
+        user.deleted = 1
+        user.status = "DISABLED"
+        user.update_by = operator_id
+    relations = (
+        await session.execute(
+            select(SysUserRole).where(
+                SysUserRole.user_id.in_(user_ids), SysUserRole.deleted == 0
+            )
+        )
+    ).scalars()
+    for relation in relations.all():
+        relation.deleted = 1
+        relation.update_by = operator_id
+    await session.flush()
+    for user_id in user_ids:
+        await bump_user_epoch(user_id)
+
+
+async def batch_change_user_status(
+    session: AsyncSession, user_ids: list[int], status: str, operator_id: int = 0
+) -> int:
+    """批量启用/停用账号，返回处理数量。
+
+    Raises:
+        BizRuleError: 状态非法、未选择用户或包含当前账号。
+        NotFoundError: 部分用户不存在。
+    """
+    if status not in _USER_STATUS:
+        raise BizRuleError(f"非法的账号状态：{status}")
+    ids = sorted({int(user_id) for user_id in user_ids})
+    if not ids:
+        raise BizRuleError("请选择要操作的用户")
+    if status == "DISABLED" and operator_id in ids:
+        raise BizRuleError("不能停用当前登录账号")
+    users = list(
+        (
+            await session.execute(
+                select(SysUser).where(SysUser.id.in_(ids), SysUser.deleted == 0)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(users) != len(ids):
+        raise NotFoundError("部分用户不存在或已删除")
+    for user in users:
+        user.status = status
+        user.update_by = operator_id
+        if status == "ENABLED":
+            user.login_fail_count = 0
+            user.locked_until = None
+    await session.flush()
+    if status == "DISABLED":
+        for user in users:
+            await bump_user_epoch(user.id)
+    return len(users)
+
+
+async def list_user_manager_names(
+    session: AsyncSession, user_ids: list[int]
+) -> dict[int, str]:
+    """批量查询直属上级姓名（列表展示用）。"""
+    if not user_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(SysUser.id, SysUser.manager_id).where(
+                SysUser.id.in_(user_ids), SysUser.deleted == 0
+            )
+        )
+    ).all()
+    manager_ids = {int(manager_id) for _, manager_id in rows if manager_id}
+    if not manager_ids:
+        return {}
+    names = {
+        int(user_id): str(real_name)
+        for user_id, real_name in (
+            await session.execute(
+                select(SysUser.id, SysUser.real_name).where(SysUser.id.in_(manager_ids))
+            )
+        ).all()
+    }
+    return {
+        int(user_id): names[int(manager_id)]
+        for user_id, manager_id in rows
+        if manager_id and int(manager_id) in names
+    }
 
 
 async def list_user_role_ids(session: AsyncSession, user_id: int) -> list[int]:

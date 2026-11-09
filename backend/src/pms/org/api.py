@@ -64,6 +64,20 @@ class UserCreateIn(BaseModel):
     managerId: int | None = None
     mobile: str = ""
     email: str = ""
+    roleIds: list[int] = Field(default_factory=list)
+
+
+class BatchStatusIn(BaseModel):
+    """批量启停入参。"""
+
+    userIds: list[int] = Field(default_factory=list)
+    status: str = Field(min_length=4, max_length=16)
+
+
+class BatchIdsIn(BaseModel):
+    """批量删除入参。"""
+
+    userIds: list[int] = Field(default_factory=list)
 
 
 class AssignRolesIn(BaseModel):
@@ -355,13 +369,17 @@ async def user_list(
     users: list[SysUser] = await service.list_users(
         session, visible, keyword, pagination.offset, pagination.limit, dept_id
     )
-    role_names = await service.list_user_role_names(session, [user.id for user in users])
+    user_ids = [user.id for user in users]
+    role_names = await service.list_user_role_names(session, user_ids)
+    manager_names = await service.list_user_manager_names(session, user_ids)
     items = [
         {
             "id": user.id,
             "username": user.username,
             "realName": user.real_name,
             "deptId": user.dept_id,
+            "managerId": user.manager_id,
+            "managerName": manager_names.get(user.id, ""),
             "mobile": user.mobile,
             "email": user.email,
             "status": user.status,
@@ -379,7 +397,7 @@ async def user_create(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("org:user:manage"))],
 ) -> object:
-    """创建用户并校验用户名唯一。"""
+    """创建用户并校验用户名唯一（可同时分配角色，单事务完成）。"""
     user = await service.create_user(
         session,
         username=body.username,
@@ -391,6 +409,10 @@ async def user_create(
         email=body.email,
         operator_id=context.user_id,
     )
+    if body.roleIds:
+        await service.assign_roles(
+            session, user.id, body.roleIds, operator_id=context.user_id
+        )
     await session.commit()
     return ok({"id": user.id})
 
@@ -469,6 +491,46 @@ async def user_password(
     )
     await session.commit()
     return ok(message="密码已重置")
+
+
+@router.delete("/users/{user_id}", summary="删除用户")
+async def user_delete(
+    user_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("org:user:delete"))],
+) -> object:
+    """逻辑删除用户：解除角色关联、踢下线；不可删除自己或最后一个管理员。"""
+    await service.delete_user(session, user_id, operator_id=context.user_id)
+    await session.commit()
+    return ok(message="用户已删除")
+
+
+@router.post("/users/batch-status", summary="批量启停账号")
+async def user_batch_status(
+    body: BatchStatusIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("org:user:manage"))],
+) -> object:
+    """批量启用或停用账号（停用会立即踢下线）。"""
+    count = await service.batch_change_user_status(
+        session, body.userIds, body.status, operator_id=context.user_id
+    )
+    await session.commit()
+    return ok({"count": count})
+
+
+@router.post("/users/batch-delete", summary="批量删除用户")
+async def user_batch_delete(
+    body: BatchIdsIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("org:user:delete"))],
+) -> object:
+    """批量逻辑删除用户，任一校验不通过则整体回滚。"""
+    count = await service.batch_delete_users(
+        session, body.userIds, operator_id=context.user_id
+    )
+    await session.commit()
+    return ok({"count": count})
 
 
 @router.post("/users/{user_id}/roles", summary="分配角色")

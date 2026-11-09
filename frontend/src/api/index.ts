@@ -239,6 +239,17 @@ export const changeUserStatus = (id: string, status: string) =>
 /** 解除登录失败锁定（不重置密码）。 */
 export const unlockUser = (id: string) => post<{ id: string }>(`/users/${id}/unlock`)
 
+/** 删除用户（逻辑删除，需 org:user:delete）。 */
+export const deleteUser = (id: string) => del<null>(`/users/${id}`)
+
+/** 批量启用/停用。 */
+export const batchUserStatus = (userIds: string[], status: string) =>
+  post<{ count: number }>('/users/batch-status', { userIds, status })
+
+/** 批量删除（逻辑删除）。 */
+export const batchDeleteUsers = (userIds: string[]) =>
+  post<{ count: number }>('/users/batch-delete', { userIds })
+
 export const resetUserPassword = (id: string, password: string) =>
   put<null>(`/users/${id}/password`, { password })
 
