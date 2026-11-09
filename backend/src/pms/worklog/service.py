@@ -70,6 +70,7 @@ async def save_draft(
     *,
     log_date: str,
     worklog_id: int = 0,
+    log_type: str = "PROJECT",
     project_id: int = 0,
     task_id: int = 0,
     total_hours: float = 0,
@@ -82,10 +83,10 @@ async def save_draft(
 ) -> WlWorklog:
     """保存一条日志草稿（新增或按 `worklog_id` 更新）。
 
-    模型约定（v1.1.16 起）：
-    - **一条日志只对应一个项目 / 一个任务**，同一天多个项目请分别记录；
-    - `t_wl_item` 作为该日志的唯一任务明细，负责任务工时与进度回填；
-    - 兼容旧 `items` 入参，但最多只允许一条，且会以此覆盖主表项目/任务/工时；
+    模型约定（v1.1.17 起）：
+    - `log_type=PROJECT`：一条日志对应一个项目 / 一个任务，团队可见；
+    - `log_type=PERSONAL`：不绑定项目，默认仅本人可见，提交即生效；
+    - `t_wl_item` 仅用于项目日志的唯一任务明细；
     - 日期必须落在补填窗口内（默认最近 5 天，参数 `worklog.backfill.maxDays`）。
     """
     config = ConfigService(session)
@@ -97,12 +98,24 @@ async def save_draft(
         raise BizRuleError("；".join(errors))
 
     worklog: WlWorklog | None = None
+    log_type = (log_type or "PROJECT").upper()
+    if log_type not in {"PROJECT", "PERSONAL"}:
+        raise BizRuleError("日志类型无效")
+
     if worklog_id:
         worklog = await _get(session, worklog_id)
         if worklog.user_id != context.user_id:
             raise DataForbiddenError("只能修改自己的日志")
         if worklog.status not in _STATUS_EDITABLE:
             raise ConflictError(f"该日志状态为 {worklog.status}，不允许修改")
+
+    if log_type == "PERSONAL":
+        # 个人日志不绑定项目/任务，不参与项目工时与风险
+        project_id = 0
+        task_id = 0
+        progress_after = 0
+        risk_flag = False
+        items = None
 
     # 兼容明细入参：一条日志只允许一个任务明细，避免主表与明细口径不一致
     if items:
@@ -115,7 +128,8 @@ async def save_draft(
         content = str(payload.get("content", content) or content)
         progress_after = float(payload.get("progressAfter", progress_after) or progress_after)
 
-    await _ensure_project_target(session, context, project_id, task_id)
+    if log_type == "PROJECT":
+        await _ensure_project_target(session, context, project_id, task_id)
 
     hours = float(total_hours)
     items = []
@@ -145,6 +159,7 @@ async def save_draft(
         worklog.log_date = day
         worklog.status = WorklogStatus.DRAFT
 
+    worklog.log_type = log_type
     worklog.project_id = project_id
     worklog.task_id = task_id
     worklog.total_hours = round_hours(hours, step)
@@ -192,7 +207,13 @@ async def submit(session: AsyncSession, worklog_id: int, user_id: int = 0) -> Wl
 
     day = late_days(_as_date(worklog.log_date))
     late_max = await config.get_int("worklog.late.maxDays")
-    worklog.status = submit_status(day, late_max)
+    if worklog.log_type == "PERSONAL":
+        # 个人日志不进入团队确认队列，提交即生效
+        worklog.status = WorklogStatus.CONFIRMED
+        worklog.confirm_by = user_id or worklog.user_id
+        worklog.confirm_time = date.today()
+    else:
+        worklog.status = submit_status(day, late_max)
     worklog.is_late = 1 if day > 0 else 0
     worklog.late_days = day
     worklog.submit_time = date.today()
@@ -602,12 +623,15 @@ def _worklog_filters(
     date_to: str | None = None,
     status: str = "",
     keyword: str = "",
+    log_type: str = "",
     exclude_user_id: int = 0,
 ) -> list[ColumnElement[bool]]:
     """构造日志查询条件（列表与计数共用）。"""
     conditions: list[ColumnElement[bool]] = [WlWorklog.deleted == 0]
     if user_ids:
         conditions.append(WlWorklog.user_id.in_(user_ids))
+    if log_type:
+        conditions.append(WlWorklog.log_type == log_type)
     if exclude_user_id:
         conditions.append(WlWorklog.user_id != exclude_user_id)
     if project_id:
@@ -650,6 +674,7 @@ async def list_worklogs(
     date_to: str | None = None,
     status: str = "",
     keyword: str = "",
+    log_type: str = "",
     exclude_user_id: int = 0,
     offset: int = 0,
     limit: int = 0,
@@ -665,6 +690,7 @@ async def list_worklogs(
         date_to=date_to,
         status=status,
         keyword=keyword,
+        log_type=log_type,
         exclude_user_id=exclude_user_id,
     )
     stmt = (
@@ -687,6 +713,7 @@ async def count_worklogs(
     date_to: str | None = None,
     status: str = "",
     keyword: str = "",
+    log_type: str = "",
     exclude_user_id: int = 0,
 ) -> int:
     """按与列表一致的条件统计条数（本人日志分页用）。"""
@@ -697,6 +724,7 @@ async def count_worklogs(
         date_to=date_to,
         status=status,
         keyword=keyword,
+        log_type=log_type,
         exclude_user_id=exclude_user_id,
     )
     result = await session.execute(
@@ -708,7 +736,9 @@ async def count_worklogs(
 async def can_view(
     session: AsyncSession, context: AuthContext, worklog: WlWorklog
 ) -> bool:
-    """日志可见性：本人/下级/部门/项目组，并与项目可见性联动（07 §5）。"""
+    """日志可见性：个人日志仅本人；项目日志按本人/下级/部门/项目组规则。"""
+    if worklog.log_type == "PERSONAL":
+        return worklog.user_id == context.user_id
     config = ConfigService(session)
     items = await list_items(session, worklog.id)
     project_ids = {item.project_id for item in items if item.project_id}
@@ -856,7 +886,7 @@ async def period_summary(
     projects = [
         {
             "projectId": item["projectId"],
-            "projectName": names.get(int(item["projectId"]), "") or "非项目",
+            "projectName": names.get(int(item["projectId"]), "") or "个人 / 其他",
             "hours": round_hours(float(item["hours"]), limits.step),
             "logCount": item["logCount"],
         }

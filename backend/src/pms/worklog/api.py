@@ -30,6 +30,7 @@ class WorklogIn(BaseModel):
 
     id: int = 0
     logDate: str = Field(min_length=8, max_length=10)
+    logType: str = "PROJECT"
     projectId: int = 0
     taskId: int = 0
     totalHours: float = 0
@@ -81,6 +82,7 @@ def _out(
         "userName": user_name,
         "realName": real_name,
         "deptId": worklog.dept_id,
+        "logType": worklog.log_type,
         "projectId": worklog.project_id,
         "projectName": project_name,
         "taskId": worklog.task_id,
@@ -137,6 +139,7 @@ async def _save_worklog(
         context,
         worklog_id=body.id,
         log_date=body.logDate,
+        log_type=body.logType,
         project_id=body.projectId,
         task_id=body.taskId,
         total_hours=body.totalHours,
@@ -280,6 +283,7 @@ async def list_worklogs(
     projectId: Annotated[int | None, Query()] = None,
     status: Annotated[str, Query()] = "",
     keyword: Annotated[str, Query()] = "",
+    logType: Annotated[str, Query()] = "",
     excludeUserId: Annotated[int | None, Query()] = None,
     dateFrom: Annotated[str | None, Query()] = None,
     dateTo: Annotated[str | None, Query()] = None,
@@ -299,6 +303,7 @@ async def list_worklogs(
             date_to=dateTo,
             status=status,
             keyword=keyword,
+            log_type=logType,
         )
         rows = await service.list_worklogs(
             session,
@@ -308,6 +313,7 @@ async def list_worklogs(
             date_to=dateTo,
             status=status,
             keyword=keyword,
+            log_type=logType,
             offset=pagination.offset,
             limit=pagination.page_size,
         )
@@ -321,6 +327,7 @@ async def list_worklogs(
             date_to=dateTo,
             status=status,
             keyword=keyword,
+            log_type=logType,
             exclude_user_id=excludeUserId or 0,
             limit=0,
         )

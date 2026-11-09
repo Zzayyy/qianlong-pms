@@ -52,6 +52,7 @@ interface WorklogRow {
   userId: string
   userName: string
   realName: string
+  logType: string
   projectId: string
   projectName: string
   taskId: string
@@ -526,6 +527,7 @@ const formSaving = ref(false)
 const formSubmitting = ref(false)
 const form = reactive({
   id: '',
+  logType: 'PROJECT',
   logDate: localToday(),
   projectId: '',
   taskId: '',
@@ -541,6 +543,7 @@ const daySummary = ref<DaySummary | null>(null)
 const resetForm = () => {
   Object.assign(form, {
     id: '',
+    logType: 'PROJECT',
     logDate: localToday(),
     projectId: '',
     taskId: '',
@@ -552,6 +555,17 @@ const resetForm = () => {
     plan: ''
   })
   tasks.value = []
+}
+
+const switchLogType = (type: 'PROJECT' | 'PERSONAL') => {
+  form.logType = type
+  if (type === 'PERSONAL') {
+    form.projectId = ''
+    form.taskId = ''
+    form.progressAfter = 0
+    form.riskFlag = false
+    tasks.value = []
+  }
 }
 
 const openCreate = () => {
@@ -578,7 +592,7 @@ const openEdit = async (row: any) => {
       problem: worklog.problem || '',
       plan: worklog.plan || ''
     })
-    await loadTasks(form.projectId)
+    if (form.logType === 'PROJECT') await loadTasks(form.projectId)
     await loadDaySummary()
     formVisible.value = true
     detailVisible.value = false
@@ -613,7 +627,7 @@ const dayStrip = computed(() => {
 })
 
 const validateForm = () => {
-  if (!form.projectId) {
+  if (form.logType === 'PROJECT' && !form.projectId) {
     ElMessage.warning('请选择项目')
     return false
   }
@@ -634,16 +648,18 @@ const persistForm = async (submitAfter: boolean) => {
   if (submitAfter) formSubmitting.value = true
   else formSaving.value = true
   try {
+    const isProject = form.logType === 'PROJECT'
     const payload = {
+      logType: form.logType,
       logDate: form.logDate,
-      projectId: form.projectId,
-      taskId: form.taskId || 0,
+      projectId: isProject ? form.projectId : 0,
+      taskId: isProject ? form.taskId || 0 : 0,
       totalHours: Number(form.totalHours),
       content: form.content.trim(),
       problem: form.problem,
       plan: form.plan,
-      riskFlag: form.riskFlag,
-      progressAfter: Number(form.progressAfter)
+      riskFlag: isProject ? form.riskFlag : false,
+      progressAfter: isProject ? Number(form.progressAfter) : 0
     }
     const saved =
       formMode.value === 'edit' ? await updateWorklog(form.id, payload) : await saveWorklog(payload)
@@ -1158,9 +1174,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <el-table-column label="日期" width="110">
           <template #default="{ row }">{{ row.logDate }}</template>
         </el-table-column>
-        <el-table-column label="项目" min-width="170">
+        <el-table-column label="项目 / 类型" min-width="170">
           <template #default="{ row }">
-            <span class="project-cell">{{ row.projectName || '非项目' }}</span>
+            <el-tag v-if="row.logType === 'PERSONAL'" size="small" type="info" effect="plain">
+              个人
+            </el-tag>
+            <span v-else class="project-cell">{{ row.projectName || '非项目' }}</span>
           </template>
         </el-table-column>
         <el-table-column
@@ -1248,9 +1267,31 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       size="min(720px, 94vw)"
     >
       <div class="drawer-body">
-        <p class="form-hint">一条日志对应一个项目；同一天参与多个项目请分别填写多条。</p>
+        <div class="seg log-type-seg">
+          <button
+            type="button"
+            :class="{ 'is-active': form.logType === 'PROJECT' }"
+            @click="switchLogType('PROJECT')"
+          >
+            项目日志
+          </button>
+          <button
+            type="button"
+            :class="{ 'is-active': form.logType === 'PERSONAL' }"
+            @click="switchLogType('PERSONAL')"
+          >
+            个人日志
+          </button>
+        </div>
+        <p class="form-hint">
+          {{
+            form.logType === 'PROJECT'
+              ? '一条项目日志对应一个项目；同一天参与多个项目请分别填写多条。'
+              : '个人日志不绑定项目，仅本人可见，提交后直接生效。'
+          }}
+        </p>
         <el-alert
-          v-if="!options.projects.length"
+          v-if="form.logType === 'PROJECT' && !options.projects.length"
           type="info"
           :closable="false"
           show-icon
@@ -1269,7 +1310,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               @change="loadDaySummary"
             />
           </div>
-          <div class="field">
+          <div v-if="form.logType === 'PROJECT'" class="field">
             <label>项目 <em>*</em></label>
             <el-select v-model="form.projectId" filterable placeholder="选择我参与的项目" @change="onProjectChange">
               <el-option
@@ -1280,7 +1321,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               />
             </el-select>
           </div>
-          <div class="field">
+          <div v-if="form.logType === 'PROJECT'" class="field">
             <label>任务</label>
             <el-select v-model="form.taskId" filterable clearable placeholder="可选，选择所属任务">
               <el-option v-for="item in tasks" :key="String(item.id)" :label="item.taskName" :value="String(item.id)" />
@@ -1295,11 +1336,11 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               :max="Number(options.maxHours || 24)"
             />
           </div>
-          <div class="field">
+          <div v-if="form.logType === 'PROJECT'" class="field">
             <label>任务进度（%）</label>
             <el-input-number v-model="form.progressAfter" :min="0" :max="100" />
           </div>
-          <div class="field">
+          <div v-if="form.logType === 'PROJECT'" class="field">
             <label>风险标记</label>
             <el-switch v-model="form.riskFlag" active-text="存在风险" />
           </div>
@@ -1373,6 +1414,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               </p>
             </div>
             <div class="detail-tags">
+              <el-tag v-if="detail.worklog.logType === 'PERSONAL'" type="info" effect="plain">
+                个人
+              </el-tag>
               <el-tag :type="statusMeta(detail.worklog.status).type">
                 {{ statusMeta(detail.worklog.status).label }}
               </el-tag>
@@ -2175,6 +2219,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 /* ---------------- 填写抽屉 ---------------- */
 .drawer-body {
   padding: 4px 20px 20px;
+}
+
+.log-type-seg {
+  margin-bottom: 12px;
 }
 
 .form-hint {

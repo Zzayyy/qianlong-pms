@@ -10,13 +10,14 @@ from pms.worklog.rules import WorklogStatus
 
 
 class WlWorklog(Base, CommonMixin):
-    """日志主表 `t_wl_worklog`（一人一天可多条，每条对应一个项目，R-LOG-02）。"""
+    """日志主表 `t_wl_worklog`（项目日志 / 个人日志，一人一天可多条）。"""
 
     __tablename__ = "t_wl_worklog"
 
     worklog_no: Mapped[str] = mapped_column(String(32), default="")
     user_id: Mapped[int] = mapped_column(BigInteger, default=0)
     dept_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    log_type: Mapped[str] = mapped_column(String(16), default="PROJECT")
     project_id: Mapped[int] = mapped_column(BigInteger, default=0)
     task_id: Mapped[int] = mapped_column(BigInteger, default=0)
     log_date: Mapped[str | None] = mapped_column(Date, default=None)
