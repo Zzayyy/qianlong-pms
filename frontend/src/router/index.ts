@@ -22,7 +22,8 @@ const routes: RouteRecordRaw[] = [
       { path: 'projects', name: 'projects', component: () => import('@/views/Projects.vue'), meta: { title: '项目周期', permission: 'project:view' } },
       { path: 'changes', name: 'changes', component: () => import('@/views/Changes.vue'), meta: { title: '变更管理', permission: 'change:view' } },
       { path: 'worklogs', name: 'worklogs', component: () => import('@/views/Worklogs.vue'), meta: { title: '工作日志', permission: 'worklog:view' } },
-      { path: 'reports', name: 'reports', component: () => import('@/views/Reports.vue'), meta: { title: '统计看板', permission: 'report:view' } },
+      { path: 'dept-board', name: 'dept-board', component: () => import('@/views/Reports.vue'), meta: { title: '部门看板', permission: 'report:view' } },
+      { path: 'reports', redirect: '/dept-board' },
       { path: 'crm', name: 'crm', component: () => import('@/views/Crm.vue'), meta: { title: '客户与商机', permission: 'crm:customer:view' } },
       { path: 'configs', name: 'configs', component: () => import('@/views/Configs.vue'), meta: { title: '规则参数', permission: 'sys:config' } },
       { path: 'audit', name: 'audit', component: () => import('@/views/Audit.vue'), meta: { title: '审计留痕', permission: 'sys:log:view' } },
@@ -36,6 +37,8 @@ const layoutRoute = routes.find((route) => route.path === '/')
 /** 按权限点找到第一个可访问的页面（登录落地页 / 403 兜底）。 */
 export const firstAccessiblePath = (has: (code: string) => boolean): string => {
   for (const child of layoutRoute?.children ?? []) {
+    // 兼容旧地址的重定向路由不作为落地页候选
+    if ('redirect' in child) continue
     const permission = child.meta?.permission as string | undefined
     if (!permission || has(permission)) {
       return `/${String(child.path)}`

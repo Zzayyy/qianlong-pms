@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Final
 
-from sqlalchemy import ColumnElement, func, or_, select
+from sqlalchemy import ColumnElement, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pms.common.exceptions import (
@@ -416,16 +416,68 @@ async def create_reminder(
 
 
 async def list_reminders(
-    session: AsyncSession, user_id: int | None = None, status: str = ""
+    session: AsyncSession,
+    user_id: int | None = None,
+    status: str = "",
+    *,
+    offset: int = 0,
+    limit: int = 0,
 ) -> list[WlReminder]:
-    """催办列表。"""
+    """催办列表（`limit <= 0` 表示不限制数量）。"""
     stmt = select(WlReminder).where(WlReminder.deleted == 0)
     if user_id:
         stmt = stmt.where(WlReminder.user_id == user_id)
     if status:
         stmt = stmt.where(WlReminder.status == status)
-    result = await session.execute(stmt.order_by(WlReminder.id.desc()))
+    stmt = stmt.order_by(WlReminder.id.desc())
+    if limit > 0:
+        stmt = stmt.offset(offset).limit(limit)
+    result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def count_reminders(
+    session: AsyncSession, user_id: int | None = None, status: str = ""
+) -> int:
+    """催办记录数量。"""
+    stmt = select(func.count(WlReminder.id)).where(WlReminder.deleted == 0)
+    if user_id:
+        stmt = stmt.where(WlReminder.user_id == user_id)
+    if status:
+        stmt = stmt.where(WlReminder.status == status)
+    result = await session.execute(stmt)
+    return int(result.scalar_one() or 0)
+
+
+async def mark_reminder_read(
+    session: AsyncSession, reminder_id: int, user_id: int
+) -> WlReminder:
+    """标记本人催办已读。"""
+    reminder = await session.get(WlReminder, reminder_id)
+    if reminder is None or reminder.deleted:
+        raise NotFoundError("催办记录不存在")
+    if reminder.user_id != user_id:
+        raise DataForbiddenError("只能处理自己的催办提醒")
+    if reminder.status != "READ":
+        reminder.status = "READ"
+        reminder.update_by = user_id
+        await session.flush()
+    return reminder
+
+
+async def mark_all_reminders_read(session: AsyncSession, user_id: int) -> int:
+    """把本人全部待处理催办标记为已读。"""
+    result = await session.execute(
+        update(WlReminder)
+        .where(
+            WlReminder.user_id == user_id,
+            WlReminder.status == "OPEN",
+            WlReminder.deleted == 0,
+        )
+        .values(status="READ", update_by=user_id)
+    )
+    await session.flush()
+    return int(result.rowcount or 0)
 
 
 def _worklog_filters(

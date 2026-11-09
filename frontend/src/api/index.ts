@@ -192,9 +192,23 @@ export const worklogComments = (id: string) =>
 export const addWorklogComment = (id: string, content: string) =>
   post<{ id: string }>(`/worklogs/${id}/comments`, { content })
 
+/** 日志催办提醒（默认本人待处理）。 */
+export const worklogReminders = (params: Record<string, unknown>) =>
+  get<Page<Record<string, unknown>>>('/worklogs/reminders', params)
+
+export const readWorklogReminder = (id: string) =>
+  post<{ id: string; status: string }>(`/worklogs/reminders/${id}/read`)
+
+export const readAllWorklogReminders = () =>
+  post<{ count: number }>('/worklogs/reminders/read-all')
+
 /* ------------------------------ 看板 ------------------------------ */
 
 export const companyBoard = () => get<Record<string, unknown>>('/reports/company')
+
+/** 当前用户数据范围内可查看的部门（部门看板筛选）。 */
+export const reportDepts = () =>
+  get<{ id: string; parentId: string; deptName: string }[]>('/reports/depts')
 
 export const deptBoard = (deptIds: string[]) =>
   get<Record<string, unknown>>('/reports/dept', { deptIds: deptIds.join(',') })

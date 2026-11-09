@@ -399,6 +399,55 @@ async def stats(
     return ok(data)
 
 
+@router.get("/reminders", summary="催办列表")
+async def reminders(
+    pagination: Annotated[Pagination, Depends(get_pagination)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:view"))],
+    status: Annotated[str, Query()] = "OPEN",
+    userId: Annotated[int | None, Query()] = None,
+) -> object:
+    """查看催办提醒：默认本人待处理，管理员可查看指定用户。
+
+    注：必须定义在 `/{worklog_id}` 之前，否则会被路径参数路由抢先匹配。
+    """
+    target = userId or context.user_id
+    if target != context.user_id and not (
+        context.is_privileged
+        or context.is_dept_head
+        or context.has_permission("worklog:manage")
+    ):
+        raise DataForbiddenError("无该用户催办查看权限")
+    total = await service.count_reminders(session, user_id=target, status=status)
+    rows = await service.list_reminders(
+        session,
+        user_id=target,
+        status=status,
+        offset=pagination.offset,
+        limit=pagination.page_size,
+    )
+    users = await service.user_names(session, {row.user_id for row in rows})
+    return paged(
+        [
+            {
+                "id": row.id,
+                "userId": row.user_id,
+                "userName": users.get(row.user_id, ("", ""))[0],
+                "realName": users.get(row.user_id, ("", ""))[1],
+                "logDate": row.log_date.isoformat() if row.log_date else "",
+                "remindType": row.remind_type,
+                "content": row.content,
+                "status": row.status,
+                "createTime": row.create_time.isoformat() if row.create_time else "",
+            }
+            for row in rows
+        ],
+        total,
+        pagination.page_num,
+        pagination.page_size,
+    )
+
+
 @router.get("/{worklog_id}", summary="日志详情")
 async def detail(
     worklog_id: int,
@@ -484,6 +533,29 @@ async def comments(
             for row in rows
         ]
     )
+
+
+@router.post("/reminders/read-all", summary="全部催办已读")
+async def read_all_reminders(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:view"))],
+) -> object:
+    """把本人全部待处理催办标记为已读。"""
+    count = await service.mark_all_reminders_read(session, context.user_id)
+    await session.commit()
+    return ok({"count": count})
+
+
+@router.post("/reminders/{reminder_id}/read", summary="催办已读")
+async def read_reminder(
+    reminder_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:view"))],
+) -> object:
+    """标记本人某条催办已读。"""
+    row = await service.mark_reminder_read(session, reminder_id, context.user_id)
+    await session.commit()
+    return ok({"id": row.id, "status": row.status})
 
 
 @router.post("/reminders", summary="催办")

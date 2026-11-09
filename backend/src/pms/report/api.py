@@ -6,11 +6,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pms.common.exceptions import DataForbiddenError
 from pms.common.response import ok
 from pms.core.context import AuthContext
 from pms.core.deps import get_session, require_permissions
+from pms.org.models import SysDept
 from pms.report import service
 
 router = APIRouter(prefix="/api/v1/reports", tags=["统计看板"])
@@ -31,16 +34,44 @@ async def company(
     return ok(await service.company_dashboard(session))
 
 
+@router.get("/depts", summary="看板可选部门")
+async def depts(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("report:view"))],
+) -> object:
+    """返回当前用户数据范围内可查看的部门（部门看板筛选器数据源）。"""
+    result = await session.execute(
+        select(SysDept)
+        .where(SysDept.deleted == 0)
+        .order_by(SysDept.level, SysDept.sort, SysDept.id)
+    )
+    rows = [
+        {
+            "id": dept.id,
+            "parentId": dept.parent_id,
+            "deptName": dept.dept_name,
+        }
+        for dept in result.scalars().all()
+        if context.can_see_dept(dept.id)
+    ]
+    return ok(rows)
+
+
 @router.get("/dept", summary="部门看板")
 async def dept(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("report:view"))],
     deptIds: Annotated[str, Query()] = "",
 ) -> object:
-    """按部门看板；不传 `deptIds` 时按当前用户可见部门。"""
+    """按部门看板；不传 `deptIds` 时默认当前用户所属部门。
+
+    仅允许查看数据范围内的部门，越权查询返回 40302。
+    """
     ids = [int(item) for item in deptIds.split(",") if item.strip().isdigit()]
     if not ids:
         ids = [context.dept_id]
+    if any(not context.can_see_dept(dept_id) for dept_id in ids):
+        raise DataForbiddenError("无该部门看板访问权限")
     return ok(await service.dept_dashboard(session, ids))
 
 

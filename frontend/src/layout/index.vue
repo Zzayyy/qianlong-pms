@@ -60,7 +60,10 @@ const navSections: NavSection[] = [
   {
     key: 'overview',
     label: '概览',
-    items: [{ path: '/dashboard', label: '公司看板', icon: LayoutDashboard, permission: 'report:view' }]
+    items: [
+      { path: '/dashboard', label: '公司看板', icon: LayoutDashboard, permission: 'report:view' },
+      { path: '/dept-board', label: '部门看板', icon: BarChart3, permission: 'report:view' }
+    ]
   },
   {
     key: 'project',
@@ -79,8 +82,7 @@ const navSections: NavSection[] = [
     key: 'collab',
     label: '协同',
     items: [
-      { path: '/worklogs', label: '工作日志', icon: NotebookPen, permission: 'worklog:view' },
-      { path: '/reports', label: '统计看板', icon: BarChart3, permission: 'report:view' }
+      { path: '/worklogs', label: '工作日志', icon: NotebookPen, permission: 'worklog:view' }
     ]
   },
   {

@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Bell } from 'lucide-vue-next'
 import {
   addWorklogComment,
   deleteWorklog,
   listTasks,
   listWorklogs,
+  readAllWorklogReminders,
+  readWorklogReminder,
   saveWorklog,
   updateWorklog,
   worklogAction,
@@ -13,6 +16,7 @@ import {
   worklogDaySummary,
   worklogDetail,
   worklogOptions,
+  worklogReminders,
   worklogSummary
 } from '@/api'
 import { useUserStore } from '@/stores/user'
@@ -100,6 +104,18 @@ interface DayPoint {
   date: string
   hours: number
   count: number
+}
+
+interface ReminderRow {
+  id: string
+  userId: string
+  userName: string
+  realName: string
+  logDate: string
+  remindType: string
+  content: string
+  status: string
+  createTime: string
 }
 
 interface ProjectHours {
@@ -223,6 +239,80 @@ const loadToday = async () => {
     todaySummary.value = (await worklogDaySummary(localToday())) as unknown as DaySummary
   } catch {
     todaySummary.value = null
+  }
+}
+
+/* ------------------------------ 催办提醒 ------------------------------ */
+const reminderBadge = ref<ReminderRow[]>([])
+const openReminderCount = ref(0)
+const reminderVisible = ref(false)
+const reminderLoading = ref(false)
+const reminderRows = ref<ReminderRow[]>([])
+const reminderTotal = ref(0)
+const reminderOnlyOpen = ref(true)
+const reminderPage = reactive({ pageNum: 1, pageSize: 10 })
+
+const latestReminder = computed(() => reminderBadge.value[0] || null)
+
+const loadReminderBadge = async () => {
+  try {
+    const data = await worklogReminders({ status: 'OPEN', pageNum: 1, pageSize: 5 })
+    reminderBadge.value = (data.list || []) as unknown as ReminderRow[]
+    openReminderCount.value = Number(data.total || 0)
+  } catch {
+    openReminderCount.value = 0
+  }
+}
+
+const loadReminderList = async () => {
+  reminderLoading.value = true
+  try {
+    const data = await worklogReminders({
+      status: reminderOnlyOpen.value ? 'OPEN' : '',
+      pageNum: reminderPage.pageNum,
+      pageSize: reminderPage.pageSize
+    })
+    reminderRows.value = (data.list || []) as unknown as ReminderRow[]
+    reminderTotal.value = Number(data.total || 0)
+  } catch {
+    reminderRows.value = []
+  } finally {
+    reminderLoading.value = false
+  }
+}
+
+const openReminders = () => {
+  reminderVisible.value = true
+  reminderPage.pageNum = 1
+  loadReminderList()
+}
+
+const switchReminderFilter = (onlyOpen: boolean) => {
+  reminderOnlyOpen.value = onlyOpen
+  reminderPage.pageNum = 1
+  loadReminderList()
+}
+
+const markReminderRead = async (row: ReminderRow) => {
+  try {
+    await readWorklogReminder(row.id)
+    ElMessage.success('已标记为已读')
+    await Promise.all([loadReminderBadge(), loadReminderList()])
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
+  }
+}
+
+const readAllReminders = async () => {
+  try {
+    const result = await readAllWorklogReminders()
+    const count = Number(result.count || 0)
+    if (count > 0) ElMessage.success(`已处理 ${count} 条催办`)
+    else ElMessage.info('没有待处理的催办')
+    reminderPage.pageNum = 1
+    await Promise.all([loadReminderBadge(), loadReminderList()])
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
   }
 }
 
@@ -570,7 +660,7 @@ const addComment = async () => {
 
 /* ------------------------------ 列表操作 ------------------------------ */
 const refreshAll = async () => {
-  await Promise.all([loadLogs(), loadSummary(), loadToday()])
+  await Promise.all([loadLogs(), loadSummary(), loadToday(), loadReminderBadge()])
   if (formVisible.value) await loadDaySummary()
   if (detailVisible.value && detailWorklog.value) await reloadDetail(detailWorklog.value.id)
 }
@@ -675,7 +765,7 @@ const rejectDetail = async () => {
 onMounted(() => {
   syncWidth()
   window.addEventListener('resize', syncWidth)
-  Promise.all([loadOptions(), loadLogs(), loadSummary(), loadToday()])
+  Promise.all([loadOptions(), loadLogs(), loadSummary(), loadToday(), loadReminderBadge()])
 })
 
 onUnmounted(() => window.removeEventListener('resize', syncWidth))
@@ -696,6 +786,20 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       <div class="head-ops">
         <el-button :loading="listLoading || summaryLoading" @click="refreshAll">刷新</el-button>
         <el-button v-if="canCreate" type="primary" @click="openCreate">写日志</el-button>
+      </div>
+    </div>
+
+    <div v-if="openReminderCount" class="pms-card reminder-strip">
+      <div class="reminder-copy">
+        <span class="reminder-icon"><Bell :size="16" :stroke-width="1.9" /></span>
+        <div class="reminder-text">
+          <b>你有 {{ openReminderCount }} 条日志催办待处理</b>
+          <p>{{ latestReminder?.content || '请尽快补填工作日志' }}</p>
+        </div>
+      </div>
+      <div class="reminder-actions">
+        <el-button link type="primary" @click="openReminders">查看提醒</el-button>
+        <el-button link type="warning" @click="readAllReminders">全部已读</el-button>
       </div>
     </div>
 
@@ -1151,6 +1255,86 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </div>
       </template>
     </el-drawer>
+
+    <el-drawer v-model="reminderVisible" title="催办提醒" size="min(520px, 94vw)">
+      <div class="reminder-panel">
+        <div class="reminder-toolbar">
+          <div class="seg">
+            <button
+              type="button"
+              :class="{ 'is-active': reminderOnlyOpen }"
+              @click="switchReminderFilter(true)"
+            >
+              待处理
+            </button>
+            <button
+              type="button"
+              :class="{ 'is-active': !reminderOnlyOpen }"
+              @click="switchReminderFilter(false)"
+            >
+              全部
+            </button>
+          </div>
+          <span class="reminder-total">共 {{ reminderTotal }} 条</span>
+        </div>
+
+        <div v-loading="reminderLoading" class="reminder-list">
+          <div
+            v-for="item in reminderRows"
+            :key="String(item.id)"
+            class="reminder-item"
+            :class="{ 'is-read': item.status === 'READ' }"
+          >
+            <div class="ri-head">
+              <el-tag
+                size="small"
+                effect="plain"
+                :type="item.status === 'READ' ? 'info' : 'warning'"
+              >
+                {{ item.status === 'READ' ? '已读' : '待处理' }}
+              </el-tag>
+              <span class="ri-date">{{ item.logDate }}</span>
+              <span class="ri-type">{{ item.remindType === 'AUTO' ? '系统催办' : '手动催办' }}</span>
+            </div>
+            <p class="ri-content">{{ item.content || '请补填工作日志' }}</p>
+            <div class="ri-foot">
+              <span>{{ timeText(item.createTime) }}</span>
+              <el-button
+                v-if="item.status === 'OPEN'"
+                link
+                type="primary"
+                @click="markReminderRead(item)"
+              >
+                标记已读
+              </el-button>
+            </div>
+          </div>
+          <el-empty
+            v-if="!reminderRows.length && !reminderLoading"
+            description="没有催办提醒"
+            :image-size="64"
+          />
+        </div>
+
+        <el-pagination
+          v-model:current-page="reminderPage.pageNum"
+          v-model:page-size="reminderPage.pageSize"
+          :total="reminderTotal"
+          :layout="isNarrow ? 'prev, pager, next' : 'prev, pager, next, total'"
+          class="pager"
+          @current-change="loadReminderList"
+        />
+      </div>
+      <template #footer>
+        <div class="drawer-footer">
+          <span class="footer-spacer"></span>
+          <el-button v-if="reminderOnlyOpen && reminderTotal" @click="readAllReminders">
+            全部已读
+          </el-button>
+          <el-button @click="reminderVisible = false">关闭</el-button>
+        </div>
+      </template>
+    </el-drawer>
   </div>
 </template>
 
@@ -1190,6 +1374,131 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   align-items: center;
   gap: 8px;
   margin-left: auto;
+}
+
+/* ---------------- 催办提醒 ---------------- */
+.reminder-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  border-color: #f3e3c6;
+  background: #fffbf2;
+}
+
+.reminder-copy {
+  flex: 1 1 360px;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.reminder-icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #fff2d8;
+  color: #b8770f;
+}
+
+.reminder-text {
+  min-width: 0;
+}
+
+.reminder-text b {
+  font-size: 13.5px;
+  color: var(--pms-text);
+}
+
+.reminder-text p {
+  margin: 3px 0 0;
+  overflow: hidden;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--pms-text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reminder-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.reminder-panel {
+  padding: 4px 20px 20px;
+}
+
+.reminder-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.reminder-total {
+  font-size: 12.5px;
+  color: var(--pms-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.reminder-list {
+  display: grid;
+  gap: 10px;
+  min-height: 120px;
+}
+
+.reminder-item {
+  padding: 12px;
+  border: 1px solid var(--pms-line);
+  border-radius: 10px;
+  background: #fffdf7;
+}
+
+.reminder-item.is-read {
+  background: #fafbfe;
+}
+
+.ri-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--pms-text-3);
+}
+
+.ri-date {
+  font-weight: 500;
+  color: var(--pms-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.ri-type {
+  margin-left: auto;
+}
+
+.ri-content {
+  margin: 8px 0 6px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--pms-text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ri-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: var(--pms-text-3);
 }
 
 /* ---------------- 工时概览 ---------------- */
@@ -1726,6 +2035,20 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     width: 100%;
     margin-left: 0;
     justify-content: flex-end;
+  }
+
+  .reminder-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+  }
+
+  .reminder-text p {
+    white-space: normal;
+  }
+
+  .reminder-panel {
+    padding: 4px 14px 16px;
   }
 
   .kpi-grid {
