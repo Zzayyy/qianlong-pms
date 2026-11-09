@@ -15,6 +15,7 @@ from pms.audit.archive import DEFAULT_KEEP_MONTHS, archive_audit
 from pms.audit.lock import DEFAULT_TTL_SECONDS, acquire, release
 from pms.common.logging import get_logger
 from pms.core.database import get_session_factory
+from pms.notice import service as notice_service
 from pms.org.models import SysUser
 from pms.report import service as report_service
 from pms.system.config_service import ConfigService
@@ -61,8 +62,11 @@ async def run_exclusive(
             await release(session, lock_name)
 
 
-async def job_remind_worklogs(day: str | None = None) -> int:
-    """日志催办：为「上一工作日未提交日志」的在岗用户生成催办记录（T+1 触发）。"""
+async def job_remind_worklogs(day: str | None = None, *, notify: bool = False) -> int:
+    """日志催办：为「上一工作日未提交日志」的在岗用户生成催办记录（T+1 触发）。
+
+    `notify=True` 时同时写入站内通知；调度器执行时开启，测试/脚本默认只记录催办。
+    """
     target = date.fromisoformat(day) if day else date.today() - timedelta(days=1)
     if is_weekend(target):
         logger.info("催办跳过：%s 为非工作日", target)
@@ -103,13 +107,24 @@ async def job_remind_worklogs(day: str | None = None) -> int:
             ).scalar_one_or_none()
             if duplicated is not None:
                 continue
-            await worklog_service.create_reminder(
+            content = f"请补填 {day_text} 的工作日志"
+            reminder = await worklog_service.create_reminder(
                 session,
                 user_id=user.id,
                 log_date=day_text,
                 remind_type="AUTO",
-                content=f"请补填 {day_text} 的工作日志",
+                content=content,
             )
+            if notify:
+                await notice_service.create_notice(
+                    session,
+                    receiver_id=user.id,
+                    title="工作日志催办",
+                    content=content,
+                    notice_type="REMINDER",
+                    biz_type="WORKLOG_REMINDER",
+                    biz_id=reminder.id,
+                )
             count += 1
         await session.commit()
     logger.info("日志催办完成：新增 %s 条（%s）", count, day_text)
@@ -178,8 +193,10 @@ async def job_archive_audit(keep_months: int | None = None) -> dict[str, Any]:
 
 
 async def _remind_exclusive() -> Any:
-    """日志催办（带分布式锁）。"""
-    return await run_exclusive("worklog_remind", job_remind_worklogs)
+    """日志催办（带分布式锁，同时推送站内通知）。"""
+    return await run_exclusive(
+        "worklog_remind", lambda: job_remind_worklogs(notify=True)
+    )
 
 
 async def _aggregate_exclusive() -> Any:

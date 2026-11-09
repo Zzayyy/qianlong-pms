@@ -189,8 +189,11 @@ export const worklogStats = (params: Record<string, unknown>) =>
 export const worklogComments = (id: string) =>
   get<Record<string, unknown>[]>(`/worklogs/${id}/comments`)
 
-export const addWorklogComment = (id: string, content: string) =>
-  post<{ id: string }>(`/worklogs/${id}/comments`, { content })
+export const addWorklogComment = (id: string, content: string, parentId: string | number = 0) =>
+  post<{ id: string; parentId: string }>(`/worklogs/${id}/comments`, { content, parentId })
+
+export const deleteWorklogComment = (worklogId: string, commentId: string) =>
+  del<{ id: string }>(`/worklogs/${worklogId}/comments/${commentId}`)
 
 /** 日志催办提醒（默认本人待处理）。 */
 export const worklogReminders = (params: Record<string, unknown>) =>
@@ -201,6 +204,40 @@ export const readWorklogReminder = (id: string) =>
 
 export const readAllWorklogReminders = () =>
   post<{ count: number }>('/worklogs/reminders/read-all')
+
+/** 指定日期待催办人员（需 worklog:manage）。 */
+export const worklogReminderTargets = (date: string) =>
+  get<Record<string, unknown>[]>('/worklogs/reminder-targets', { date })
+
+/** 手动发起催办。 */
+export const worklogRemind = (data: {
+  userId: string | number
+  logDate: string
+  content?: string
+}) => post<{ id: string }>('/worklogs/reminders', data)
+
+/* ------------------------------ 消息通知 ------------------------------ */
+
+export interface NoticeItem {
+  id: string
+  title: string
+  content: string
+  noticeType: string
+  bizType: string
+  bizId: string
+  readStatus: number
+  createTime: string
+}
+
+export const listNotices = (params: Record<string, unknown>) =>
+  get<Page<NoticeItem>>('/notices', params)
+
+export const noticeUnreadCount = () => get<{ count: number }>('/notices/unread-count')
+
+export const readNotice = (id: string) =>
+  post<{ id: string; readStatus: number }>(`/notices/${id}/read`)
+
+export const readAllNotices = () => post<{ count: number }>('/notices/read-all')
 
 /* ------------------------------ 看板 ------------------------------ */
 

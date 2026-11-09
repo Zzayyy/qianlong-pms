@@ -17,7 +17,10 @@ from pms.common.exceptions import DataForbiddenError, ParamError
 from pms.common.response import ok, paged
 from pms.core.context import AuthContext
 from pms.core.deps import Pagination, get_pagination, get_session, require_permissions
+from pms.notice import service as notice_service
+from pms.org.models import SysUser
 from pms.worklog import service
+from pms.worklog.models import WlComment
 
 router = APIRouter(prefix="/api/v1/worklogs", tags=["工作日志"])
 
@@ -45,9 +48,10 @@ class ReasonIn(BaseModel):
 
 
 class CommentIn(BaseModel):
-    """评论入参。"""
+    """评论入参（`parentId` 非 0 表示回复）。"""
 
     content: str = Field(min_length=1, max_length=1000)
+    parentId: int = 0
 
 
 class RemindIn(BaseModel):
@@ -276,6 +280,7 @@ async def list_worklogs(
     projectId: Annotated[int | None, Query()] = None,
     status: Annotated[str, Query()] = "",
     keyword: Annotated[str, Query()] = "",
+    excludeUserId: Annotated[int | None, Query()] = None,
     dateFrom: Annotated[str | None, Query()] = None,
     dateTo: Annotated[str | None, Query()] = None,
 ) -> object:
@@ -316,6 +321,7 @@ async def list_worklogs(
             date_to=dateTo,
             status=status,
             keyword=keyword,
+            exclude_user_id=excludeUserId or 0,
             limit=0,
         )
         matched = [
@@ -448,6 +454,30 @@ async def reminders(
     )
 
 
+@router.get("/reminder-targets", summary="待催办人员")
+async def reminder_targets(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:manage"))],
+    dateText: Annotated[str | None, Query(alias="date")] = None,
+) -> object:
+    """指定日期尚未提交日志、且此前未催办的在岗人员（管理端发起催办用）。"""
+    text = dateText or date.today().isoformat()
+    try:
+        date.fromisoformat(text)
+    except ValueError as exc:
+        raise ParamError("日期格式应为 YYYY-MM-DD") from exc
+    dept_ids = (
+        None
+        if context.is_all_scope
+        else sorted(context.visible_dept_ids or {context.dept_id})
+    )
+    return ok(
+        await service.reminder_targets(
+            session, log_date=text, dept_ids=dept_ids
+        )
+    )
+
+
 @router.get("/{worklog_id}", summary="日志详情")
 async def detail(
     worklog_id: int,
@@ -503,9 +533,40 @@ async def comment(
     worklog = await service.get_worklog(session, worklog_id)
     if not await service.can_view(session, context, worklog):
         raise DataForbiddenError("无该日志访问权限")
-    row = await service.add_comment(session, worklog_id, context, body.content)
+    row = await service.add_comment(
+        session, worklog_id, context, body.content, parent_id=body.parentId
+    )
+
+    # 站内通知：日志作者 + 被回复评论作者（自己评论自己不通知）
+    receivers = {worklog.user_id}
+    parent = (
+        await session.get(WlComment, body.parentId) if body.parentId else None
+    )
+    if parent is not None:
+        receivers.add(parent.user_id)
+    snippet = body.content.strip()[:80]
+    actor = context.real_name or context.username
+    for receiver in receivers:
+        if receiver == context.user_id:
+            continue
+        if receiver == worklog.user_id:
+            title = "工作日志收到新评论"
+            content = f"{actor} 评论了你的日志 {worklog.worklog_no}：{snippet}"
+        else:
+            title = "你的评论收到回复"
+            content = f"{actor} 回复了你在日志 {worklog.worklog_no} 中的评论：{snippet}"
+        await notice_service.create_notice(
+            session,
+            receiver_id=receiver,
+            title=title,
+            content=content,
+            notice_type="COMMENT",
+            biz_type="WORKLOG",
+            biz_id=worklog_id,
+        )
+
     await session.commit()
-    return ok({"id": row.id})
+    return ok({"id": row.id, "parentId": row.parent_id})
 
 
 @router.get("/{worklog_id}/comments", summary="评论列表")
@@ -528,11 +589,34 @@ async def comments(
                 "userName": users.get(row.user_id, ("", ""))[0],
                 "realName": users.get(row.user_id, ("", ""))[1],
                 "content": row.content,
+                "parentId": row.parent_id,
                 "createTime": row.create_time.isoformat() if row.create_time else "",
             }
             for row in rows
         ]
     )
+
+
+@router.delete("/{worklog_id}/comments/{comment_id}", summary="删除评论")
+async def delete_comment(
+    worklog_id: int,
+    comment_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:view"))],
+) -> object:
+    """删除评论：本人可删；`worklog:manage` 可管理他人评论，根评论级联删除回复。"""
+    worklog = await service.get_worklog(session, worklog_id)
+    if not await service.can_view(session, context, worklog):
+        raise DataForbiddenError("无该日志访问权限")
+    await service.delete_comment(
+        session,
+        worklog_id,
+        comment_id,
+        context.user_id,
+        can_manage=context.has_permission("worklog:manage"),
+    )
+    await session.commit()
+    return ok({"id": comment_id})
 
 
 @router.post("/reminders/read-all", summary="全部催办已读")
@@ -565,13 +649,29 @@ async def remind(
     context: Annotated[AuthContext, Depends(require_permissions("worklog:manage"))],
 ) -> object:
     """手动催办（自动催办由定时任务调用服务层）。"""
+    target = await session.get(SysUser, body.userId)
+    if target is None or target.deleted or target.status != "ENABLED":
+        raise ParamError("催办对象不存在或已停用")
+    if not context.can_see_dept(target.dept_id):
+        raise DataForbiddenError("无该用户催办权限")
+    content = body.content.strip() or f"请补填 {body.logDate} 的工作日志"
     row = await service.create_reminder(
         session,
         user_id=body.userId,
         log_date=body.logDate,
         remind_type="MANUAL",
         remind_by=context.user_id,
-        content=body.content,
+        content=content,
     )
+    if target.id != context.user_id:
+        await notice_service.create_notice(
+            session,
+            receiver_id=target.id,
+            title="工作日志催办",
+            content=content,
+            notice_type="REMINDER",
+            biz_type="WORKLOG_REMINDER",
+            biz_id=row.id,
+        )
     await session.commit()
     return ok({"id": row.id})

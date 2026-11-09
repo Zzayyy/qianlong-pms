@@ -82,9 +82,10 @@ async def save_draft(
 ) -> WlWorklog:
     """保存一条日志草稿（新增或按 `worklog_id` 更新）。
 
-    实现说明：
-    - 一人一天可保存多条，每条绑定一个项目；同一天同一项目允许多条（上午/下午）；
-    - `items` 显式传入时按其合计作为总工时（兼容任务级拆分），否则按项目/任务生成单条明细；
+    模型约定（v1.1.16 起）：
+    - **一条日志只对应一个项目 / 一个任务**，同一天多个项目请分别记录；
+    - `t_wl_item` 作为该日志的唯一任务明细，负责任务工时与进度回填；
+    - 兼容旧 `items` 入参，但最多只允许一条，且会以此覆盖主表项目/任务/工时；
     - 日期必须落在补填窗口内（默认最近 5 天，参数 `worklog.backfill.maxDays`）。
     """
     config = ConfigService(session)
@@ -103,23 +104,31 @@ async def save_draft(
         if worklog.status not in _STATUS_EDITABLE:
             raise ConflictError(f"该日志状态为 {worklog.status}，不允许修改")
 
+    # 兼容明细入参：一条日志只允许一个任务明细，避免主表与明细口径不一致
+    if items:
+        if len(items) > 1:
+            raise BizRuleError("一条日志只支持一个项目/任务明细，请按项目分别记录")
+        payload = items[0]
+        project_id = int(payload.get("projectId", project_id) or project_id)
+        task_id = int(payload.get("taskId", task_id) or task_id)
+        total_hours = float(payload.get("hours", total_hours) or total_hours)
+        content = str(payload.get("content", content) or content)
+        progress_after = float(payload.get("progressAfter", progress_after) or progress_after)
+
     await _ensure_project_target(session, context, project_id, task_id)
 
-    if items is None:
-        hours = float(total_hours)
-        items = []
-        if project_id or task_id:
-            items = [
-                {
-                    "projectId": project_id,
-                    "taskId": task_id,
-                    "hours": hours,
-                    "content": content,
-                    "progressAfter": progress_after,
-                }
-            ]
-    else:
-        hours = sum(float(payload.get("hours", 0) or 0) for payload in items)
+    hours = float(total_hours)
+    items = []
+    if project_id or task_id:
+        items = [
+            {
+                "projectId": project_id,
+                "taskId": task_id,
+                "hours": hours,
+                "content": content,
+                "progressAfter": progress_after,
+            }
+        ]
 
     if worklog is None:
         worklog = WlWorklog(
@@ -369,12 +378,22 @@ async def approve_late(session: AsyncSession, worklog_id: int, operator_id: int)
 
 
 async def add_comment(
-    session: AsyncSession, worklog_id: int, context: AuthContext, content: str
+    session: AsyncSession,
+    worklog_id: int,
+    context: AuthContext,
+    content: str,
+    *,
+    parent_id: int = 0,
 ) -> WlComment:
-    """日志评论。"""
+    """日志评论（`parent_id` 指向被回复的评论，支持多级回复）。"""
+    if parent_id:
+        parent = await session.get(WlComment, parent_id)
+        if parent is None or parent.deleted or parent.worklog_id != worklog_id:
+            raise NotFoundError("回复的评论不存在")
     comment = WlComment(
         worklog_id=worklog_id,
         user_id=context.user_id,
+        parent_id=parent_id,
         content=content,
         create_by=context.user_id,
     )
@@ -391,6 +410,42 @@ async def list_comments(session: AsyncSession, worklog_id: int) -> list[WlCommen
         .order_by(WlComment.id)
     )
     return list(result.scalars().all())
+
+
+async def delete_comment(
+    session: AsyncSession,
+    worklog_id: int,
+    comment_id: int,
+    user_id: int,
+    *,
+    can_manage: bool = False,
+) -> None:
+    """删除评论：本人或管理员可删，并级联删除其整棵回复树。"""
+    comment = await session.get(WlComment, comment_id)
+    if comment is None or comment.deleted or comment.worklog_id != worklog_id:
+        raise NotFoundError("评论不存在")
+    if comment.user_id != user_id and not can_manage:
+        raise DataForbiddenError("只能删除自己的评论")
+    comment.deleted = 1
+    comment.update_by = user_id
+    visited = {comment.id}
+    frontier = [comment.id]
+    while frontier:
+        replies = await session.execute(
+            select(WlComment).where(
+                WlComment.parent_id.in_(frontier), WlComment.deleted == 0
+            )
+        )
+        next_frontier: list[int] = []
+        for reply in replies.scalars().all():
+            if reply.id in visited:
+                continue
+            visited.add(reply.id)
+            reply.deleted = 1
+            reply.update_by = user_id
+            next_frontier.append(reply.id)
+        frontier = next_frontier
+    await session.flush()
 
 
 async def create_reminder(
@@ -434,6 +489,65 @@ async def list_reminders(
         stmt = stmt.offset(offset).limit(limit)
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def reminder_targets(
+    session: AsyncSession,
+    *,
+    log_date: str,
+    dept_ids: list[int] | None = None,
+) -> list[dict[str, object]]:
+    """待催办人员：在岗、未提交该日日志、且该日尚未催办。"""
+    from pms.org.models import SysDept, SysUser
+
+    day = _as_date(log_date)
+    submitted = select(WlWorklog.user_id).where(
+        WlWorklog.deleted == 0,
+        WlWorklog.log_date == day,
+        WlWorklog.status.in_(
+            [
+                WorklogStatus.SUBMITTED,
+                WorklogStatus.PENDING_APPROVE,
+                WorklogStatus.CONFIRMED,
+            ]
+        ),
+    )
+    reminded = select(WlReminder.user_id).where(
+        WlReminder.deleted == 0,
+        WlReminder.log_date == day,
+    )
+    stmt = (
+        select(SysUser)
+        .where(
+            SysUser.deleted == 0,
+            SysUser.status == "ENABLED",
+            SysUser.id.not_in(submitted),
+            SysUser.id.not_in(reminded),
+        )
+        .order_by(SysUser.dept_id, SysUser.id)
+        .limit(500)
+    )
+    if dept_ids is not None:
+        stmt = stmt.where(SysUser.dept_id.in_(dept_ids))
+    users = list((await session.execute(stmt)).scalars().all())
+    if not users:
+        return []
+    dept_result = await session.execute(
+        select(SysDept.id, SysDept.dept_name).where(
+            SysDept.id.in_({user.dept_id for user in users})
+        )
+    )
+    dept_names = {int(dept_id): str(name) for dept_id, name in dept_result.all()}
+    return [
+        {
+            "id": user.id,
+            "username": user.username,
+            "realName": user.real_name,
+            "deptId": user.dept_id,
+            "deptName": dept_names.get(user.dept_id, ""),
+        }
+        for user in users
+    ]
 
 
 async def count_reminders(
@@ -488,11 +602,14 @@ def _worklog_filters(
     date_to: str | None = None,
     status: str = "",
     keyword: str = "",
+    exclude_user_id: int = 0,
 ) -> list[ColumnElement[bool]]:
     """构造日志查询条件（列表与计数共用）。"""
     conditions: list[ColumnElement[bool]] = [WlWorklog.deleted == 0]
     if user_ids:
         conditions.append(WlWorklog.user_id.in_(user_ids))
+    if exclude_user_id:
+        conditions.append(WlWorklog.user_id != exclude_user_id)
     if project_id:
         subq = select(WlItem.worklog_id).where(
             WlItem.project_id == project_id, WlItem.deleted == 0
@@ -533,6 +650,7 @@ async def list_worklogs(
     date_to: str | None = None,
     status: str = "",
     keyword: str = "",
+    exclude_user_id: int = 0,
     offset: int = 0,
     limit: int = 0,
 ) -> list[WlWorklog]:
@@ -547,6 +665,7 @@ async def list_worklogs(
         date_to=date_to,
         status=status,
         keyword=keyword,
+        exclude_user_id=exclude_user_id,
     )
     stmt = (
         select(WlWorklog)
@@ -568,6 +687,7 @@ async def count_worklogs(
     date_to: str | None = None,
     status: str = "",
     keyword: str = "",
+    exclude_user_id: int = 0,
 ) -> int:
     """按与列表一致的条件统计条数（本人日志分页用）。"""
     conditions = _worklog_filters(
@@ -577,6 +697,7 @@ async def count_worklogs(
         date_to=date_to,
         status=status,
         keyword=keyword,
+        exclude_user_id=exclude_user_id,
     )
     result = await session.execute(
         select(func.count(WlWorklog.id)).where(*conditions)

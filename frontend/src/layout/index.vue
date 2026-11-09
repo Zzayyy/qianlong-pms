@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   BarChart3,
+  Bell,
   Briefcase,
   Building2,
   ChevronDown,
@@ -28,7 +29,15 @@ import {
   Users,
   X
 } from 'lucide-vue-next'
-import { changePassword, logout } from '@/api'
+import {
+  changePassword,
+  listNotices,
+  logout,
+  noticeUnreadCount,
+  readAllNotices,
+  readNotice,
+  type NoticeItem
+} from '@/api'
 import { firstAccessiblePath } from '@/router'
 import { useUserStore } from '@/stores/user'
 
@@ -125,8 +134,15 @@ const onResize = () => {
   width.value = window.innerWidth
   if (width.value > 920) drawer.value = false
 }
-onMounted(() => window.addEventListener('resize', onResize))
-onUnmounted(() => window.removeEventListener('resize', onResize))
+onMounted(() => {
+  window.addEventListener('resize', onResize)
+  loadUnread()
+  noticeTimer = window.setInterval(loadUnread, 60000)
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', onResize)
+  if (noticeTimer) window.clearInterval(noticeTimer)
+})
 
 const isCompact = computed(() => width.value <= 920)
 const isMobile = computed(() => width.value <= 768)
@@ -271,6 +287,68 @@ const onUserCommand = async (command: string) => {
   tabs.value = []
   router.push('/login')
 }
+
+/* ---------------- 消息通知 ---------------- */
+const noticeVisible = ref(false)
+const notices = ref<NoticeItem[]>([])
+const noticeTotal = ref(0)
+const noticeLoading = ref(false)
+const unreadCount = ref(0)
+let noticeTimer: number | undefined
+
+const noticeTime = (value: string) => (value ? value.replace('T', ' ').slice(5, 16) : '')
+
+const loadUnread = async () => {
+  try {
+    const data = await noticeUnreadCount()
+    unreadCount.value = Number(data.count || 0)
+  } catch {
+    /* 未读数加载失败不打断页面 */
+  }
+}
+
+const loadNotices = async () => {
+  noticeLoading.value = true
+  try {
+    const data = await listNotices({ pageNum: 1, pageSize: 10 })
+    notices.value = data.list || []
+    noticeTotal.value = Number(data.total || 0)
+  } catch {
+    notices.value = []
+  } finally {
+    noticeLoading.value = false
+  }
+}
+
+const openNotice = async (item: NoticeItem) => {
+  if (!item.readStatus) {
+    try {
+      await readNotice(item.id)
+      item.readStatus = 1
+      unreadCount.value = Math.max(0, unreadCount.value - 1)
+    } catch {
+      /* 已读失败不阻止跳转 */
+    }
+  }
+  noticeVisible.value = false
+  if (item.bizType === 'WORKLOG') {
+    await router.push({ path: '/worklogs', query: { worklogId: String(item.bizId) } })
+  } else if (item.bizType === 'WORKLOG_REMINDER') {
+    await router.push({ path: '/worklogs', query: { reminders: '1' } })
+  }
+}
+
+const markAllNotices = async () => {
+  try {
+    const result = await readAllNotices()
+    unreadCount.value = 0
+    notices.value = notices.value.map((item) => ({ ...item, readStatus: 1 }))
+    ElMessage.success(`已处理 ${Number(result.count || 0)} 条消息`)
+    await loadNotices()
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
+  }
+}
 </script>
 
 <template>
@@ -342,6 +420,67 @@ const onUserCommand = async (command: string) => {
         </nav>
 
         <div class="header-actions">
+          <el-popover
+            v-model:visible="noticeVisible"
+            placement="bottom-end"
+            :width="isMobile ? 310 : 360"
+            trigger="click"
+            popper-class="pms-notice-popper"
+            @show="loadNotices"
+          >
+            <template #reference>
+              <el-badge
+                :value="unreadCount"
+                :max="99"
+                :hidden="unreadCount === 0"
+                class="notice-badge"
+              >
+                <button type="button" class="icon-btn" aria-label="消息通知">
+                  <Bell :size="18" :stroke-width="1.75" />
+                </button>
+              </el-badge>
+            </template>
+            <div class="notice-panel">
+              <div class="notice-head">
+                <b>消息通知</b>
+                <el-button
+                  v-if="unreadCount"
+                  link
+                  type="primary"
+                  @click="markAllNotices"
+                >
+                  全部已读
+                </el-button>
+              </div>
+              <div v-loading="noticeLoading" class="notice-list">
+                <button
+                  v-for="item in notices"
+                  :key="String(item.id)"
+                  type="button"
+                  class="notice-item"
+                  :class="{ 'is-unread': !item.readStatus }"
+                  @click="openNotice(item)"
+                >
+                  <span class="notice-dot" :class="{ 'is-hidden': item.readStatus }"></span>
+                  <span class="notice-main">
+                    <b>{{ item.title }}</b>
+                    <p>{{ item.content }}</p>
+                    <span>{{ noticeTime(item.createTime) }}</span>
+                  </span>
+                </button>
+                <el-empty
+                  v-if="!noticeLoading && !notices.length"
+                  description="暂无消息"
+                  :image-size="56"
+                />
+              </div>
+              <div class="notice-foot">
+                <span>共 {{ noticeTotal }} 条</span>
+                <span v-if="noticeTotal > notices.length">仅显示最近 {{ notices.length }} 条</span>
+              </div>
+            </div>
+          </el-popover>
+
           <el-dropdown trigger="click" placement="bottom-end" popper-class="pms-nav-popper" @command="onUserCommand">
             <button type="button" class="user-btn">
               <span class="avatar">{{ initial }}</span>
@@ -722,6 +861,116 @@ const onUserCommand = async (command: string) => {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.notice-badge {
+  display: inline-flex;
+}
+
+.notice-badge :deep(.el-badge__content) {
+  border: 2px solid var(--pms-surface);
+  box-sizing: content-box;
+}
+
+.notice-panel {
+  margin: -2px -4px;
+}
+
+.notice-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 4px 8px;
+  border-bottom: 1px solid var(--pms-line-soft);
+}
+
+.notice-head b {
+  font-size: 13.5px;
+  color: var(--pms-text);
+}
+
+.notice-list {
+  display: grid;
+  gap: 2px;
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+
+.notice-item {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.notice-item:hover {
+  background: #f5f7fc;
+}
+
+.notice-item.is-unread {
+  background: #f3f7ff;
+}
+
+.notice-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--pms-primary);
+}
+
+.notice-dot.is-hidden {
+  background: transparent;
+}
+
+.notice-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.notice-main b {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--pms-text);
+}
+
+.notice-main p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--pms-text-2);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.notice-main > span {
+  font-size: 11px;
+  color: var(--pms-text-3);
+}
+
+.notice-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 4px 0;
+  border-top: 1px solid var(--pms-line-soft);
+  font-size: 11.5px;
+  color: var(--pms-text-3);
 }
 
 .user-btn {

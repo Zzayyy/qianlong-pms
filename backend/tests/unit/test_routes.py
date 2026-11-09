@@ -14,6 +14,7 @@ GUARD_CASES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/v1/worklogs/stats", "stats"),
     ("GET", "/api/v1/worklogs/summary", "summary"),
     ("GET", "/api/v1/worklogs/reminders", "reminders"),
+    ("GET", "/api/v1/worklogs/reminder-targets", "reminder_targets"),
     ("GET", "/api/v1/worklogs/options", "options"),
     ("GET", "/api/v1/worklogs/day-summary", "day_summary"),
     ("POST", "/api/v1/configs/seed", "seed_configs"),

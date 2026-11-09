@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRoute, useRouter } from 'vue-router'
 import { Bell } from 'lucide-vue-next'
 import {
   addWorklogComment,
   deleteWorklog,
+  deleteWorklogComment,
   listTasks,
   listWorklogs,
   readAllWorklogReminders,
@@ -16,6 +18,8 @@ import {
   worklogDaySummary,
   worklogDetail,
   worklogOptions,
+  worklogRemind,
+  worklogReminderTargets,
   worklogReminders,
   worklogSummary
 } from '@/api'
@@ -87,7 +91,16 @@ interface WorklogComment {
   userName: string
   realName: string
   content: string
+  parentId: string
   createTime: string
+}
+
+interface CommentReply extends WorklogComment {
+  replyToName: string
+}
+
+interface CommentNode extends WorklogComment {
+  replies: CommentReply[]
 }
 
 interface DaySummary {
@@ -118,6 +131,14 @@ interface ReminderRow {
   createTime: string
 }
 
+interface ReminderTarget {
+  id: string
+  username: string
+  realName: string
+  deptId: string
+  deptName: string
+}
+
 interface ProjectHours {
   projectId: string
   projectName: string
@@ -146,11 +167,14 @@ interface WorklogSummary {
 
 type TagType = 'success' | 'warning' | 'info' | 'danger'
 type PeriodKey = 'day' | 'week' | 'month'
-type TabKey = 'mine' | 'pending'
+type TabKey = 'mine' | 'team' | 'pending'
 
 const store = useUserStore()
+const route = useRoute()
+const router = useRouter()
 const canCreate = computed(() => store.has('worklog:create'))
 const canConfirm = computed(() => store.has('worklog:confirm'))
+const canManageWorklog = computed(() => store.has('worklog:manage'))
 const currentUserId = computed(() => String(store.profile?.id || ''))
 
 const PERIODS: { value: PeriodKey; label: string }[] = [
@@ -316,6 +340,74 @@ const readAllReminders = async () => {
   }
 }
 
+/* ------------------------------ 管理端发起催办 ------------------------------ */
+const reminderDialogVisible = ref(false)
+const reminderTargets = ref<ReminderTarget[]>([])
+const reminderTargetsLoading = ref(false)
+const reminderSending = ref(false)
+const reminderForm = reactive({
+  logDate: localToday(),
+  userIds: [] as string[],
+  content: ''
+})
+
+const loadReminderTargets = async () => {
+  reminderTargetsLoading.value = true
+  try {
+    reminderTargets.value = (await worklogReminderTargets(
+      reminderForm.logDate
+    )) as unknown as ReminderTarget[]
+  } catch {
+    reminderTargets.value = []
+  } finally {
+    reminderTargetsLoading.value = false
+  }
+}
+
+const openReminderDialog = () => {
+  reminderForm.logDate = localToday()
+  reminderForm.userIds = []
+  reminderForm.content = ''
+  reminderDialogVisible.value = true
+  loadReminderTargets()
+}
+
+const onReminderDateChange = () => {
+  reminderForm.userIds = []
+  loadReminderTargets()
+}
+
+const selectAllTargets = () => {
+  reminderForm.userIds = reminderTargets.value.map((item) => String(item.id))
+}
+
+const sendReminders = async () => {
+  if (!reminderForm.userIds.length) {
+    ElMessage.warning('请选择催办对象')
+    return
+  }
+  if (reminderSending.value) return
+  reminderSending.value = true
+  const content =
+    reminderForm.content.trim() || `请补填 ${reminderForm.logDate} 的工作日志`
+  try {
+    const results = await Promise.allSettled(
+      reminderForm.userIds.map((userId) =>
+        worklogRemind({ userId, logDate: reminderForm.logDate, content })
+      )
+    )
+    const success = results.filter((item) => item.status === 'fulfilled').length
+    const failed = results.length - success
+    if (success) ElMessage.success(`已向 ${success} 人发送催办`)
+    if (failed) ElMessage.warning(`${failed} 人催办失败，请稍后重试`)
+    reminderDialogVisible.value = false
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
+  } finally {
+    reminderSending.value = false
+  }
+}
+
 /* ------------------------------ 日志列表 ------------------------------ */
 const tab = ref<TabKey>('mine')
 const rows = ref<WorklogRow[]>([])
@@ -344,6 +436,11 @@ const loadLogs = async () => {
     }
     if (tab.value === 'pending') {
       params.status = 'SUBMITTED,PENDING_APPROVE'
+      params.excludeUserId = currentUserId.value || undefined
+    } else if (tab.value === 'team') {
+      // 团队日志只看已提交/已确认的日志，草稿和驳回记录仍仅作者可见
+      params.status = 'SUBMITTED,PENDING_APPROVE,CONFIRMED'
+      params.excludeUserId = currentUserId.value || undefined
     } else if (filters.status) {
       params.status = filters.status
     }
@@ -584,6 +681,8 @@ const detail = ref<WorklogDetail | null>(null)
 const comments = ref<WorklogComment[]>([])
 const commentText = ref('')
 const commentSaving = ref(false)
+const commentInput = ref<any>()
+const replyTo = ref<WorklogComment | null>(null)
 
 const detailWorklog = computed(() => detail.value?.worklog || null)
 const isOwner = computed(
@@ -611,6 +710,7 @@ const openDetail = async (row: any) => {
   detailLoading.value = true
   detail.value = null
   comments.value = []
+  replyTo.value = null
   try {
     const [data, commentRows] = await Promise.all([
       worklogDetail(row.id),
@@ -624,6 +724,28 @@ const openDetail = async (row: any) => {
     detailLoading.value = false
   }
 }
+
+/** 处理站内通知跳转：打开指定日志详情或催办抽屉。 */
+const handleNoticeQuery = async () => {
+  const rawWorklogId = route.query.worklogId
+  const worklogId = Array.isArray(rawWorklogId) ? rawWorklogId[0] : rawWorklogId
+  if (worklogId) {
+    await openDetail({ id: String(worklogId) })
+    await router.replace({ path: route.path, query: {} })
+    return
+  }
+  const rawReminders = route.query.reminders
+  const reminders = Array.isArray(rawReminders) ? rawReminders[0] : rawReminders
+  if (reminders === '1') {
+    openReminders()
+    await router.replace({ path: route.path, query: {} })
+  }
+}
+
+watch(
+  () => [route.query.worklogId, route.query.reminders],
+  () => handleNoticeQuery()
+)
 
 const reloadDetail = async (id: string) => {
   if (!id) return
@@ -640,14 +762,69 @@ const commentAuthor = (comment: WorklogComment) =>
   comment.realName || comment.userName || '用户'
 const commentInitial = (comment: WorklogComment) => commentAuthor(comment).slice(0, 1)
 
+/**
+ * 评论树：根评论下平铺其所有后代回复。
+ * 每条回复保留直接父评论作者，用于展示“回复 某人”。
+ */
+const commentTree = computed<CommentNode[]>(() => {
+  const byId = new Map(comments.value.map((item) => [String(item.id), item]))
+  const children = new Map<string, WorklogComment[]>()
+  comments.value.forEach((item) => {
+    const parentId = String(item.parentId || '0')
+    if (parentId === '0') return
+    const list = children.get(parentId) || []
+    list.push(item)
+    children.set(parentId, list)
+  })
+
+  const collectReplies = (rootId: string): CommentReply[] => {
+    const result: CommentReply[] = []
+    const walk = (parentId: string) => {
+      for (const child of children.get(parentId) || []) {
+        const parent = byId.get(String(child.parentId))
+        result.push({
+          ...child,
+          replyToName: parent ? commentAuthor(parent) : ''
+        })
+        walk(String(child.id))
+      }
+    }
+    walk(rootId)
+    return result
+  }
+
+  return comments.value
+    .filter((item) => !item.parentId || String(item.parentId) === '0')
+    .map((root) => ({
+      ...root,
+      replies: collectReplies(String(root.id))
+    }))
+})
+
+const commentPlaceholder = computed(() =>
+  replyTo.value
+    ? `回复 ${commentAuthor(replyTo.value)}…`
+    : '补充说明、反馈或确认意见…'
+)
+
+const startReply = (comment: WorklogComment) => {
+  replyTo.value = comment
+  nextTick(() => commentInput.value?.focus())
+}
+
+const cancelReply = () => {
+  replyTo.value = null
+}
+
 const addComment = async () => {
   const worklog = detailWorklog.value
   const content = commentText.value.trim()
   if (!worklog || !content || commentSaving.value) return
   commentSaving.value = true
   try {
-    await addWorklogComment(worklog.id, content)
+    await addWorklogComment(worklog.id, content, replyTo.value?.id || 0)
     commentText.value = ''
+    replyTo.value = null
     comments.value = (await worklogComments(
       worklog.id
     )) as unknown as WorklogComment[]
@@ -655,6 +832,36 @@ const addComment = async () => {
     /* 错误提示由请求拦截器统一弹出 */
   } finally {
     commentSaving.value = false
+  }
+}
+
+const canDeleteComment = (comment: WorklogComment) =>
+  String(comment.userId) === currentUserId.value || canManageWorklog.value
+
+const removeComment = async (comment: WorklogComment) => {
+  const worklog = detailWorklog.value
+  if (!worklog) return
+  const hasReplies = comments.value.some(
+    (item) => String(item.parentId) === String(comment.id)
+  )
+  try {
+    await ElMessageBox.confirm(
+      hasReplies ? '删除后其下的回复也会一并删除，确认删除？' : '确认删除这条评论？',
+      '删除评论',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await deleteWorklogComment(worklog.id, comment.id)
+    ElMessage.success('评论已删除')
+    if (String(replyTo.value?.id) === String(comment.id)) replyTo.value = null
+    comments.value = (await worklogComments(
+      worklog.id
+    )) as unknown as WorklogComment[]
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
   }
 }
 
@@ -765,7 +972,13 @@ const rejectDetail = async () => {
 onMounted(() => {
   syncWidth()
   window.addEventListener('resize', syncWidth)
-  Promise.all([loadOptions(), loadLogs(), loadSummary(), loadToday(), loadReminderBadge()])
+  Promise.all([
+    loadOptions(),
+    loadLogs(),
+    loadSummary(),
+    loadToday(),
+    loadReminderBadge()
+  ]).then(() => handleNoticeQuery())
 })
 
 onUnmounted(() => window.removeEventListener('resize', syncWidth))
@@ -785,6 +998,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       </div>
       <div class="head-ops">
         <el-button :loading="listLoading || summaryLoading" @click="refreshAll">刷新</el-button>
+        <el-button v-if="canManageWorklog" @click="openReminderDialog">发起催办</el-button>
         <el-button v-if="canCreate" type="primary" @click="openCreate">写日志</el-button>
       </div>
     </div>
@@ -880,6 +1094,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             我的日志
           </button>
           <button
+            type="button"
+            :class="{ 'is-active': tab === 'team' }"
+            @click="switchTab('team')"
+          >
+            团队日志
+          </button>
+          <button
             v-if="canConfirm"
             type="button"
             :class="{ 'is-active': tab === 'pending' }"
@@ -888,7 +1109,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             团队待确认
           </button>
         </div>
-        <span class="list-total">共 {{ total }} 条</span>
+        <span class="list-total">
+          <template v-if="tab === 'team'">仅展示已提交 / 已确认日志 · </template>
+          共 {{ total }} 条
+        </span>
       </div>
 
       <div class="filter-row">
@@ -961,7 +1185,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column v-if="tab === 'pending'" label="提交人" width="120">
+        <el-table-column v-if="tab !== 'mine'" label="提交人" width="120">
           <template #default="{ row }">{{ authorLabel(row) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="200">
@@ -993,7 +1217,16 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </template>
         </el-table-column>
         <template #empty>
-          <el-empty :description="tab === 'mine' ? '还没有日志，点右上角「写日志」开始记录' : '暂无待确认日志'" :image-size="76" />
+          <el-empty
+            :description="
+              tab === 'mine'
+                ? '还没有日志，点右上角「写日志」开始记录'
+                : tab === 'team'
+                  ? '当前没有可查看的团队日志'
+                  : '暂无待确认日志'
+            "
+            :image-size="76"
+          />
         </template>
       </el-table>
 
@@ -1015,6 +1248,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       size="min(720px, 94vw)"
     >
       <div class="drawer-body">
+        <p class="form-hint">一条日志对应一个项目；同一天参与多个项目请分别填写多条。</p>
         <el-alert
           v-if="!options.projects.length"
           type="info"
@@ -1194,28 +1428,90 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </section>
 
           <section class="detail-section">
+            <h4>任务明细</h4>
+            <el-table v-if="detail.items.length" :data="detail.items" size="small">
+              <el-table-column prop="projectName" label="项目" min-width="150">
+                <template #default="{ row }">{{ row.projectName || '非项目' }}</template>
+              </el-table-column>
+              <el-table-column prop="taskName" label="任务" min-width="150">
+                <template #default="{ row }">{{ row.taskName || '未关联' }}</template>
+              </el-table-column>
+              <el-table-column label="工时" width="84" align="right">
+                <template #default="{ row }">{{ row.hours }}h</template>
+              </el-table-column>
+              <el-table-column label="进度" width="84" align="right">
+                <template #default="{ row }">{{ row.progressAfter }}%</template>
+              </el-table-column>
+            </el-table>
+            <el-empty v-else description="暂无任务明细" :image-size="60" />
+          </section>
+
+          <section class="detail-section">
             <h4>沟通记录</h4>
-            <div v-if="comments.length" class="comment-list">
-              <div v-for="item in comments" :key="item.id" class="comment">
-                <span class="avatar">{{ commentInitial(item) }}</span>
-                <div class="comment-main">
-                  <div class="comment-head">
-                    <b>{{ commentAuthor(item) }}</b>
-                    <span>{{ timeText(item.createTime) }}</span>
+            <div v-if="commentTree.length" class="comment-list">
+              <div v-for="item in commentTree" :key="item.id" class="comment-thread">
+                <div class="comment">
+                  <span class="avatar">{{ commentInitial(item) }}</span>
+                  <div class="comment-main">
+                    <div class="comment-head">
+                      <b>{{ commentAuthor(item) }}</b>
+                      <span>{{ timeText(item.createTime) }}</span>
+                    </div>
+                    <p>{{ item.content }}</p>
+                    <div class="comment-ops">
+                      <el-button link type="primary" @click="startReply(item)">回复</el-button>
+                      <el-button
+                        v-if="canDeleteComment(item)"
+                        link
+                        type="danger"
+                        @click="removeComment(item)"
+                      >
+                        删除
+                      </el-button>
+                    </div>
                   </div>
-                  <p>{{ item.content }}</p>
+                </div>
+
+                <div v-if="item.replies.length" class="comment-replies">
+                  <div v-for="reply in item.replies" :key="reply.id" class="comment is-reply">
+                    <span class="avatar">{{ commentInitial(reply) }}</span>
+                    <div class="comment-main">
+                      <div class="comment-head">
+                        <b>{{ commentAuthor(reply) }}</b>
+                        <span class="reply-to">回复 {{ reply.replyToName || commentAuthor(item) }}</span>
+                        <span>{{ timeText(reply.createTime) }}</span>
+                      </div>
+                      <p>{{ reply.content }}</p>
+                      <div class="comment-ops">
+                        <el-button link type="primary" @click="startReply(reply)">回复</el-button>
+                        <el-button
+                          v-if="canDeleteComment(reply)"
+                          link
+                          type="danger"
+                          @click="removeComment(reply)"
+                        >
+                          删除
+                        </el-button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
             <el-empty v-else description="暂无沟通记录" :image-size="64" />
+            <div v-if="replyTo" class="reply-tip">
+              <span>回复 {{ commentAuthor(replyTo) }}</span>
+              <el-button link @click="cancelReply">取消</el-button>
+            </div>
             <div class="comment-editor">
               <el-input
+                ref="commentInput"
                 v-model="commentText"
                 type="textarea"
                 :rows="2"
                 maxlength="1000"
                 show-word-limit
-                placeholder="补充说明、反馈或确认意见…"
+                :placeholder="commentPlaceholder"
               />
               <el-button
                 type="primary"
@@ -1223,7 +1519,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 :disabled="!commentText.trim()"
                 @click="addComment"
               >
-                发送
+                {{ replyTo ? '回复' : '发送' }}
               </el-button>
             </div>
           </section>
@@ -1335,6 +1631,91 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </div>
       </template>
     </el-drawer>
+
+    <el-dialog
+      v-model="reminderDialogVisible"
+      title="发起催办"
+      width="90%"
+      style="max-width: 560px"
+    >
+      <div class="reminder-form">
+        <div class="field">
+          <label>日期 <em>*</em></label>
+          <el-date-picker
+            v-model="reminderForm.logDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            @change="onReminderDateChange"
+          />
+        </div>
+        <div class="field">
+          <div class="field-label">
+            <label>催办对象 <em>*</em></label>
+            <span class="field-ops">
+              <el-button
+                link
+                type="primary"
+                :disabled="!reminderTargets.length"
+                @click="selectAllTargets"
+              >
+                全选
+              </el-button>
+              <el-button
+                link
+                :disabled="!reminderForm.userIds.length"
+                @click="reminderForm.userIds = []"
+              >
+                清空
+              </el-button>
+            </span>
+          </div>
+          <el-select
+            v-model="reminderForm.userIds"
+            multiple
+            filterable
+            collapse-tags
+            collapse-tags-tooltip
+            placeholder="选择尚未提交日志的成员"
+            :loading="reminderTargetsLoading"
+          >
+            <el-option
+              v-for="item in reminderTargets"
+              :key="String(item.id)"
+              :label="`${item.realName || item.username}（${item.deptName || '未分配部门'}）`"
+              :value="String(item.id)"
+            />
+          </el-select>
+          <p
+            v-if="!reminderTargetsLoading && !reminderTargets.length"
+            class="field-tip"
+          >
+            该日期没有待催办人员（均已提交或已催办）
+          </p>
+        </div>
+        <div class="field">
+          <label>催办内容</label>
+          <el-input
+            v-model="reminderForm.content"
+            type="textarea"
+            :rows="3"
+            maxlength="500"
+            show-word-limit
+            :placeholder="`默认：请补填 ${reminderForm.logDate} 的工作日志`"
+          />
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="reminderDialogVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="reminderSending"
+          :disabled="!reminderForm.userIds.length"
+          @click="sendReminders"
+        >
+          发送催办
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1796,6 +2177,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   padding: 4px 20px 20px;
 }
 
+.form-hint {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--pms-text-3);
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1809,10 +2197,36 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   min-width: 0;
 }
 
-.field > label {
+.field > label,
+.field-label > label {
   font-size: 12.5px;
   font-weight: 500;
   color: var(--pms-text-2);
+}
+
+.field-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.field-ops {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.field-tip {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #b8770f;
+}
+
+.reminder-form {
+  display: grid;
+  gap: 16px;
 }
 
 .field em {
@@ -1962,9 +2376,45 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   gap: 12px;
 }
 
+.comment-thread {
+  display: grid;
+  gap: 10px;
+}
+
+.comment-replies {
+  display: grid;
+  gap: 10px;
+  margin-left: 38px;
+  padding-left: 12px;
+  border-left: 2px solid var(--pms-line-soft);
+}
+
 .comment {
   display: flex;
   gap: 10px;
+}
+
+.comment.is-reply .avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
+}
+
+.comment-ops {
+  margin-top: 4px;
+}
+
+.reply-to {
+  color: var(--pms-primary-deep);
+}
+
+.reply-tip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--pms-text-3);
 }
 
 .comment .avatar {
