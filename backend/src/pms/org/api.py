@@ -58,7 +58,7 @@ class UserCreateIn(BaseModel):
     """创建用户入参。"""
 
     username: str = Field(min_length=1, max_length=64)
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=1, max_length=128)
     realName: str = Field(min_length=1, max_length=64)
     deptId: int
     managerId: int | None = None
@@ -121,7 +121,7 @@ class UserStatusIn(BaseModel):
 class PasswordIn(BaseModel):
     """管理员重置密码入参。"""
 
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=1, max_length=128)
 
 
 class RoleCreateIn(BaseModel):
@@ -239,7 +239,7 @@ class PasswordChangeIn(BaseModel):
     """本人修改密码入参。"""
 
     oldPassword: str = Field(min_length=1, max_length=128)
-    newPassword: str = Field(min_length=8, max_length=128)
+    newPassword: str = Field(min_length=1, max_length=128)
 
 
 @router.put("/auth/password", summary="修改本人密码")

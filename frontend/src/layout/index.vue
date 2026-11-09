@@ -222,8 +222,8 @@ const savePassword = async () => {
     ElMessage.warning('请输入原密码')
     return
   }
-  if (pwdForm.newPassword.length < 8) {
-    ElMessage.warning('新密码长度至少 8 位')
+  if (!pwdForm.newPassword) {
+    ElMessage.warning('请输入新密码')
     return
   }
   if (pwdForm.newPassword !== pwdForm.confirmPassword) {
@@ -417,7 +417,7 @@ const onUserCommand = async (command: string) => {
             type="password"
             show-password
             autocomplete="new-password"
-            placeholder="至少 8 位"
+            placeholder="请输入新密码"
           />
         </el-form-item>
         <el-form-item label="确认新密码">

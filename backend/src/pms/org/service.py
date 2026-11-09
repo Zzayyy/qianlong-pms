@@ -605,10 +605,10 @@ async def reset_user_password(
 
     Raises:
         NotFoundError: 用户不存在。
-        BizRuleError: 口令长度不足 8 位。
+        BizRuleError: 口令为空。
     """
-    if len(password) < 8:
-        raise BizRuleError("密码长度至少 8 位")
+    if not password:
+        raise BizRuleError("密码不能为空")
     user = await get_user(session, user_id)
     user.password_hash = hash_password(password)
     user.login_fail_count = 0
@@ -629,13 +629,13 @@ async def change_password(
 
     Raises:
         NotFoundError: 用户不存在。
-        BizRuleError: 原密码错误、新密码过短或与原密码相同。
+        BizRuleError: 原密码错误、新密码为空或与原密码相同。
     """
     user = await get_user(session, user_id)
     if not verify_password(old_password, user.password_hash):
         raise BizRuleError("原密码不正确")
-    if len(new_password) < 8:
-        raise BizRuleError("新密码长度至少 8 位")
+    if not new_password:
+        raise BizRuleError("新密码不能为空")
     if old_password == new_password:
         raise BizRuleError("新密码不能与原密码相同")
     user.password_hash = hash_password(new_password)

@@ -87,8 +87,8 @@ def main() -> int:
     if args.list:
         print_accounts()
         return 0
-    if len(args.password) < 8:
-        print("密码长度至少 8 位")
+    if not args.password:
+        print("密码不能为空")
         return 2
     if args.reset_password:
         return asyncio.run(reset(args.reset_password, args.password))
