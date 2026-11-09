@@ -271,23 +271,79 @@ export const aggregateDaily = (statDate = '') => post<Record<string, number>>('/
 
 /* ------------------------------ CRM ------------------------------ */
 
+/** 客户与商机概览（列表顶部统计卡片）。 */
+export const crmSummary = () => get<Record<string, any>>('/crm/summary')
+
+/** 数据范围内可选负责人 / 转项目负责人。 */
+export const crmStaff = () => get<Record<string, any>[]>('/crm/staff')
+
 export const listCustomers = (params: Record<string, unknown>) =>
   get<Page<Record<string, unknown>>>('/crm/customers', params)
 
+export const customerDetail = (id: string) => get<Record<string, unknown>>(`/crm/customers/${id}`)
+
 export const createCustomer = (data: Record<string, unknown>) =>
-  post<{ id: string }>('/crm/customers', data)
+  post<{ id: string; customerCode: string }>('/crm/customers', data)
+
+export const updateCustomer = (id: string, data: Record<string, unknown>) =>
+  put<{ id: string }>(`/crm/customers/${id}`, data)
+
+export const deleteCustomer = (id: string) => del<{ id: string }>(`/crm/customers/${id}`)
+
+export const changeCustomerStatus = (id: string, status: string) =>
+  put<{ id: string; status: string }>(`/crm/customers/${id}/status`, { status })
+
+export const customerContacts = (id: string) =>
+  get<Record<string, unknown>[]>(`/crm/customers/${id}/contacts`)
+
+export const createContact = (customerId: string, data: Record<string, unknown>) =>
+  post<{ id: string }>(`/crm/customers/${customerId}/contacts`, data)
+
+export const updateContact = (id: string, data: Record<string, unknown>) =>
+  put<{ id: string; isPrimary: number }>(`/crm/contacts/${id}`, data)
+
+export const deleteContact = (id: string) => del<{ id: string }>(`/crm/contacts/${id}`)
 
 export const listOpportunities = (params: Record<string, unknown>) =>
   get<Page<Record<string, unknown>>>('/crm/opportunities', params)
 
-export const createOpportunity = (data: Record<string, unknown>) =>
-  post<{ id: string }>('/crm/opportunities', data)
+export const opportunityDetail = (id: string) =>
+  get<Record<string, unknown>>(`/crm/opportunities/${id}`)
 
-export const pushOppStage = (id: string, stage: string) =>
-  put<{ stageCode: string }>(`/crm/opportunities/${id}/stage`, { stage })
+export const createOpportunity = (data: Record<string, unknown>) =>
+  post<{ id: string; oppCode: string }>('/crm/opportunities', data)
+
+export const updateOpportunity = (id: string, data: Record<string, unknown>) =>
+  put<{ id: string; stage: string; status: string }>(`/crm/opportunities/${id}`, data)
+
+export const deleteOpportunity = (id: string) =>
+  del<{ id: string }>(`/crm/opportunities/${id}`)
+
+export const pushOppStage = (id: string, stage: string, lostReason = '') =>
+  put<{ id: string; stage: string; status: string }>(`/crm/opportunities/${id}/stage`, {
+    stage,
+    lostReason
+  })
+
+export const changeOppStatus = (id: string, status: string, lostReason = '') =>
+  put<{ id: string; stage: string; status: string }>(`/crm/opportunities/${id}/status`, {
+    status,
+    lostReason
+  })
 
 export const convertOpp = (id: string, data: Record<string, unknown>) =>
-  post<{ projectId: string }>(`/crm/opportunities/${id}/convert`, data)
+  post<{ projectId: string; projectCode: string; projectName: string; status: string }>(
+    `/crm/opportunities/${id}/convert`,
+    data
+  )
+
+export const oppFollows = (id: string) =>
+  get<Record<string, unknown>[]>(`/crm/opportunities/${id}/follows`)
+
+export const addOppFollow = (id: string, data: Record<string, unknown>) =>
+  post<{ id: string }>(`/crm/opportunities/${id}/follows`, data)
+
+export const deleteOppFollow = (id: string) => del<{ id: string }>(`/crm/follows/${id}`)
 
 /* ------------------------------ 组织与参数 ------------------------------ */
 
