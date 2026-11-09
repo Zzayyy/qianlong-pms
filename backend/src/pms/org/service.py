@@ -371,6 +371,7 @@ async def update_dept(
     dept_name: str | None = None,
     dept_type: str | None = None,
     leader_id: int | None = None,
+    clear_leader: bool = False,
     sort: int | None = None,
     status: str | None = None,
     parent_id: int | None = None,
@@ -380,7 +381,7 @@ async def update_dept(
 
     Raises:
         NotFoundError: 部门不存在。
-        BizRuleError: 上级不能是自身或自己的下级（成环）。
+        BizRuleError: 上级不能是自身或自己的下级（成环）、状态取值非法。
     """
     dept = await session.get(SysDept, dept_id)
     if dept is None or dept.deleted != 0:
@@ -406,11 +407,15 @@ async def update_dept(
         dept.dept_name = dept_name
     if dept_type is not None:
         dept.dept_type = dept_type
-    if leader_id is not None:
+    if clear_leader:
+        dept.leader_id = None
+    elif leader_id is not None:
         dept.leader_id = leader_id
     if sort is not None:
         dept.sort = sort
     if status is not None:
+        if status not in {"ENABLED", "DISABLED"}:
+            raise BizRuleError(f"非法的部门状态：{status}")
         dept.status = status
     dept.update_by = operator_id
     await session.flush()

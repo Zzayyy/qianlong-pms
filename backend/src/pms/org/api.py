@@ -332,6 +332,7 @@ async def dept_update(
         dept_name=body.deptName,
         dept_type=body.deptType,
         leader_id=body.leaderId,
+        clear_leader="leaderId" in body.model_fields_set and body.leaderId is None,
         sort=body.sort,
         status=body.status,
         parent_id=body.parentId,
