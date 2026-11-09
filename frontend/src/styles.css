@@ -150,16 +150,26 @@ body,
 
 .el-tabs__nav {
   padding: 3px;
-  background: #e9eef7;
-  border: 1px solid #dfe6f1;
-  border-radius: 9px;
+  background: #eef2f8;
+  border: 1px solid #e3e9f4;
+  border-radius: 10px;
 }
 
-.el-tabs__item {
+/* 覆盖 Element Plus 对首尾页签清零左右内边距的默认规则，
+   否则分段控件的首/尾页签会贴住容器边缘，白色选中块盖住圆角 */
+.el-tabs--top > .el-tabs__header .el-tabs__item:nth-child(2) {
+  padding-left: 16px;
+}
+
+.el-tabs--top > .el-tabs__header .el-tabs__item:last-child {
+  padding-right: 16px;
+}
+
+.el-tabs__nav .el-tabs__item {
   height: 30px;
   line-height: 30px;
-  padding: 0 14px;
-  border-radius: 7px;
+  padding: 0 16px;
+  border-radius: 6px;
   font-size: 13px;
   font-weight: 500;
   color: var(--pms-text-2);
@@ -168,14 +178,19 @@ body,
     color 0.16s ease;
 }
 
-.el-tabs__item:hover {
+.el-tabs__nav .el-tabs__item:hover {
   color: var(--pms-text);
 }
 
-.el-tabs__item.is-active {
+.el-tabs__nav .el-tabs__item.is-active {
   background: var(--pms-surface);
   color: var(--pms-primary-deep);
   box-shadow: 0 1px 2px rgba(16, 35, 70, 0.08);
+}
+
+.el-tabs__nav .el-tabs__item:focus-visible {
+  outline: 2px solid var(--el-color-primary-light-5);
+  outline-offset: 1px;
 }
 
 .el-dialog {

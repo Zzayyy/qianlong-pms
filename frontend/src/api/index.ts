@@ -333,5 +333,25 @@ export const listOperateLogs = (params: Record<string, unknown>) =>
 export const listLoginLogs = (params: Record<string, unknown>) =>
   get<Page<Record<string, unknown>>>('/audit/login-logs', params)
 
+/** 审计日志中出现过的业务模块（筛选下拉）。 */
+export const listAuditModules = () => get<string[]>('/audit/modules')
+
+export interface ArchivePolicy {
+  keepMonths: number
+  defaultKeepMonths: number
+  tables: string[]
+}
+
+/** 归档策略：默认保留月数与参与归档的表。 */
+export const auditArchivePolicy = () => get<ArchivePolicy>('/audit/archive/policy')
+
+export interface ArchiveReport {
+  dryRun: boolean
+  cutoff: string
+  keepMonths: number
+  total: number
+  tables: Record<string, Record<string, number>>
+}
+
 export const archiveAudit = (data: { keepMonths: number; dryRun: boolean }) =>
-  post<Record<string, unknown>>('/audit/archive', data)
+  post<ArchiveReport>('/audit/archive', data)

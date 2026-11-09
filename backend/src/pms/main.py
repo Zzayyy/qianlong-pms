@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from pms import __version__
+from pms.audit import api as audit_api
 from pms.audit.middleware import AuditMiddleware
 from pms.change import api as change_api
 from pms.common.codes import ErrorCode
@@ -134,6 +135,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(org_api.router)
     app.include_router(system_api.router)
+    app.include_router(audit_api.router)
     app.include_router(crm_api.router)
     app.include_router(project_api.router)
     app.include_router(change_api.router)

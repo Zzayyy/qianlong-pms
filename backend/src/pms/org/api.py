@@ -212,10 +212,11 @@ class LogoutIn(BaseModel):
 @router.post("/auth/logout", summary="登出")
 async def logout(body: LogoutIn, request: Request) -> object:
     """将令牌加入黑名单（踢下线）并记录登出日志。"""
-    decode_access_token(body.token)
+    payload = decode_access_token(body.token)
     await blacklist_add(body.token, ttl=7 * 24 * 3600)
     await record_login(
-        username=str(decode_access_token(body.token).get("sub") or ""),
+        # 留痕记录账号而非用户 ID，便于登录日志按账号检索
+        username=str(payload.get("username") or payload.get("sub") or ""),
         ip=request.client.host if request.client else "",
         user_agent=request.headers.get("user-agent", "")[:500],
         status="LOGOUT",

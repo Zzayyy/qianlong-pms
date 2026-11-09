@@ -9,20 +9,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pms.audit.archive import DEFAULT_KEEP_MONTHS, archive_audit
 from pms.common.exceptions import ParamError
-from pms.common.response import ok, paged
+from pms.common.response import ok
 from pms.core.context import AuthContext
-from pms.core.deps import (
-    Pagination,
-    get_pagination,
-    get_session,
-    require_permissions,
-)
-from pms.org.models import SysOperateLog
+from pms.core.deps import get_session, require_permissions
 from pms.system.config_service import ConfigService, validate_value
 from pms.system.defaults import CONFIG_GROUPS, DEFAULT_CONFIGS, config_type, effective_remark
-from pms.system.models import SysConfig, SysDictItem, SysLoginLog
+from pms.system.models import SysConfig, SysDictItem
 
 router = APIRouter(prefix="/api/v1", tags=["系统管理"])
 
@@ -192,129 +185,6 @@ async def seed_configs(
     count = await ConfigService(session).seed_defaults(operator_id=context.user_id)
     await session.commit()
     return ok({"seeded": count})
-
-
-class ArchiveIn(BaseModel):
-    """归档入参。"""
-
-    keepMonths: int = DEFAULT_KEEP_MONTHS
-    dryRun: bool = True
-
-
-@router.post("/audit/archive", summary="审计表按月归档")
-async def archive_logs(
-    body: ArchiveIn,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("sys:config"))],
-) -> object:
-    """手动归档：默认预演（`dryRun=true`），确认后再置 false 真正搬移。"""
-    report = await archive_audit(
-        session,
-        keep_months=max(1, body.keepMonths),
-        dry_run=body.dryRun,
-    )
-    del context
-    return ok(report)
-
-
-@router.get("/audit/operate-logs", summary="操作审计查询")
-async def list_operate_logs(
-    pagination: Annotated[Pagination, Depends(get_pagination)],
-    session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("sys:log:view"))],
-    module: str = "",
-    result: str = "",
-    user_id: int = 0,
-) -> object:
-    """按模块 / 结果 / 操作人查询操作审计（含权限拒绝记录），倒序返回。"""
-    stmt = select(SysOperateLog).where(SysOperateLog.deleted == 0)
-    if module:
-        stmt = stmt.where(SysOperateLog.module == module)
-    if result:
-        stmt = stmt.where(SysOperateLog.result == result)
-    if user_id:
-        stmt = stmt.where(SysOperateLog.user_id == user_id)
-    total = len((await session.execute(stmt)).scalars().all())
-    rows = (
-        (
-            await session.execute(
-                stmt.order_by(SysOperateLog.id.desc())
-                .offset(pagination.offset)
-                .limit(pagination.page_size)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    del context
-    return paged(
-        [
-            {
-                "id": row.id,
-                "module": row.module,
-                "operation": row.operation,
-                "method": row.method,
-                "url": row.url,
-                "params": row.params,
-                "result": row.result,
-                "ip": row.ip,
-                "userId": row.user_id,
-                "costMs": row.cost_ms,
-                "traceId": row.trace_id,
-                "createTime": row.create_time.isoformat() if row.create_time else "",
-            }
-            for row in rows
-        ],
-        total,
-        pagination.page_num,
-        pagination.page_size,
-    )
-
-
-@router.get("/audit/login-logs", summary="登录日志查询")
-async def list_login_logs(
-    pagination: Annotated[Pagination, Depends(get_pagination)],
-    session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("sys:log:view"))],
-    username: str = "",
-    status: str = "",
-) -> object:
-    """按账号 / 状态查询登录日志（成功、失败、登出）。"""
-    stmt = select(SysLoginLog).where(SysLoginLog.deleted == 0)
-    if username:
-        stmt = stmt.where(SysLoginLog.username == username)
-    if status:
-        stmt = stmt.where(SysLoginLog.status == status)
-    total = len((await session.execute(stmt)).scalars().all())
-    rows = (
-        (
-            await session.execute(
-                stmt.order_by(SysLoginLog.id.desc())
-                .offset(pagination.offset)
-                .limit(pagination.page_size)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    del context
-    return paged(
-        [
-            {
-                "id": row.id,
-                "username": row.username,
-                "ip": row.ip,
-                "status": row.status,
-                "message": row.message,
-                "traceId": row.trace_id,
-                "createTime": row.create_time.isoformat() if row.create_time else "",
-            }
-            for row in rows
-        ],
-        total,
-        pagination.page_num,
-        pagination.page_size,
-    )
 
 
 @router.get("/dicts/{dict_code}", summary="字典项")
