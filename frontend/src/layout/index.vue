@@ -296,6 +296,13 @@ const noticeLoading = ref(false)
 const unreadCount = ref(0)
 let noticeTimer: number | undefined
 
+const noticeCenterVisible = ref(false)
+const noticeCenterRows = ref<NoticeItem[]>([])
+const noticeCenterTotal = ref(0)
+const noticeCenterLoading = ref(false)
+const noticeCenterUnreadOnly = ref(false)
+const noticeCenterPage = reactive({ pageNum: 1, pageSize: 10 })
+
 const noticeTime = (value: string) => (value ? value.replace('T', ' ').slice(5, 16) : '')
 
 const loadUnread = async () => {
@@ -320,6 +327,35 @@ const loadNotices = async () => {
   }
 }
 
+const loadNoticeCenter = async () => {
+  noticeCenterLoading.value = true
+  try {
+    const data = await listNotices({
+      pageNum: noticeCenterPage.pageNum,
+      pageSize: noticeCenterPage.pageSize,
+      unreadOnly: noticeCenterUnreadOnly.value
+    })
+    noticeCenterRows.value = data.list || []
+    noticeCenterTotal.value = Number(data.total || 0)
+  } catch {
+    noticeCenterRows.value = []
+  } finally {
+    noticeCenterLoading.value = false
+  }
+}
+
+const openNoticeCenter = () => {
+  noticeVisible.value = false
+  noticeCenterVisible.value = true
+  noticeCenterPage.pageNum = 1
+  loadNoticeCenter()
+}
+
+const switchNoticeCenter = () => {
+  noticeCenterPage.pageNum = 1
+  loadNoticeCenter()
+}
+
 const openNotice = async (item: NoticeItem) => {
   if (!item.readStatus) {
     try {
@@ -331,6 +367,7 @@ const openNotice = async (item: NoticeItem) => {
     }
   }
   noticeVisible.value = false
+  noticeCenterVisible.value = false
   if (item.bizType === 'WORKLOG') {
     await router.push({ path: '/worklogs', query: { worklogId: String(item.bizId) } })
   } else if (item.bizType === 'WORKLOG_REMINDER') {
@@ -343,8 +380,13 @@ const markAllNotices = async () => {
     const result = await readAllNotices()
     unreadCount.value = 0
     notices.value = notices.value.map((item) => ({ ...item, readStatus: 1 }))
+    noticeCenterRows.value = noticeCenterRows.value.map((item) => ({
+      ...item,
+      readStatus: 1
+    }))
     ElMessage.success(`已处理 ${Number(result.count || 0)} 条消息`)
     await loadNotices()
+    if (noticeCenterVisible.value) await loadNoticeCenter()
   } catch {
     /* 错误提示由请求拦截器统一弹出 */
   }
@@ -476,7 +518,9 @@ const markAllNotices = async () => {
               </div>
               <div class="notice-foot">
                 <span>共 {{ noticeTotal }} 条</span>
-                <span v-if="noticeTotal > notices.length">仅显示最近 {{ notices.length }} 条</span>
+                <el-button link type="primary" size="small" @click="openNoticeCenter">
+                  查看全部
+                </el-button>
               </div>
             </div>
           </el-popover>
@@ -578,6 +622,66 @@ const markAllNotices = async () => {
         <el-button type="primary" :loading="pwdSaving" @click="savePassword">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-drawer
+      v-model="noticeCenterVisible"
+      title="消息通知"
+      size="min(560px, 94vw)"
+    >
+      <div class="notice-center">
+        <div class="notice-center-toolbar">
+          <el-radio-group
+            v-model="noticeCenterUnreadOnly"
+            size="small"
+            @change="switchNoticeCenter"
+          >
+            <el-radio-button :value="false">全部</el-radio-button>
+            <el-radio-button :value="true">未读</el-radio-button>
+          </el-radio-group>
+          <el-button v-if="unreadCount" link type="primary" @click="markAllNotices">
+            全部已读
+          </el-button>
+        </div>
+
+        <div v-loading="noticeCenterLoading" class="notice-center-list">
+          <button
+            v-for="item in noticeCenterRows"
+            :key="String(item.id)"
+            type="button"
+            class="notice-item"
+            :class="{ 'is-unread': !item.readStatus }"
+            @click="openNotice(item)"
+          >
+            <span class="notice-dot" :class="{ 'is-hidden': item.readStatus }"></span>
+            <span class="notice-main">
+              <b>{{ item.title }}</b>
+              <p>{{ item.content }}</p>
+              <span>{{ noticeTime(item.createTime) }}</span>
+            </span>
+          </button>
+          <el-empty
+            v-if="!noticeCenterLoading && !noticeCenterRows.length"
+            description="暂无消息"
+            :image-size="64"
+          />
+        </div>
+
+        <el-pagination
+          v-model:current-page="noticeCenterPage.pageNum"
+          v-model:page-size="noticeCenterPage.pageSize"
+          :total="noticeCenterTotal"
+          :page-sizes="[10, 20, 50]"
+          :layout="
+            isMobile
+              ? 'prev, pager, next'
+              : 'total, sizes, prev, pager, next'
+          "
+          class="notice-center-pager"
+          @current-change="loadNoticeCenter"
+          @size-change="switchNoticeCenter"
+        />
+      </div>
+    </el-drawer>
 
     <el-drawer v-model="drawer" direction="ltr" size="264px" :with-header="false">
       <div class="drawer-head">
@@ -971,6 +1075,36 @@ const markAllNotices = async () => {
   border-top: 1px solid var(--pms-line-soft);
   font-size: 11.5px;
   color: var(--pms-text-3);
+}
+
+.notice-center {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 6px 8px;
+}
+
+.notice-center-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.notice-center-list {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  max-height: calc(100vh - 210px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.notice-center-pager {
+  flex-wrap: wrap;
+  row-gap: 8px;
+  margin-top: 16px;
+  justify-content: flex-end;
 }
 
 .user-btn {

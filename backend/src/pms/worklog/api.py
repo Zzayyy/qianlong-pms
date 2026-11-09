@@ -6,10 +6,12 @@ v1.1.15 起：一人一天可多条日志（每条绑定一个项目），当日
 
 from __future__ import annotations
 
+import csv
+import io
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -354,6 +356,118 @@ async def list_worklogs(
         total,
         pagination.page_num,
         pagination.page_size,
+    )
+
+
+_STATUS_LABELS = {
+    "DRAFT": "草稿",
+    "SUBMITTED": "待确认",
+    "PENDING_APPROVE": "补填待审批",
+    "CONFIRMED": "已确认",
+    "REJECTED": "已驳回",
+}
+
+
+@router.get("/export", summary="导出工作日志")
+async def export_worklogs(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:view"))],
+    scope: Annotated[str, Query(pattern="^(mine|visible)$")] = "mine",
+    userId: Annotated[int | None, Query()] = None,
+    projectId: Annotated[int | None, Query()] = None,
+    status: Annotated[str, Query()] = "",
+    keyword: Annotated[str, Query()] = "",
+    logType: Annotated[str, Query()] = "",
+    excludeUserId: Annotated[int | None, Query()] = None,
+    dateFrom: Annotated[str | None, Query()] = None,
+    dateTo: Annotated[str | None, Query()] = None,
+) -> Response:
+    """按当前筛选条件导出 CSV（UTF-8 BOM，Excel 可直接打开）。"""
+    query = {
+        "project_id": projectId,
+        "date_from": dateFrom,
+        "date_to": dateTo,
+        "status": status,
+        "keyword": keyword,
+        "log_type": logType,
+        "exclude_user_id": excludeUserId or 0,
+        "limit": 0,
+    }
+    if scope == "mine":
+        rows = await service.list_worklogs(
+            session, user_ids=[context.user_id], **query
+        )
+    else:
+        candidates = await service.list_worklogs(
+            session,
+            user_ids=[userId] if userId else None,
+            **query,
+        )
+        rows = [
+            row
+            for row in candidates
+            if await service.can_view(session, context, row)
+        ]
+
+    projects = await service.project_names(session, {row.project_id for row in rows})
+    users = await service.user_names(session, {row.user_id for row in rows})
+    tasks = await service.task_names(session, {row.task_id for row in rows})
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "日期",
+            "编号",
+            "提交人",
+            "类型",
+            "项目",
+            "任务",
+            "工时",
+            "状态",
+            "补填",
+            "补填天数",
+            "工作内容",
+            "问题与阻塞",
+            "明日计划",
+            "提交时间",
+            "确认时间",
+        ]
+    )
+    for row in rows:
+        is_personal = row.log_type == "PERSONAL"
+        user_name, real_name = users.get(row.user_id, ("", ""))
+        submit_at = (
+            row.submit_at.strftime("%Y-%m-%d %H:%M:%S")
+            if row.submit_at
+            else (row.submit_time.isoformat() if row.submit_time else "")
+        )
+        writer.writerow(
+            [
+                row.log_date.isoformat() if row.log_date else "",
+                row.worklog_no,
+                real_name or user_name,
+                "个人" if is_personal else "项目",
+                "个人" if is_personal else (projects.get(row.project_id, "") or "非项目"),
+                tasks.get(row.task_id, ""),
+                float(row.total_hours),
+                _STATUS_LABELS.get(row.status, row.status),
+                "是" if row.is_late else "否",
+                row.late_days,
+                row.content,
+                row.problem,
+                row.plan,
+                submit_at,
+                row.confirm_time.isoformat() if row.confirm_time else "",
+            ]
+        )
+
+    content = "\ufeff" + output.getvalue()
+    filename = f"worklogs-{date.today().isoformat()}.csv"
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

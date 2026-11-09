@@ -168,6 +168,18 @@ export const worklogAction = (id: string, action: string, payload: Record<string
 export const listWorklogs = (params: Record<string, unknown>) =>
   get<Page<Record<string, unknown>>>('/worklogs', params)
 
+/** 按当前筛选条件导出工作日志 CSV。 */
+export const exportWorklogs = (params: Record<string, unknown>) => {
+  const query = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      query.set(key, String(value))
+    }
+  })
+  const date = new Date().toISOString().slice(0, 10)
+  return download(`/worklogs/export?${query.toString()}`, `worklogs-${date}.csv`)
+}
+
 /** 按当日 / 本周 / 本月汇总个人工时。 */
 export const worklogSummary = (params: Record<string, unknown>) =>
   get<Record<string, unknown>>('/worklogs/summary', params)

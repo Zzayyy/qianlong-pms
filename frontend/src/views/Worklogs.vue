@@ -7,6 +7,7 @@ import {
   addWorklogComment,
   deleteWorklog,
   deleteWorklogComment,
+  exportWorklogs,
   listTasks,
   listWorklogs,
   readAllWorklogReminders,
@@ -256,6 +257,118 @@ const maxProjectHours = computed(() =>
 const projectWidth = (item: ProjectHours) =>
   `${Math.max((Number(item.hours || 0) / maxProjectHours.value) * 100, 3)}%`
 
+/* ------------------------------ 近 12 周热力 ------------------------------ */
+interface HeatCell {
+  date: string
+  hours: number
+  count: number
+  future: boolean
+}
+
+const heatmapDays = ref<DayPoint[]>([])
+const heatmapStart = ref('')
+const heatmapRange = ref('')
+const heatmapLoading = ref(false)
+const heatTip = ref<HeatCell | null>(null)
+const heatTipBelow = ref(false)
+const heatTipPos = reactive({ left: 0, top: 0 })
+
+const shiftDate = (base: Date, days: number) => {
+  const next = new Date(base)
+  next.setDate(next.getDate() + days)
+  return next
+}
+
+const isoOf = (value: Date) => {
+  const month = String(value.getMonth() + 1).padStart(2, '0')
+  const day = String(value.getDate()).padStart(2, '0')
+  return `${value.getFullYear()}-${month}-${day}`
+}
+
+const heatmapWeeks = computed<HeatCell[][]>(() => {
+  if (!heatmapStart.value) return []
+  const [year, month, day] = heatmapStart.value.split('-').map(Number)
+  const start = new Date(year, month - 1, day)
+  const today = localToday()
+  const byDate = new Map(heatmapDays.value.map((item) => [item.date, item]))
+  const weeks: HeatCell[][] = []
+  for (let week = 0; week < 26; week += 1) {
+    const cells: HeatCell[] = []
+    for (let weekday = 0; weekday < 7; weekday += 1) {
+      const date = isoOf(shiftDate(start, week * 7 + weekday))
+      const item = byDate.get(date)
+      cells.push({
+        date,
+        hours: Number(item?.hours || 0),
+        count: Number(item?.count || 0),
+        future: date > today
+      })
+    }
+    weeks.push(cells)
+  }
+  return weeks
+})
+
+const heatmapTotal = computed(() =>
+  Math.round(
+    heatmapDays.value.reduce((sum, item) => sum + Number(item.hours || 0), 0) * 10
+  ) / 10
+)
+
+const heatLevel = (hours: number) => {
+  if (hours <= 0) return 'is-l0'
+  if (hours < 4) return 'is-l1'
+  if (hours < 6) return 'is-l2'
+  if (hours < 8) return 'is-l3'
+  return 'is-l4'
+}
+
+const showHeatTip = (cell: HeatCell, event: MouseEvent) => {
+  if (cell.future) return
+  const target = event.currentTarget as HTMLElement | null
+  const panel = target?.closest('.heatmap-panel') as HTMLElement | null
+  if (!target || !panel) return
+  const cellRect = target.getBoundingClientRect()
+  const panelRect = panel.getBoundingClientRect()
+  const offsetTop = cellRect.top - panelRect.top
+  heatTipBelow.value = offsetTop < 62
+  heatTip.value = cell
+  const center = cellRect.left - panelRect.left + cellRect.width / 2
+  heatTipPos.left = Math.max(58, Math.min(panelRect.width - 58, center))
+  heatTipPos.top = heatTipBelow.value
+    ? cellRect.bottom - panelRect.top + 8
+    : offsetTop - 8
+}
+
+const hideHeatTip = () => {
+  heatTip.value = null
+  heatTipBelow.value = false
+}
+
+const loadHeatmap = async () => {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const mondayOffset = (today.getDay() + 6) % 7
+  const start = shiftDate(today, -(25 * 7 + mondayOffset))
+  const dateFrom = isoOf(start)
+  const dateTo = isoOf(today)
+  heatmapStart.value = dateFrom
+  heatmapRange.value = `${dateFrom.slice(5)} ~ ${dateTo.slice(5)}`
+  heatmapLoading.value = true
+  try {
+    const data = (await worklogSummary({
+      period: 'custom',
+      dateFrom,
+      dateTo
+    })) as unknown as { days?: DayPoint[] }
+    heatmapDays.value = data.days || []
+  } catch {
+    heatmapDays.value = []
+  } finally {
+    heatmapLoading.value = false
+  }
+}
+
 const todaySummary = ref<DaySummary | null>(null)
 const todayMissing = computed(
   () => !!todaySummary.value && Number(todaySummary.value.logCount || 0) === 0
@@ -415,6 +528,7 @@ const tab = ref<TabKey>('mine')
 const rows = ref<WorklogRow[]>([])
 const total = ref(0)
 const listLoading = ref(false)
+const exporting = ref(false)
 const page = reactive({ pageNum: 1, pageSize: 10 })
 const filters = reactive({
   dateRange: [] as string[] | null,
@@ -889,6 +1003,36 @@ const refreshAll = async () => {
   if (detailVisible.value && detailWorklog.value) await reloadDetail(detailWorklog.value.id)
 }
 
+const exportLogs = async () => {
+  if (exporting.value) return
+  exporting.value = true
+  try {
+    const range = filters.dateRange || []
+    const params: Record<string, unknown> = {
+      scope: tab.value === 'mine' ? 'mine' : 'visible',
+      projectId: filters.projectId || undefined,
+      keyword: filters.keyword.trim() || undefined,
+      dateFrom: range[0],
+      dateTo: range[1],
+      excludeUserId:
+        tab.value === 'mine' ? undefined : currentUserId.value || undefined
+    }
+    if (tab.value === 'pending') {
+      params.status = 'SUBMITTED,PENDING_APPROVE'
+    } else if (tab.value === 'team') {
+      params.status = 'SUBMITTED,PENDING_APPROVE,CONFIRMED'
+    } else if (filters.status) {
+      params.status = filters.status
+    }
+    await exportWorklogs(params)
+    ElMessage.success('导出已开始')
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
+  } finally {
+    exporting.value = false
+  }
+}
+
 const submitRow = async (row: any) => {
   try {
     const result = await worklogAction(row.id, 'submit')
@@ -994,7 +1138,8 @@ onMounted(() => {
     loadLogs(),
     loadSummary(),
     loadToday(),
-    loadReminderBadge()
+    loadReminderBadge(),
+    loadHeatmap()
   ]).then(() => handleNoticeQuery())
 })
 
@@ -1015,6 +1160,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       </div>
       <div class="head-ops">
         <el-button :loading="listLoading || summaryLoading" @click="refreshAll">刷新</el-button>
+        <el-button :loading="exporting" @click="exportLogs">导出</el-button>
         <el-button v-if="canManageWorklog" @click="openReminderDialog">发起催办</el-button>
         <el-button v-if="canCreate" type="primary" @click="openCreate">写日志</el-button>
       </div>
@@ -1047,7 +1193,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </el-radio-group>
       </div>
 
-      <div class="stats-body">
+      <div class="stats-body" :class="{ 'is-single': trendDays.length <= 1 }">
         <div class="kpi-grid">
           <div class="kpi">
             <span class="kpi-label">工时合计</span>
@@ -1094,11 +1240,78 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </div>
       </div>
 
-      <div v-if="summary?.byProject?.length" class="project-bars">
-        <div v-for="item in summary.byProject.slice(0, 6)" :key="String(item.projectId)" class="project-bar">
-          <span class="pb-name">{{ item.projectName }}</span>
-          <span class="pb-track"><span class="pb-fill" :style="{ width: projectWidth(item) }"></span></span>
-          <span class="pb-hours">{{ item.hours }}h</span>
+      <div class="stats-lower">
+        <div class="project-bars">
+          <div class="project-bars-head">
+            <span>项目 / 类型工时</span>
+            <span v-if="(summary?.byProject?.length ?? 0) > 6">仅显示前 6 项</span>
+          </div>
+          <template v-if="summary?.byProject?.length">
+            <div
+              v-for="item in summary.byProject.slice(0, 6)"
+              :key="String(item.projectId)"
+              class="project-bar"
+            >
+              <span class="pb-name">{{ item.projectName }}</span>
+              <span class="pb-track">
+                <span class="pb-fill" :style="{ width: projectWidth(item) }"></span>
+              </span>
+              <span class="pb-hours">{{ item.hours }}h</span>
+            </div>
+          </template>
+          <div v-else class="stats-empty">>当前周期暂无工时</div>
+        </div>
+
+        <div v-loading="heatmapLoading" class="heatmap-panel">
+          <div class="heatmap-head">
+            <span>近半年工作热力</span>
+            <span>{{ heatmapRange }}</span>
+          </div>
+          <div class="heatmap-scroll">
+            <div class="heatmap-body">
+              <div class="heatmap-weekdays">
+                <span v-for="(label, index) in ['一', '', '三', '', '五', '', '日']" :key="index">
+                  {{ label }}
+                </span>
+              </div>
+              <div class="heatmap-grid">
+                <div v-for="(week, weekIndex) in heatmapWeeks" :key="weekIndex" class="heatmap-week">
+                  <span
+                    v-for="cell in week"
+                    :key="cell.date"
+                    class="heat-cell"
+                    :class="[
+                      heatLevel(cell.hours),
+                      { 'is-future': cell.future, 'is-today': cell.date === localToday() }
+                    ]"
+                    @mouseenter="showHeatTip(cell, $event)"
+                    @mouseleave="hideHeatTip"
+                  ></span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="heatmap-foot">
+            <span>累计 {{ heatmapTotal }}h</span>
+            <span class="heatmap-legend">
+              少
+              <i class="heat-cell is-l0"></i>
+              <i class="heat-cell is-l1"></i>
+              <i class="heat-cell is-l2"></i>
+              <i class="heat-cell is-l3"></i>
+              <i class="heat-cell is-l4"></i>
+              多
+            </span>
+          </div>
+          <div
+            v-if="heatTip"
+            class="heatmap-tooltip"
+            :class="{ 'is-below': heatTipBelow }"
+            :style="{ left: `${heatTipPos.left}px`, top: `${heatTipPos.top}px` }"
+          >
+            <b>{{ heatTip.date }}</b>
+            <span>{{ heatTip.hours }} 小时 · {{ heatTip.count }} 条日志</span>
+          </div>
         </div>
       </div>
     </div>
@@ -1265,12 +1478,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       />
     </div>
 
-    <el-drawer
+    <el-dialog
       v-model="formVisible"
       :title="formMode === 'edit' ? '编辑日志' : '写工作日志'"
-      size="min(720px, 94vw)"
+      width="min(820px, 94vw)"
+      align-center
+      :close-on-click-modal="false"
+      class="worklog-form-dialog"
     >
-      <div class="drawer-body">
+      <div class="dialog-body">
         <div class="seg log-type-seg">
           <button
             type="button"
@@ -1402,7 +1618,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </el-button>
         </div>
       </template>
-    </el-drawer>
+    </el-dialog>
 
     <el-drawer v-model="detailVisible" title="日志详情" size="min(680px, 94vw)">
       <div v-loading="detailLoading" class="detail">
@@ -2061,12 +2277,38 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   white-space: nowrap;
 }
 
-.project-bars {
+.stats-lower {
   display: grid;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 20px;
   margin-top: 16px;
   padding-top: 14px;
   border-top: 1px solid var(--pms-line-soft);
+}
+
+.project-bars {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.project-bars-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--pms-text-3);
+}
+
+.stats-empty {
+  padding: 16px 12px;
+  border: 1px dashed var(--pms-line);
+  border-radius: 8px;
+  background: #fafbfe;
+  font-size: 12.5px;
+  color: var(--pms-text-3);
 }
 
 .project-bar {
@@ -2103,6 +2345,181 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--pms-text-2);
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.heatmap-panel {
+  position: relative;
+  min-width: 0;
+  padding-left: 20px;
+  border-left: 1px solid var(--pms-line-soft);
+}
+
+.heatmap-scroll {
+  overflow-x: auto;
+  padding: 6px 4px 4px;
+}
+
+@media (min-width: 901px) {
+  .heatmap-scroll {
+    overflow: visible;
+    padding: 6px 0 0;
+  }
+}
+
+.heatmap-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--pms-text-3);
+}
+
+.heatmap-body {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 8px;
+}
+
+.heatmap-weekdays {
+  display: grid;
+  grid-template-rows: repeat(7, 14px);
+  gap: 3px;
+  width: 14px;
+  flex: none;
+  font-size: 9.5px;
+  line-height: 14px;
+  color: var(--pms-text-3);
+  text-align: center;
+}
+
+.heatmap-grid {
+  display: flex;
+  gap: 3px;
+}
+
+.heatmap-week {
+  display: grid;
+  grid-template-rows: repeat(7, 14px);
+  gap: 3px;
+}
+
+.heat-cell {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: #ebedf0;
+  transition:
+    transform 0.1s ease,
+    outline-color 0.1s ease;
+}
+
+.heat-cell.is-l1 {
+  background: #c6dbff;
+}
+
+.heat-cell.is-l2 {
+  background: #8ab4ff;
+}
+
+.heat-cell.is-l3 {
+  background: #4d87ff;
+}
+
+.heat-cell.is-l4 {
+  background: #1f5fe0;
+}
+
+.heat-cell.is-future {
+  background: transparent;
+  border: 1px dashed #e7ecf4;
+}
+
+.heat-cell.is-today {
+  outline: 2px solid var(--pms-primary-deep);
+  outline-offset: 1px;
+}
+
+.heat-cell:not(.is-future):hover {
+  outline: 1px solid rgba(31, 95, 224, 0.45);
+  outline-offset: 1px;
+  transform: scale(1.12);
+}
+
+.heatmap-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 11.5px;
+  color: var(--pms-text-3);
+}
+
+.heatmap-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.heatmap-legend .heat-cell {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+}
+
+.heatmap-tooltip {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #1f2328;
+  color: #fff;
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translate(-50%, -100%);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.18);
+}
+
+.heatmap-tooltip::after {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  border: 4px solid transparent;
+  border-top-color: #1f2328;
+  content: '';
+  transform: translateX(-50%);
+}
+
+.heatmap-tooltip.is-below {
+  transform: translate(-50%, 0);
+}
+
+.heatmap-tooltip.is-below::after {
+  top: auto;
+  bottom: 100%;
+  border-top-color: transparent;
+  border-bottom-color: #1f2328;
+}
+
+.heatmap-tooltip b {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.heatmap-tooltip span {
+  color: #c9d1d9;
 }
 
 /* ---------------- 列表 ---------------- */
@@ -2220,9 +2637,11 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   justify-content: flex-end;
 }
 
-/* ---------------- 填写抽屉 ---------------- */
-.drawer-body {
-  padding: 4px 20px 20px;
+/* ---------------- 填写弹窗 ---------------- */
+.dialog-body {
+  max-height: min(66vh, 620px);
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .log-type-seg {
@@ -2527,6 +2946,17 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     grid-template-columns: 1fr;
   }
 
+  .stats-lower {
+    grid-template-columns: 1fr;
+  }
+
+  .heatmap-panel {
+    padding-top: 14px;
+    padding-left: 0;
+    border-top: 1px solid var(--pms-line-soft);
+    border-left: 0;
+  }
+
   .trend {
     height: 70px;
   }
@@ -2588,9 +3018,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .drawer-body,
   .detail {
     padding: 4px 14px 20px;
+  }
+
+  .dialog-body {
+    max-height: 70vh;
   }
 
   .form-footer .footer-tip {
