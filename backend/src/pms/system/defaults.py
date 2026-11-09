@@ -27,7 +27,7 @@ DEFAULT_CONFIGS: Final[Mapping[str, ConfigValue]] = {
     "worklog.hours.step": "0.5",
     "worklog.project.visible": "true",
     "worklog.dept.visible": "false",
-    "worklog.confirm.required": "true",
+    "worklog.confirm.required": "false",
     "worklog.remind.enabled": "true",
     # ---- 项目可见性（需求 3）----
     "project.dept.visible": "true",
