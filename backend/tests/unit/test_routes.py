@@ -12,6 +12,7 @@ from pms.main import create_app
 # (方法, 路径, 期望处理函数名)
 GUARD_CASES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/v1/worklogs/stats", "stats"),
+    ("GET", "/api/v1/worklogs/summary", "summary"),
     ("GET", "/api/v1/worklogs/options", "options"),
     ("GET", "/api/v1/worklogs/day-summary", "day_summary"),
     ("POST", "/api/v1/configs/seed", "seed_configs"),

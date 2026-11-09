@@ -6,13 +6,14 @@ v1.1.15 起：一人一天可多条日志（每条绑定一个项目），当日
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pms.common.exceptions import DataForbiddenError
+from pms.common.exceptions import DataForbiddenError, ParamError
 from pms.common.response import ok, paged
 from pms.core.context import AuthContext
 from pms.core.deps import Pagination, get_pagination, get_session, require_permissions
@@ -57,7 +58,14 @@ class RemindIn(BaseModel):
     content: str = ""
 
 
-def _out(worklog: object, project_name: str = "") -> dict[str, object]:
+def _out(
+    worklog: object,
+    project_name: str = "",
+    *,
+    user_name: str = "",
+    real_name: str = "",
+    task_name: str = "",
+) -> dict[str, object]:
     """日志出参。"""
     from pms.worklog.models import WlWorklog
 
@@ -66,10 +74,13 @@ def _out(worklog: object, project_name: str = "") -> dict[str, object]:
         "id": worklog.id,
         "worklogNo": worklog.worklog_no,
         "userId": worklog.user_id,
+        "userName": user_name,
+        "realName": real_name,
         "deptId": worklog.dept_id,
         "projectId": worklog.project_id,
         "projectName": project_name,
         "taskId": worklog.task_id,
+        "taskName": task_name,
         "logDate": worklog.log_date,
         "totalHours": float(worklog.total_hours),
         "content": worklog.content,
@@ -79,6 +90,9 @@ def _out(worklog: object, project_name: str = "") -> dict[str, object]:
         "isLate": worklog.is_late,
         "lateDays": worklog.late_days,
         "riskFlag": worklog.risk_flag,
+        "submitTime": worklog.submit_time.isoformat() if worklog.submit_time else "",
+        "confirmTime": worklog.confirm_time.isoformat() if worklog.confirm_time else "",
+        "rejectReason": worklog.reject_reason,
     }
 
 
@@ -108,13 +122,12 @@ async def day_summary(
     return ok(await service.day_summary(session, user_id=target, log_date=date))
 
 
-@router.post("", summary="保存日志草稿")
-async def save(
+async def _save_worklog(
     body: WorklogIn,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("worklog:create"))],
+    session: AsyncSession,
+    context: AuthContext,
 ) -> object:
-    """保存一条日志（新增或更新）。一人一天可多条，每条选择一个项目。"""
+    """保存日志（新增或更新）并返回当日累计提示。"""
     worklog = await service.save_draft(
         session,
         context,
@@ -144,6 +157,28 @@ async def save(
             "warning": summary["warning"],
         }
     )
+
+
+@router.post("", summary="保存日志草稿")
+async def save(
+    body: WorklogIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:create"))],
+) -> object:
+    """保存一条日志（新增）。一人一天可多条，每条选择一个项目。"""
+    return await _save_worklog(body, session, context)
+
+
+@router.put("/{worklog_id}", summary="更新日志")
+async def update(
+    worklog_id: int,
+    body: WorklogIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:create"))],
+) -> object:
+    """更新自己的草稿 / 被驳回日志（仅本人可改）。"""
+    body.id = worklog_id
+    return await _save_worklog(body, session, context)
 
 
 @router.post("/{worklog_id}/submit", summary="提交日志")
@@ -236,29 +271,114 @@ async def list_worklogs(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("worklog:view"))],
     pagination: Annotated[Pagination, Depends(get_pagination)],
+    scope: Annotated[str, Query(pattern="^(mine|visible)$")] = "visible",
     userId: Annotated[int | None, Query()] = None,
     projectId: Annotated[int | None, Query()] = None,
+    status: Annotated[str, Query()] = "",
+    keyword: Annotated[str, Query()] = "",
     dateFrom: Annotated[str | None, Query()] = None,
     dateTo: Annotated[str | None, Query()] = None,
 ) -> object:
-    """日志列表，**逐条按 07 §5 可见性过滤**（本人/下级/部门/项目组）。"""
-    rows = await service.list_worklogs(
-        session,
-        user_ids=[userId] if userId else None,
-        project_id=projectId,
-        date_from=dateFrom,
-        date_to=dateTo,
-        offset=pagination.offset,
-        limit=pagination.limit,
-    )
-    visible = [row for row in rows if await service.can_view(session, context, row)]
+    """日志列表。
+
+    - `scope=mine`：只返回本人日志（SQL 分页，数据按用户隔离）
+    - `scope=visible`：返回当前用户可见范围（本人/下级/部门/项目组），逐条校验后分页
+    """
+    if scope == "mine":
+        target_ids: list[int] = [context.user_id]
+        total = await service.count_worklogs(
+            session,
+            user_ids=target_ids,
+            project_id=projectId,
+            date_from=dateFrom,
+            date_to=dateTo,
+            status=status,
+            keyword=keyword,
+        )
+        rows = await service.list_worklogs(
+            session,
+            user_ids=target_ids,
+            project_id=projectId,
+            date_from=dateFrom,
+            date_to=dateTo,
+            status=status,
+            keyword=keyword,
+            offset=pagination.offset,
+            limit=pagination.page_size,
+        )
+        visible = rows
+    else:
+        candidates = await service.list_worklogs(
+            session,
+            user_ids=[userId] if userId else None,
+            project_id=projectId,
+            date_from=dateFrom,
+            date_to=dateTo,
+            status=status,
+            keyword=keyword,
+            limit=0,
+        )
+        matched = [
+            row for row in candidates if await service.can_view(session, context, row)
+        ]
+        total = len(matched)
+        visible = matched[pagination.offset : pagination.offset + pagination.page_size]
+
     names = await service.project_names(session, {row.project_id for row in visible})
+    users = await service.user_names(session, {row.user_id for row in visible})
+    tasks = await service.task_names(session, {row.task_id for row in visible})
     return paged(
-        [_out(row, names.get(row.project_id, "")) for row in visible],
-        len(visible),
+        [
+            _out(
+                row,
+                names.get(row.project_id, ""),
+                user_name=users.get(row.user_id, ("", ""))[0],
+                real_name=users.get(row.user_id, ("", ""))[1],
+                task_name=tasks.get(row.task_id, ""),
+            )
+            for row in visible
+        ],
+        total,
         pagination.page_num,
         pagination.page_size,
     )
+
+
+@router.get("/summary", summary="个人工时汇总")
+async def summary(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:view"))],
+    period: Annotated[str, Query(pattern="^(day|week|month|custom)$")] = "day",
+    dateText: Annotated[str | None, Query(alias="date")] = None,
+    dateFrom: Annotated[str | None, Query()] = None,
+    dateTo: Annotated[str | None, Query()] = None,
+    userId: Annotated[int | None, Query()] = None,
+) -> object:
+    """按当日 / 本周 / 本月 / 自定义区间汇总个人工时与填报情况。
+
+    注：必须定义在 `/{worklog_id}` 之前，否则会被路径参数路由抢先匹配。
+    """
+    target = userId or context.user_id
+    if target != context.user_id and not (context.is_privileged or context.is_dept_head):
+        raise DataForbiddenError("无该用户日志访问权限")
+    try:
+        anchor = date.fromisoformat(dateText) if dateText else None
+        start, end = service.period_bounds(
+            period,
+            anchor,
+            date_from=dateFrom or "",
+            date_to=dateTo or "",
+        )
+    except ValueError as exc:
+        raise ParamError("日期格式应为 YYYY-MM-DD") from exc
+    data = await service.period_summary(
+        session,
+        user_id=target,
+        date_from=start,
+        date_to=end,
+        period=period,
+    )
+    return ok(data)
 
 
 @router.get("/stats", summary="填写率与及时率")
@@ -269,12 +389,12 @@ async def stats(
     dateTo: Annotated[str, Query()],
     userId: Annotated[int | None, Query()] = None,
 ) -> object:
-    """个人填写率 / 及时率（R-LOG-12，按自然日去重）。
-
-    注：必须定义在 `/{worklog_id}` 之前，否则会被路径参数路由抢先匹配。
-    """
+    """个人填写率 / 及时率（R-LOG-12，按自然日去重）。"""
+    target = userId or context.user_id
+    if target != context.user_id and not (context.is_privileged or context.is_dept_head):
+        raise DataForbiddenError("无该用户日志访问权限")
     data = await service.stats(
-        session, user_id=userId or context.user_id, date_from=dateFrom, date_to=dateTo
+        session, user_id=target, date_from=dateFrom, date_to=dateTo
     )
     return ok(data)
 
@@ -290,14 +410,29 @@ async def detail(
     if not await service.can_view(session, context, worklog):
         raise DataForbiddenError("无该日志访问权限")
     items = await service.list_items(session, worklog_id)
-    names = await service.project_names(session, {worklog.project_id})
+    names = await service.project_names(
+        session, {worklog.project_id, *(item.project_id for item in items)}
+    )
+    tasks = await service.task_names(
+        session, {worklog.task_id, *(item.task_id for item in items)}
+    )
+    users = await service.user_names(session, {worklog.user_id})
+    user_name, real_name = users.get(worklog.user_id, ("", ""))
     return ok(
         {
-            "worklog": _out(worklog, names.get(worklog.project_id, "")),
+            "worklog": _out(
+                worklog,
+                names.get(worklog.project_id, ""),
+                user_name=user_name,
+                real_name=real_name,
+                task_name=tasks.get(worklog.task_id, ""),
+            ),
             "items": [
                 {
                     "projectId": item.project_id,
+                    "projectName": names.get(item.project_id, ""),
                     "taskId": item.task_id,
+                    "taskName": tasks.get(item.task_id, ""),
                     "hours": float(item.hours),
                     "content": item.content,
                     "progressAfter": float(item.progress_after),
@@ -315,7 +450,10 @@ async def comment(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("worklog:view"))],
 ) -> object:
-    """新增评论。"""
+    """新增评论（需对该日志有查看权限）。"""
+    worklog = await service.get_worklog(session, worklog_id)
+    if not await service.can_view(session, context, worklog):
+        raise DataForbiddenError("无该日志访问权限")
     row = await service.add_comment(session, worklog_id, context, body.content)
     await session.commit()
     return ok({"id": row.id})
@@ -327,9 +465,25 @@ async def comments(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("worklog:view"))],
 ) -> object:
-    """评论列表。"""
+    """评论列表（带评论人姓名）。"""
+    worklog = await service.get_worklog(session, worklog_id)
+    if not await service.can_view(session, context, worklog):
+        raise DataForbiddenError("无该日志访问权限")
     rows = await service.list_comments(session, worklog_id)
-    return ok([{"id": row.id, "userId": row.user_id, "content": row.content} for row in rows])
+    users = await service.user_names(session, {row.user_id for row in rows})
+    return ok(
+        [
+            {
+                "id": row.id,
+                "userId": row.user_id,
+                "userName": users.get(row.user_id, ("", ""))[0],
+                "realName": users.get(row.user_id, ("", ""))[1],
+                "content": row.content,
+                "createTime": row.create_time.isoformat() if row.create_time else "",
+            }
+            for row in rows
+        ]
+    )
 
 
 @router.post("/reminders", summary="催办")

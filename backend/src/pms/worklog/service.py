@@ -8,10 +8,10 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Final
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pms.common.exceptions import (
@@ -156,6 +156,8 @@ async def submit(session: AsyncSession, worklog_id: int, user_id: int = 0) -> Wl
     当日累计工时超过上限仍拒绝；超过预警阈值只提示（由调用方展示 `day_summary`）。
     """
     worklog = await _get(session, worklog_id)
+    if user_id and worklog.user_id != user_id:
+        raise DataForbiddenError("只能提交自己的日志")
     config = ConfigService(session)
     limits = await _limits(config)
     backfill_max = await config.get_int("worklog.backfill.maxDays")
@@ -426,6 +428,50 @@ async def list_reminders(
     return list(result.scalars().all())
 
 
+def _worklog_filters(
+    *,
+    user_ids: list[int] | None = None,
+    project_id: int | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    status: str = "",
+    keyword: str = "",
+) -> list[ColumnElement[bool]]:
+    """构造日志查询条件（列表与计数共用）。"""
+    conditions: list[ColumnElement[bool]] = [WlWorklog.deleted == 0]
+    if user_ids:
+        conditions.append(WlWorklog.user_id.in_(user_ids))
+    if project_id:
+        subq = select(WlItem.worklog_id).where(
+            WlItem.project_id == project_id, WlItem.deleted == 0
+        )
+        conditions.append(
+            or_(WlWorklog.project_id == project_id, WlWorklog.id.in_(subq))
+        )
+    if date_from:
+        conditions.append(WlWorklog.log_date >= date_from)
+    if date_to:
+        conditions.append(WlWorklog.log_date <= date_to)
+    if status:
+        values = [item.strip() for item in status.split(",") if item.strip()]
+        if len(values) == 1:
+            conditions.append(WlWorklog.status == values[0])
+        elif values:
+            conditions.append(WlWorklog.status.in_(values))
+    text = (keyword or "").strip()
+    if text:
+        like = f"%{text}%"
+        conditions.append(
+            or_(
+                WlWorklog.content.like(like),
+                WlWorklog.problem.like(like),
+                WlWorklog.plan.like(like),
+                WlWorklog.worklog_no.like(like),
+            )
+        )
+    return conditions
+
+
 async def list_worklogs(
     session: AsyncSession,
     *,
@@ -433,30 +479,57 @@ async def list_worklogs(
     project_id: int | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    status: str = "",
+    keyword: str = "",
     offset: int = 0,
-    limit: int = 20,
+    limit: int = 0,
 ) -> list[WlWorklog]:
-    """日志列表（候选集，可见性在 API 层用 `can_view` 逐条过滤）。"""
-    stmt = select(WlWorklog).where(WlWorklog.deleted == 0)
-    if user_ids:
-        stmt = stmt.where(WlWorklog.user_id.in_(user_ids))
-    if project_id:
-        subq = select(WlItem.worklog_id).where(
-            WlItem.project_id == project_id, WlItem.deleted == 0
-        )
-        stmt = stmt.where(
-            or_(WlWorklog.project_id == project_id, WlWorklog.id.in_(subq))
-        )
-    if date_from:
-        stmt = stmt.where(WlWorklog.log_date >= date_from)
-    if date_to:
-        stmt = stmt.where(WlWorklog.log_date <= date_to)
-    result = await session.execute(
-        stmt.order_by(WlWorklog.log_date.desc(), WlWorklog.id.desc())
-        .offset(offset)
-        .limit(limit)
+    """日志列表（候选集，可见性在 API 层用 `can_view` 逐条过滤）。
+
+    `limit <= 0` 表示不限制数量，供可见性过滤后自行分页使用。
+    """
+    conditions = _worklog_filters(
+        user_ids=user_ids,
+        project_id=project_id,
+        date_from=date_from,
+        date_to=date_to,
+        status=status,
+        keyword=keyword,
     )
+    stmt = (
+        select(WlWorklog)
+        .where(*conditions)
+        .order_by(WlWorklog.log_date.desc(), WlWorklog.id.desc())
+    )
+    if limit > 0:
+        stmt = stmt.offset(offset).limit(limit)
+    result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def count_worklogs(
+    session: AsyncSession,
+    *,
+    user_ids: list[int] | None = None,
+    project_id: int | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    status: str = "",
+    keyword: str = "",
+) -> int:
+    """按与列表一致的条件统计条数（本人日志分页用）。"""
+    conditions = _worklog_filters(
+        user_ids=user_ids,
+        project_id=project_id,
+        date_from=date_from,
+        date_to=date_to,
+        status=status,
+        keyword=keyword,
+    )
+    result = await session.execute(
+        select(func.count(WlWorklog.id)).where(*conditions)
+    )
+    return int(result.scalar_one() or 0)
 
 
 async def can_view(
@@ -541,6 +614,164 @@ async def stats(
         "onTimeRate": on_time_rate(on_time_days, submitted_days),
         "totalHours": float(sum(float(row.total_hours) for row in rows)),
     }
+
+
+def period_bounds(
+    period: str,
+    anchor: date | None = None,
+    *,
+    date_from: str = "",
+    date_to: str = "",
+) -> tuple[date, date]:
+    """按 `day/week/month/custom` 计算统计区间（含首尾）。"""
+    base = anchor or date.today()
+    key = (period or "day").lower()
+    if key == "week":
+        start = base - timedelta(days=base.weekday())
+        return start, start + timedelta(days=6)
+    if key == "month":
+        start = base.replace(day=1)
+        next_month = (start + timedelta(days=32)).replace(day=1)
+        return start, next_month - timedelta(days=1)
+    if key == "custom":
+        start = date.fromisoformat(date_from) if date_from else base
+        end = date.fromisoformat(date_to) if date_to else base
+        return (start, end) if start <= end else (end, start)
+    return base, base
+
+
+async def period_summary(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    date_from: date,
+    date_to: date,
+    period: str = "day",
+) -> dict[str, object]:
+    """按日/周/月汇总个人日志：工时、条数、填报率、项目与每日分布。"""
+    config = ConfigService(session)
+    limits = await _limits(config)
+    result = await session.execute(
+        select(WlWorklog)
+        .where(
+            WlWorklog.deleted == 0,
+            WlWorklog.user_id == user_id,
+            WlWorklog.log_date >= date_from,
+            WlWorklog.log_date <= date_to,
+            WlWorklog.status != WorklogStatus.REJECTED,
+        )
+        .order_by(WlWorklog.log_date, WlWorklog.id)
+    )
+    rows = list(result.scalars().all())
+
+    by_project: dict[int, dict[str, object]] = {}
+    by_status: dict[str, int] = {}
+    late_count = 0
+    for row in rows:
+        project_id = int(row.project_id or 0)
+        bucket = by_project.setdefault(
+            project_id,
+            {"projectId": project_id, "hours": 0.0, "logCount": 0},
+        )
+        bucket["hours"] = float(bucket["hours"]) + float(row.total_hours)
+        bucket["logCount"] = int(bucket["logCount"]) + 1
+        by_status[row.status] = by_status.get(row.status, 0) + 1
+        if row.is_late:
+            late_count += 1
+
+    names = await project_names(session, set(by_project))
+    projects = [
+        {
+            "projectId": item["projectId"],
+            "projectName": names.get(int(item["projectId"]), "") or "非项目",
+            "hours": round_hours(float(item["hours"]), limits.step),
+            "logCount": item["logCount"],
+        }
+        for item in by_project.values()
+    ]
+    projects.sort(key=lambda item: float(item["hours"]), reverse=True)
+
+    day_map: dict[date, dict[str, object]] = {}
+    current = date_from
+    while current <= date_to:
+        day_map[current] = {"date": current.isoformat(), "hours": 0.0, "count": 0}
+        current += timedelta(days=1)
+    for row in rows:
+        slot = day_map.get(row.log_date) if row.log_date else None
+        if slot is not None:
+            slot["hours"] = float(slot["hours"]) + float(row.total_hours)
+            slot["count"] = int(slot["count"]) + 1
+
+    total_hours = round_hours(
+        sum(float(row.total_hours) for row in rows), limits.step
+    )
+    filled_days = len({row.log_date for row in rows if row.log_date})
+    today = date.today()
+    calc_end = min(date_to, today)
+    required_days = workdays_between(date_from, calc_end) if calc_end >= date_from else 0
+
+    return {
+        "period": period,
+        "dateFrom": date_from.isoformat(),
+        "dateTo": date_to.isoformat(),
+        "totalHours": total_hours,
+        "logCount": len(rows),
+        "filledDays": filled_days,
+        "requiredDays": required_days,
+        "fillRate": fill_rate(filled_days, required_days),
+        "avgHoursPerWorkday": (
+            round(total_hours / required_days, 2) if required_days > 0 else 0.0
+        ),
+        "lateCount": late_count,
+        "warnHours": limits.warn_per_day,
+        "maxHours": limits.max_per_day,
+        "overWarn": (
+            period == "day"
+            and limits.warn_per_day > 0
+            and total_hours > limits.warn_per_day
+        ),
+        "byStatus": by_status,
+        "byProject": projects,
+        "days": [
+            {
+                "date": slot["date"],
+                "hours": round_hours(float(slot["hours"]), limits.step),
+                "count": slot["count"],
+            }
+            for slot in day_map.values()
+        ],
+    }
+
+
+async def user_names(
+    session: AsyncSession, user_ids: set[int]
+) -> dict[int, tuple[str, str]]:
+    """批量取用户名与姓名（列表/评论展示用）。"""
+    from pms.org.models import SysUser
+
+    ids = {int(user_id) for user_id in user_ids if user_id}
+    if not ids:
+        return {}
+    result = await session.execute(
+        select(SysUser.id, SysUser.username, SysUser.real_name).where(
+            SysUser.id.in_(ids)
+        )
+    )
+    return {
+        int(user_id): (str(username), str(real_name or ""))
+        for user_id, username, real_name in result.all()
+    }
+
+
+async def task_names(session: AsyncSession, task_ids: set[int]) -> dict[int, str]:
+    """批量取任务名称（详情展示用）。"""
+    ids = {int(task_id) for task_id in task_ids if task_id}
+    if not ids:
+        return {}
+    result = await session.execute(
+        select(PrjTask.id, PrjTask.task_name).where(PrjTask.id.in_(ids))
+    )
+    return {int(task_id): str(name) for task_id, name in result.all()}
 
 
 async def get_worklog(session: AsyncSession, worklog_id: int) -> WlWorklog:

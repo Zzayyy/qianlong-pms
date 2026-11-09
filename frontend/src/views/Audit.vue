@@ -96,13 +96,13 @@ const operateFilter = reactive({
   result: '',
   userId: undefined as number | undefined,
   keyword: '',
-  dateRange: [] as string[]
+  dateRange: [] as string[] | null
 })
 
 const loadOperate = async () => {
   operateLoading.value = true
   try {
-    const [dateFrom, dateTo] = operateFilter.dateRange
+    const [dateFrom, dateTo] = operateFilter.dateRange || []
     const data = await listOperateLogs({
       pageNum: operatePage.pageNum,
       pageSize: operatePage.pageSize,
@@ -146,13 +146,13 @@ const loginPage = reactive({ pageNum: 1, pageSize: 10 })
 const loginFilter = reactive({
   username: '',
   status: '',
-  dateRange: [] as string[]
+  dateRange: [] as string[] | null
 })
 
 const loadLogin = async () => {
   loginLoading.value = true
   try {
-    const [dateFrom, dateTo] = loginFilter.dateRange
+    const [dateFrom, dateTo] = loginFilter.dateRange || []
     const data = await listLoginLogs({
       pageNum: loginPage.pageNum,
       pageSize: loginPage.pageSize,

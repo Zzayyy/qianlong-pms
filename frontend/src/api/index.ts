@@ -156,13 +156,21 @@ export const changeAction = (id: string, action: string, payload: Record<string,
 /* ------------------------------ 日志 ------------------------------ */
 
 export const saveWorklog = (data: Record<string, unknown>) =>
-  post<{ id: string }>('/worklogs', data)
+  post<Record<string, unknown>>('/worklogs', data)
+
+/** 更新自己的草稿 / 被驳回日志。 */
+export const updateWorklog = (id: string, data: Record<string, unknown>) =>
+  put<Record<string, unknown>>(`/worklogs/${id}`, data)
 
 export const worklogAction = (id: string, action: string, payload: Record<string, unknown> = {}) =>
   post<Record<string, unknown>>(`/worklogs/${id}/${action}`, payload)
 
 export const listWorklogs = (params: Record<string, unknown>) =>
   get<Page<Record<string, unknown>>>('/worklogs', params)
+
+/** 按当日 / 本周 / 本月汇总个人工时。 */
+export const worklogSummary = (params: Record<string, unknown>) =>
+  get<Record<string, unknown>>('/worklogs/summary', params)
 
 /** 填报选项：补填天数上限、工时阈值与我参与的项目。 */
 export const worklogOptions = () => get<Record<string, unknown>>('/worklogs/options')
@@ -180,6 +188,9 @@ export const worklogStats = (params: Record<string, unknown>) =>
 
 export const worklogComments = (id: string) =>
   get<Record<string, unknown>[]>(`/worklogs/${id}/comments`)
+
+export const addWorklogComment = (id: string, content: string) =>
+  post<{ id: string }>(`/worklogs/${id}/comments`, { content })
 
 /* ------------------------------ 看板 ------------------------------ */
 
