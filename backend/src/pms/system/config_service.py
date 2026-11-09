@@ -14,15 +14,57 @@ from typing import Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pms.common.exceptions import BizRuleError
 from pms.common.logging import get_logger
 from pms.core.redis import CONFIG_CACHE, cache_delete, cache_get, cache_set
-from pms.system.defaults import CONFIG_REMARKS, DEFAULT_CONFIGS, effective_remark
+from pms.system.defaults import CONFIG_REMARKS, DEFAULT_CONFIGS, config_type, effective_remark
 from pms.system.models import SysConfig
 
 logger = get_logger(__name__)
 
 _LOCAL_TTL: Final[int] = 300
 _local_cache: dict[str, tuple[str, float]] = {}
+
+_BOOL_TRUE: Final[frozenset[str]] = frozenset({"true", "1", "yes", "on"})
+_BOOL_FALSE: Final[frozenset[str]] = frozenset({"false", "0", "no", "off"})
+_OPTIONAL_EMPTY: Final[frozenset[str]] = frozenset(
+    {"notify.mail.smtpHost", "notify.mail.smtpUser", "notify.mail.smtpFrom"}
+)
+
+
+def validate_value(key: str, raw: str) -> str:
+    """按参数类型校验并规范化取值。
+
+    Raises:
+        BizRuleError: 类型不符、负数、端口越界或必填项为空。
+    """
+    value = (raw or "").strip()
+    if len(value) > 1024:
+        raise BizRuleError(f"{key} 取值过长（最多 1024 字符）")
+    kind = config_type(key)
+    if kind == "BOOL":
+        lowered = value.lower()
+        if lowered in _BOOL_TRUE:
+            return "true"
+        if lowered in _BOOL_FALSE:
+            return "false"
+        raise BizRuleError(f"{key} 只接受 true 或 false")
+    if kind in {"INT", "FLOAT"}:
+        if not value:
+            raise BizRuleError(f"{key} 不能为空")
+        try:
+            number = int(value) if kind == "INT" else float(value)
+        except ValueError as exc:
+            name = "整数" if kind == "INT" else "数字"
+            raise BizRuleError(f"{key} 需要{name}：{value}") from exc
+        if number < 0:
+            raise BizRuleError(f"{key} 不能为负数")
+        if key == "notify.mail.smtpPort" and not 1 <= number <= 65535:
+            raise BizRuleError("notify.mail.smtpPort 需在 1~65535 之间")
+        return str(number) if kind == "INT" else format(number, "g")
+    if not value and key in DEFAULT_CONFIGS and key not in _OPTIONAL_EMPTY:
+        raise BizRuleError(f"{key} 不能为空")
+    return value
 
 
 def _cache_key(key: str) -> str:

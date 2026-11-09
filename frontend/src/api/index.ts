@@ -300,10 +300,28 @@ export const updateRolePermissions = (id: string, permIds: string[]) =>
 
 export const permissionTree = () => get<PermissionItem[]>('/permissions/tree')
 
-export const listConfigs = () => get<Record<string, unknown>[]>('/configs')
+export interface ConfigItem {
+  configKey: string
+  configValue: string
+  valueType: 'BOOL' | 'INT' | 'FLOAT' | 'STRING'
+  groupName: string
+  defaultValue: string
+  remark: string
+  builtin: number
+}
+
+export const listConfigs = () => get<ConfigItem[]>('/configs')
 
 export const updateConfig = (key: string, value: string) =>
   put<null>(`/configs/${key}`, { configValue: value })
+
+/** 批量保存参数（先整体校验，再统一写库）。 */
+export const updateConfigs = (items: { configKey: string; configValue: string }[]) =>
+  put<{ updated: number }>('/configs', { items })
+
+/** 恢复指定参数的默认值。 */
+export const resetConfigs = (configKeys: string[]) =>
+  post<{ reset: number }>('/configs/reset', { configKeys })
 
 export const dictItems = (code: string) => get<Record<string, unknown>[]>(`/dicts/${code}`)
 

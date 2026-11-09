@@ -151,6 +151,30 @@ def effective_remark(key: str, stored: str = "") -> str:
     return text
 
 
+def config_type(key: str) -> str:
+    """按默认值推断参数类型：BOOL / INT / FLOAT / STRING。
+
+    仅用于后台表单控件与保存校验；运行时仍由 `get_int/get_bool` 自行转换。
+    """
+    fallback = DEFAULT_CONFIGS.get(key)
+    if fallback is None:
+        return "STRING"
+    raw = fallback.strip().lower()
+    if raw in {"true", "false"}:
+        return "BOOL"
+    try:
+        int(raw)
+    except ValueError:
+        pass
+    else:
+        return "INT"
+    try:
+        float(raw)
+    except ValueError:
+        return "STRING"
+    return "FLOAT"
+
+
 CONFIG_GROUPS: Final[Mapping[str, str]] = {
     "job.": "定时任务",
     "audit.": "审计留痕",

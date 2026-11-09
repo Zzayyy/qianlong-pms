@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pms.audit.archive import DEFAULT_KEEP_MONTHS, archive_audit
+from pms.common.exceptions import ParamError
 from pms.common.response import ok, paged
 from pms.core.context import AuthContext
 from pms.core.deps import (
@@ -19,8 +20,8 @@ from pms.core.deps import (
     require_permissions,
 )
 from pms.org.models import SysOperateLog
-from pms.system.config_service import ConfigService
-from pms.system.defaults import CONFIG_GROUPS, DEFAULT_CONFIGS, effective_remark
+from pms.system.config_service import ConfigService, validate_value
+from pms.system.defaults import CONFIG_GROUPS, DEFAULT_CONFIGS, config_type, effective_remark
 from pms.system.models import SysConfig, SysDictItem, SysLoginLog
 
 router = APIRouter(prefix="/api/v1", tags=["系统管理"])
@@ -38,10 +39,30 @@ class ConfigOut(BaseModel):
 
     configKey: str
     configValue: str
+    valueType: str
     groupName: str
     defaultValue: str
     remark: str
     builtin: int
+
+
+class ConfigBatchItem(BaseModel):
+    """批量更新单项。"""
+
+    configKey: str = Field(min_length=1, max_length=128)
+    configValue: str = Field(max_length=1024)
+
+
+class ConfigBatchIn(BaseModel):
+    """批量更新入参。"""
+
+    items: list[ConfigBatchItem] = Field(default_factory=list)
+
+
+class ConfigResetIn(BaseModel):
+    """恢复默认入参。"""
+
+    configKeys: list[str] = Field(default_factory=list)
 
 
 def _group_of(key: str) -> str:
@@ -67,6 +88,7 @@ async def list_configs(
             ConfigOut(
                 configKey=key,
                 configValue=row.config_value if row else default_value,
+                valueType=config_type(key),
                 groupName=row.group_name if row else _group_of(key),
                 defaultValue=default_value,
                 remark=effective_remark(key, row.remark if row else ""),
@@ -79,6 +101,7 @@ async def list_configs(
                 ConfigOut(
                     configKey=key,
                     configValue=row.config_value,
+                    valueType=config_type(key),
                     groupName=row.group_name,
                     defaultValue="",
                     remark=effective_remark(key, row.remark) or "自定义参数（未登记中文说明）",
@@ -89,6 +112,57 @@ async def list_configs(
     return ok([item.model_dump() for item in items])
 
 
+async def _known_config_keys(session: AsyncSession) -> set[str]:
+    """已登记或已入库的参数键集合。"""
+    result = await session.execute(
+        select(SysConfig.config_key).where(SysConfig.deleted == 0)
+    )
+    return set(DEFAULT_CONFIGS) | {str(key) for key in result.scalars().all()}
+
+
+@router.put("/configs", summary="批量修改系统参数")
+async def update_configs(
+    body: ConfigBatchIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("sys:config"))],
+) -> object:
+    """一次性保存多个参数：先整体校验，再统一写库并失效缓存。"""
+    if not body.items:
+        return ok({"updated": 0})
+    known = await _known_config_keys(session)
+    unknown = [item.configKey for item in body.items if item.configKey not in known]
+    if unknown:
+        raise ParamError(f"未知参数：{', '.join(unknown)}")
+    prepared = [
+        (item.configKey, validate_value(item.configKey, item.configValue))
+        for item in body.items
+    ]
+    service = ConfigService(session)
+    for key, value in prepared:
+        await service.set_value(key, value, operator_id=context.user_id)
+    await session.commit()
+    return ok({"updated": len(prepared)})
+
+
+@router.post("/configs/reset", summary="恢复参数默认值")
+async def reset_configs(
+    body: ConfigResetIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("sys:config"))],
+) -> object:
+    """把指定参数恢复为代码登记的默认值。"""
+    if not body.configKeys:
+        return ok({"reset": 0})
+    invalid = [key for key in body.configKeys if key not in DEFAULT_CONFIGS]
+    if invalid:
+        raise ParamError(f"参数没有默认值：{', '.join(invalid)}")
+    service = ConfigService(session)
+    for key in dict.fromkeys(body.configKeys):
+        await service.set_value(key, DEFAULT_CONFIGS[key], operator_id=context.user_id)
+    await session.commit()
+    return ok({"reset": len(dict.fromkeys(body.configKeys))})
+
+
 @router.put("/configs/{config_key}", summary="修改系统参数")
 async def update_config(
     config_key: str,
@@ -96,9 +170,13 @@ async def update_config(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("sys:config"))],
 ) -> object:
-    """修改参数：**所有业务规则阈值后台可调，改后缓存立即失效**。"""
+    """修改单个参数：校验类型后写库，缓存立即失效。"""
+    known = await _known_config_keys(session)
+    if config_key not in known:
+        raise ParamError(f"未知参数：{config_key}")
+    value = validate_value(config_key, body.configValue)
     service = ConfigService(session)
-    config = await service.set_value(config_key, body.configValue, operator_id=context.user_id)
+    config = await service.set_value(config_key, value, operator_id=context.user_id)
     if body.remark:
         config.remark = body.remark
     await session.commit()
