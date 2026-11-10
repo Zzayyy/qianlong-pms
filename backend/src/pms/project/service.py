@@ -477,6 +477,13 @@ async def update_task_progress(
     if not 0 <= progress <= 100:
         raise ConflictError("进度取值应在 0~100 之间")
     task.progress = progress
+    # 进度驱动状态，避免任务状态长期停在 NOT_STARTED 与实际进度不符
+    if progress >= 100:
+        task.status = TaskStatus.DONE
+    elif progress <= 0:
+        task.status = TaskStatus.NOT_STARTED
+    else:
+        task.status = TaskStatus.IN_PROGRESS
     task.update_by = operator_id
     await session.flush()
     await recalc_progress(session, task.project_id)

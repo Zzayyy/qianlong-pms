@@ -40,8 +40,17 @@ import {
 } from '@/api'
 import ChangeBoard from '@/components/ChangeBoard.vue'
 import { useUserStore } from '@/stores/user'
-
-type TagType = 'primary' | 'success' | 'warning' | 'info' | 'danger'
+import {
+  ASSIGNABLE_MEMBER_ROLE,
+  HEALTH_KEY,
+  HEALTH_STATUS,
+  MEMBER_ROLE,
+  MILESTONE_STATUS,
+  NODE_STATUS,
+  PRIORITY,
+  PROJECT_STATUS,
+  dictOf
+} from '@/utils/dict'
 
 const store = useUserStore()
 const rows = ref<any[]>([])
@@ -74,27 +83,12 @@ const money = (value: unknown) => {
   return amount >= 10000 ? `${Math.round(amount / 1000) / 10} 万` : amount.toLocaleString()
 }
 
-const STATUS_META: Record<string, { label: string; type: TagType }> = {
-  DRAFT: { label: '草稿', type: 'info' },
-  APPROVING: { label: '审批中', type: 'warning' },
-  APPROVED: { label: '已立项', type: 'success' },
-  IN_PROGRESS: { label: '进行中', type: 'primary' },
-  SUSPENDED: { label: '已暂停', type: 'warning' },
-  COMPLETED: { label: '已完成', type: 'success' },
-  ACCEPTED: { label: '已验收', type: 'success' },
-  TERMINATED: { label: '已终止', type: 'danger' },
-  CLOSED: { label: '已关闭', type: 'info' }
-}
-const statusMeta = (status: string) =>
-  STATUS_META[status] || { label: status || '—', type: 'info' as TagType }
-
-const HEALTH_META: Record<string, { label: string; key: string }> = {
-  GREEN: { label: '健康', key: 'green' },
-  YELLOW: { label: '预警', key: 'yellow' },
-  RED: { label: '风险', key: 'red' }
-}
-const healthMeta = (health: string) =>
-  HEALTH_META[health] || { label: health || '—', key: 'green' }
+/** 状态编码 → 文案/颜色统一走 `@/utils/dict`，避免页面出现 NOT_STARTED 这类裸编码。 */
+const statusMeta = (code: string) => dictOf(PROJECT_STATUS, code)
+const healthMeta = (code: string) => ({
+  label: dictOf(HEALTH_STATUS, code).label,
+  key: HEALTH_KEY[String(code || '')] || 'green'
+})
 
 const progressWidth = (row: any) => `${Math.min(Math.max(Number(row.progress || 0), 0), 100)}%`
 
@@ -131,6 +125,7 @@ const milestones = ref<any[]>([])
 const members = ref<any[]>([])
 const newPmId = ref('')
 const addMemberId = ref<string | null>(null)
+const addMemberRole = ref('MEMBER')
 
 /* 项目节点与文档 */
 const canManageStage = computed(() => store.has('project:stage:edit'))
@@ -144,9 +139,11 @@ const isOwner = computed(
 const directors = ref<any[]>([])
 const directorIds = ref<string[]>([])
 const docs = ref<any[]>([])
-const docBizType = ref<'PROJECT' | 'STAGE' | 'MILESTONE'>('PROJECT')
-const docBizId = ref('')
-const fileInput = ref<HTMLInputElement | null>(null)
+const docFilter = ref('')
+const docKeyword = ref('')
+const docUploadTarget = ref<'PROJECT' | 'STAGE' | 'MILESTONE'>('PROJECT')
+const docUploadBizId = ref('')
+const uploading = ref(false)
 const stageVisible = ref(false)
 const stageForm = ref<any>({ id: '', stageName: '', weight: 1, seq: 1, planStart: '', planEnd: '' })
 
@@ -160,6 +157,62 @@ const docCount = (stageId: string | number) =>
   docs.value.filter(
     (item) => item.bizType === 'STAGE' && String(item.bizId) === String(stageId)
   ).length
+
+/* ------------------------------ 文档 ------------------------------ */
+const DOC_TYPE_LABEL: Record<string, string> = {
+  PROJECT: '项目文档',
+  STAGE: '阶段文档',
+  MILESTONE: '里程碑文档',
+  TASK: '任务文档'
+}
+const DOC_TABS = [
+  { key: '', label: '全部' },
+  { key: 'PROJECT', label: '项目文档' },
+  { key: 'STAGE', label: '阶段文档' },
+  { key: 'MILESTONE', label: '里程碑文档' }
+]
+const docCountOf = (type: string) =>
+  type ? docs.value.filter((item) => item.bizType === type).length : docs.value.length
+
+/** 归属节点名称：阶段 / 里程碑被删除时给出兜底文案。 */
+const docScopeName = (row: any) => {
+  if (row.bizType === 'STAGE') {
+    const hit = stages.value.find((item) => String(item.id) === String(row.bizId))
+    return hit ? hit.stageName : '阶段已删除'
+  }
+  if (row.bizType === 'MILESTONE') {
+    const hit = milestones.value.find((item) => String(item.id) === String(row.bizId))
+    return hit ? hit.milestoneName : '里程碑已删除'
+  }
+  return ''
+}
+
+const filteredDocs = computed(() => {
+  const keyword = docKeyword.value.trim().toLowerCase()
+  return docs.value.filter((item) => {
+    if (docFilter.value && item.bizType !== docFilter.value) return false
+    if (!keyword) return true
+    const name = String(item.fileName || '').toLowerCase()
+    const uploader = String(item.uploader || '').toLowerCase()
+    return name.includes(keyword) || uploader.includes(keyword)
+  })
+})
+
+const docTotalSize = computed(() =>
+  filteredDocs.value.reduce((sum, item) => sum + Number(item.size || 0), 0)
+)
+
+const formatSize = (bytes: unknown) => {
+  const size = Number(bytes || 0)
+  if (size <= 0) return '0 KB'
+  if (size < 1024 * 1024) return `${Math.max(Math.round(size / 102.4) / 10, 0.1)} KB`
+  return `${Math.round(size / 104857.6) / 10} MB`
+}
+
+const docExt = (fileName: string) => {
+  const parts = String(fileName || '').split('.')
+  return parts.length > 1 ? parts[parts.length - 1].toUpperCase().slice(0, 4) : 'FILE'
+}
 
 const openStage = (row?: any) => {
   stageForm.value = row
@@ -240,21 +293,32 @@ const saveDirectors = async () => {
   await loadNodeData()
 }
 
-const uploadDoc = async () => {
-  const file = fileInput.value?.files?.[0]
-  if (!file) {
-    ElMessage.warning('请先选择文件')
+/** el-upload 自定义上传：统一走 `/files`，成功后刷新列表。 */
+const doUpload = async (options: any) => {
+  if (!canUploadDoc.value) {
+    ElMessage.warning('当前账号无文档上传权限')
     return
   }
-  const form = new FormData()
-  form.append('file', file)
-  form.append('projectId', String(detail.value.id))
-  form.append('bizType', docBizType.value)
-  form.append('bizId', String(docBizId.value || 0))
-  await uploadProjectFile(form)
-  ElMessage.success('文档已上传')
-  if (fileInput.value) fileInput.value.value = ''
-  docs.value = await projectAttachments(detail.value.id)
+  if (docUploadTarget.value !== 'PROJECT' && !docUploadBizId.value) {
+    ElMessage.warning(`请先选择${docUploadTarget.value === 'STAGE' ? '所属阶段' : '所属里程碑'}`)
+    return
+  }
+  uploading.value = true
+  try {
+    const form = new FormData()
+    form.append('file', options.file)
+    form.append('projectId', String(detail.value.id))
+    form.append('bizType', docUploadTarget.value)
+    form.append('bizId', String(docUploadBizId.value || 0))
+    await uploadProjectFile(form)
+    ElMessage.success('文档已上传')
+    docs.value = await projectAttachments(detail.value.id)
+    options.onSuccess?.({})
+  } catch (error) {
+    options.onError?.(error)
+  } finally {
+    uploading.value = false
+  }
 }
 
 const downloadDoc = async (row: any) => {
@@ -402,9 +466,10 @@ const doAddMember = async () => {
   await addMember(detail.value.id, {
     userId: addMemberId.value,
     deptId: String(user?.deptId || '0'),
-    roleInProject: 'MEMBER'
+    roleInProject: addMemberRole.value
   })
   addMemberId.value = null
+  addMemberRole.value = 'MEMBER'
   ElMessage.success('成员已添加')
   await refreshDetail()
 }
@@ -819,14 +884,29 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                   :value="user.id"
                 />
               </el-select>
+              <el-select v-model="addMemberRole" class="ops-select narrow" size="small" placeholder="组内角色">
+                <el-option
+                  v-for="(label, code) in ASSIGNABLE_MEMBER_ROLE"
+                  :key="code"
+                  :label="label"
+                  :value="code"
+                />
+              </el-select>
               <el-button size="small" type="primary" :disabled="!canEdit" @click="doAddMember">添加成员</el-button>
+              <span class="ops-hint">项目经理角色通过上方「设为负责人」转移，不在成员里指派</span>
             </div>
             <el-table :data="members" size="small" empty-text="暂无成员">
               <el-table-column label="姓名" min-width="130">
                 <template #default="{ row }">{{ row.realName || row.userId }}</template>
               </el-table-column>
               <el-table-column prop="username" label="账号" min-width="120" class-name="pms-mobile-hide" />
-              <el-table-column prop="roleInProject" label="组内角色" width="120" />
+              <el-table-column label="组内角色" width="110">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="plain" :type="dictOf(MEMBER_ROLE, row.roleInProject).type">
+                    {{ dictOf(MEMBER_ROLE, row.roleInProject).label }}
+                  </el-tag>
+                </template>
+              </el-table-column>
               <el-table-column prop="joinDate" label="加入日期" width="120" class-name="pms-mobile-hide" />
               <el-table-column label="操作" width="90">
                 <template #default="{ row }">
@@ -890,15 +970,35 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <el-table-column label="进度" width="90">
                 <template #default="{ row }">{{ Math.round(Number(row.progress || 0)) }}%</template>
               </el-table-column>
-              <el-table-column prop="status" label="状态" width="110" />
+              <el-table-column label="状态" width="110">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="plain" :type="dictOf(NODE_STATUS, row.status).type">
+                    {{ dictOf(NODE_STATUS, row.status).label }}
+                  </el-tag>
+                </template>
+              </el-table-column>
               <el-table-column label="文档" width="70">
                 <template #default="{ row }">{{ docCount(row.id) }}</template>
               </el-table-column>
               <el-table-column label="操作" width="240">
                 <template #default="{ row }">
                   <el-button link type="primary" :disabled="!canManageNode" @click="openStage(row)">编辑</el-button>
-                  <el-button link type="primary" :disabled="!canManageNode" @click="startStage(row)">开始</el-button>
-                  <el-button link type="success" :disabled="!canManageNode" @click="finishStage(row)">完成</el-button>
+                  <el-button
+                    link
+                    type="primary"
+                    :disabled="!canManageNode || ['IN_PROGRESS', 'DONE'].includes(row.status)"
+                    @click="startStage(row)"
+                  >
+                    开始
+                  </el-button>
+                  <el-button
+                    link
+                    type="success"
+                    :disabled="!canManageNode || row.status === 'DONE'"
+                    @click="finishStage(row)"
+                  >
+                    完成
+                  </el-button>
                   <el-button link type="danger" :disabled="!canManageNode" @click="removeStage(row)">删除</el-button>
                 </template>
               </el-table-column>
@@ -933,6 +1033,20 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               </el-table-column>
               <el-table-column label="实际工时" width="96" align="right" class-name="pms-mobile-hide">
                 <template #default="{ row }">{{ Number(row.actualHours || 0) }}h</template>
+              </el-table-column>
+              <el-table-column label="状态" width="96">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="plain" :type="dictOf(NODE_STATUS, row.status).type">
+                    {{ dictOf(NODE_STATUS, row.status).label }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="优先级" width="84" class-name="pms-mobile-hide">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="plain" :type="dictOf(PRIORITY, row.priority).type">
+                    {{ dictOf(PRIORITY, row.priority).label }}
+                  </el-tag>
+                </template>
               </el-table-column>
               <el-table-column label="进度" width="132">
                 <template #default="{ row }">
@@ -981,10 +1095,23 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               </el-table-column>
               <el-table-column prop="planDate" label="计划日期" width="120" />
               <el-table-column prop="actualDate" label="实际日期" width="120" class-name="pms-mobile-hide" />
-              <el-table-column prop="status" label="状态" width="100" />
+              <el-table-column label="状态" width="100">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="plain" :type="dictOf(MILESTONE_STATUS, row.status).type">
+                    {{ dictOf(MILESTONE_STATUS, row.status).label }}
+                  </el-tag>
+                </template>
+              </el-table-column>
               <el-table-column label="操作" width="190">
                 <template #default="{ row }">
-                  <el-button link type="success" :disabled="!canManageNode" @click="achieveMilestone(row)">达成</el-button>
+                  <el-button
+                    link
+                    type="success"
+                    :disabled="!canManageNode || row.status === 'REACHED'"
+                    @click="achieveMilestone(row)"
+                  >
+                    达成
+                  </el-button>
                   <el-button link type="primary" :disabled="!canManageNode" @click="openMilestone(row)">编辑</el-button>
                   <el-button link type="danger" :disabled="!canManageNode" @click="removeMilestone(row)">删除</el-button>
                 </template>
@@ -1001,31 +1128,126 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </el-tab-pane>
 
           <el-tab-pane label="文档" name="docs">
-            <div class="pane-ops">
-              <el-select v-model="docBizType" size="small" class="ops-select">
-                <el-option label="项目文档" value="PROJECT" />
-                <el-option label="阶段文档" value="STAGE" />
-                <el-option label="里程碑文档" value="MILESTONE" />
-              </el-select>
-              <el-select v-if="docBizType === 'STAGE'" v-model="docBizId" size="small" class="ops-select" placeholder="选择阶段">
-                <el-option v-for="item in stages" :key="item.id" :label="item.stageName" :value="item.id" />
-              </el-select>
-              <el-select v-if="docBizType === 'MILESTONE'" v-model="docBizId" size="small" class="ops-select" placeholder="选择里程碑">
-                <el-option v-for="item in milestones" :key="item.id" :label="item.milestoneName" :value="item.id" />
-              </el-select>
-              <input ref="fileInput" class="file-input" type="file" />
-              <el-button size="small" type="primary" :disabled="!canUploadDoc" @click="uploadDoc">上传文档</el-button>
-              <span v-if="!canUploadDoc" class="ops-hint">无文档上传权限</span>
+            <div class="list-head">
+              <div class="seg">
+                <button
+                  v-for="item in DOC_TABS"
+                  :key="item.key"
+                  type="button"
+                  :class="{ 'is-active': docFilter === item.key }"
+                  @click="docFilter = item.key"
+                >
+                  {{ item.label }}<i>{{ docCountOf(item.key) }}</i>
+                </button>
+              </div>
+              <div class="doc-head-side">
+                <el-input
+                  v-model="docKeyword"
+                  class="doc-search"
+                  size="small"
+                  placeholder="搜索文件名 / 上传人"
+                  clearable
+                />
+                <span class="list-total">
+                  {{ filteredDocs.length }} 个文件 · {{ formatSize(docTotalSize) }}
+                </span>
+              </div>
             </div>
-            <el-table :data="docs" size="small">
+
+            <div v-if="canUploadDoc" class="upload-panel">
+              <div class="upload-fields">
+                <div class="field">
+                  <label>归属类型</label>
+                  <el-select v-model="docUploadTarget" size="small" @change="docUploadBizId = ''">
+                    <el-option label="项目文档" value="PROJECT" />
+                    <el-option label="阶段文档" value="STAGE" />
+                    <el-option label="里程碑文档" value="MILESTONE" />
+                  </el-select>
+                </div>
+                <div v-if="docUploadTarget === 'STAGE'" class="field">
+                  <label>所属阶段 <em>*</em></label>
+                  <el-select v-model="docUploadBizId" size="small" placeholder="选择阶段">
+                    <el-option
+                      v-for="item in stages"
+                      :key="item.id"
+                      :label="item.stageName"
+                      :value="String(item.id)"
+                    />
+                  </el-select>
+                  <span v-if="!stages.length" class="ops-hint">请先在「阶段」页签新增阶段</span>
+                </div>
+                <div v-if="docUploadTarget === 'MILESTONE'" class="field">
+                  <label>所属里程碑 <em>*</em></label>
+                  <el-select v-model="docUploadBizId" size="small" placeholder="选择里程碑">
+                    <el-option
+                      v-for="item in milestones"
+                      :key="item.id"
+                      :label="item.milestoneName"
+                      :value="String(item.id)"
+                    />
+                  </el-select>
+                  <span v-if="!milestones.length" class="ops-hint">请先在「里程碑」页签新增里程碑</span>
+                </div>
+              </div>
+              <el-upload
+                class="doc-drop"
+                drag
+                action="#"
+                :show-file-list="false"
+                :disabled="uploading"
+                :http-request="doUpload"
+              >
+                <div v-loading="uploading" class="doc-drop-text">
+                  <b>把文件拖到这里，或点击选择</b>
+                  <span>单文件 ≤ 20MB；阶段文档是「完成阶段」的前置校验</span>
+                </div>
+              </el-upload>
+            </div>
+            <el-alert
+              v-else
+              type="info"
+              :closable="false"
+              show-icon
+              title="当前账号无文档上传权限，仅可查看与下载"
+            />
+
+            <el-table :data="filteredDocs" size="small" style="margin-top: 12px">
               <template #empty>
-                <el-empty description="还没有文档：选择归属与文件后点「上传文档」" :image-size="64" />
+                <el-empty
+                  :description="
+                    docKeyword || docFilter ? '没有匹配的文档' : '还没有文档，上传后按项目 / 阶段 / 里程碑归档'
+                  "
+                  :image-size="64"
+                />
               </template>
-              <el-table-column prop="fileName" label="文件名" min-width="200" show-overflow-tooltip />
-              <el-table-column prop="bizType" label="归属" width="110" />
-              <el-table-column prop="uploader" label="上传人" width="120" class-name="pms-mobile-hide" />
+              <el-table-column label="文件" min-width="260">
+                <template #default="{ row }">
+                  <div class="doc-cell">
+                    <span class="doc-ext">{{ docExt(row.fileName) }}</span>
+                    <div class="doc-meta">
+                      <div class="cell-main">{{ row.fileName }}</div>
+                      <div class="cell-sub">{{ formatSize(row.size) }} · {{ row.mime || '未知类型' }}</div>
+                    </div>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="归属" width="190">
+                <template #default="{ row }">
+                  <el-tag
+                    size="small"
+                    effect="plain"
+                    :type="row.bizType === 'PROJECT' ? 'info' : row.bizType === 'STAGE' ? 'success' : 'warning'"
+                  >
+                    {{ DOC_TYPE_LABEL[row.bizType] || row.bizType }}
+                  </el-tag>
+                  <span v-if="docScopeName(row)" class="doc-scope">{{ docScopeName(row) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="上传人" width="110">
+                <template #default="{ row }">{{ row.uploader || '—' }}</template>
+              </el-table-column>
               <el-table-column prop="uploadTime" label="上传时间" width="170" class-name="pms-mobile-hide" />
-              <el-table-column label="操作" width="130">
+              <el-table-column label="操作" width="120">
                 <template #default="{ row }">
                   <el-button link type="primary" @click="downloadDoc(row)">下载</el-button>
                   <el-button link type="danger" :disabled="!canManageDoc" @click="removeDoc(row)">删除</el-button>
@@ -1534,6 +1756,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   width: 200px;
 }
 
+.ops-select.narrow {
+  width: 132px;
+}
+
 .ops-select.wide {
   flex: 1 1 320px;
   width: auto;
@@ -1556,9 +1782,107 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--pms-text-3);
 }
 
-.file-input {
-  max-width: 260px;
+/* ---------------- 文档 ---------------- */
+.doc-head-side {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.doc-head-side :deep(.doc-search) {
+  width: 200px;
+}
+
+.seg button i {
+  margin-left: 4px;
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--pms-text-3);
+}
+
+.seg button.is-active i {
+  color: var(--pms-primary-deep);
+}
+
+.upload-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
+  gap: 14px;
+  padding: 14px;
+  border: 1px dashed var(--pms-line);
+  border-radius: 10px;
+  background: #fafbfe;
+}
+
+.upload-fields {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.upload-fields .field :deep(.el-select) {
+  width: 100%;
+}
+
+.doc-drop :deep(.el-upload) {
+  width: 100%;
+}
+
+.doc-drop :deep(.el-upload-dragger) {
+  padding: 16px 12px;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.doc-drop-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  line-height: 1.6;
+}
+
+.doc-drop-text b {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--pms-text);
+}
+
+.doc-drop-text span {
+  font-size: 11.5px;
+  color: var(--pms-text-3);
+}
+
+.doc-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.doc-ext {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--pms-primary-weak);
+  color: var(--pms-primary-deep);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.doc-meta {
+  min-width: 0;
+}
+
+.doc-scope {
+  margin-left: 6px;
   font-size: 12px;
+  color: var(--pms-text-3);
 }
 
 @media (max-width: 900px) {
@@ -1598,9 +1922,24 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   }
 
   .ops-select,
-  .ops-select.wide {
+  .ops-select.wide,
+  .ops-select.narrow {
     flex: 1 1 100%;
     width: 100%;
+  }
+
+  .doc-head-side {
+    width: 100%;
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+
+  .doc-head-side :deep(.doc-search) {
+    width: 100%;
+  }
+
+  .upload-panel {
+    grid-template-columns: 1fr;
   }
 
   .pager {
