@@ -83,28 +83,33 @@ async def job_remind_worklogs(day: str | None = None, *, notify: bool = False) -
             select(SysUser).where(SysUser.deleted == 0, SysUser.status == "ENABLED")
         )).scalars().all()
         for user in users:
+            # 一人一天允许多条日志，只能用 `first()` 判存在，否则多行会抛 MultipleResultsFound
             exists = (
                 await session.execute(
-                    select(WlWorklog.id).where(
+                    select(WlWorklog.id)
+                    .where(
                         WlWorklog.deleted == 0,
                         WlWorklog.user_id == user.id,
                         WlWorklog.log_date == day_text,
                         WlWorklog.status.in_(_SUBMITTED_STATUSES),
                     )
+                    .limit(1)
                 )
-            ).scalar_one_or_none()
+            ).scalars().first()
             if exists is not None:
                 continue
             duplicated = (
                 await session.execute(
-                    select(WlReminder.id).where(
+                    select(WlReminder.id)
+                    .where(
                         WlReminder.deleted == 0,
                         WlReminder.user_id == user.id,
                         WlReminder.log_date == day_text,
                         WlReminder.remind_type == "AUTO",
                     )
+                    .limit(1)
                 )
-            ).scalar_one_or_none()
+            ).scalars().first()
             if duplicated is not None:
                 continue
             content = f"请补填 {day_text} 的工作日志"

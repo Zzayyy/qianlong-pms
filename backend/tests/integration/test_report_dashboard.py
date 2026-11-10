@@ -44,7 +44,7 @@ def _context(user: SysUser, dept_id: int) -> AuthContext:
     )
 
 
-async def test_dashboards_and_aggregate() -> None:
+async def test_dashboards_and_aggregate(worklog_confirm_required: None) -> None:
     """看板指标与日聚合。"""
     factory = get_session_factory()
     created: dict[type, list[int]] = {

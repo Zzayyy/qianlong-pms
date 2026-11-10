@@ -45,7 +45,7 @@ def _context(user: SysUser, dept_id: int, visible: set[int] | None = None) -> Au
     )
 
 
-async def test_worklog_confirm_and_visibility() -> None:
+async def test_worklog_confirm_and_visibility(worklog_confirm_required: None) -> None:
     """日志主链路：确认回填工时、撤销回滚、补填审批、项目组互看、同部门非同项目不可见。"""
     factory = get_session_factory()
     created: dict[type, list[int]] = {

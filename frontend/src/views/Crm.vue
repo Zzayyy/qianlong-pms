@@ -10,6 +10,7 @@ import {
   createContact,
   createCustomer,
   createOpportunity,
+  crmOptions,
   crmStaff,
   crmSummary,
   customerContacts,
@@ -130,6 +131,13 @@ const toNumber = (value: any, fallback = 0) => {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : fallback
 }
+/** 雪花 ID 超出 JS 安全整数（后端以字符串返回），只能用字符串透传，`Number()` 会改写末位。 */
+const idText = (value: any) => (value === null || value === undefined ? '' : String(value))
+/** 提交给后端的 ID 字段：空值用 `'0'` 表示「未指定」，避免空串触发类型校验失败。 */
+const idOrZero = (value: any) => {
+  const text = idText(value).trim()
+  return text === '' || text === '0' ? '0' : text
+}
 const money = (value: any) =>
   typeof value === 'number'
     ? value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -145,7 +153,7 @@ const amountText = (value: any) => {
 }
 const timeText = (value: any) => String(value || '').replace('T', ' ').slice(0, 16)
 const userName = (id: any) => {
-  const hit = staff.value.find((item) => Number(item.id) === Number(id))
+  const hit = staff.value.find((item) => String(item.id) === String(id))
   return hit ? hit.realName : id ? String(id) : '—'
 }
 
@@ -243,6 +251,20 @@ const loadStaff = async () => {
   staff.value = await crmStaff().catch(() => [])
 }
 
+/** 赢单阶段由后台参数 `crm.opp.winStage` 决定，前端不再硬编码。 */
+const winStage = ref('WON')
+const canConvert = (row: any) =>
+  Boolean(row) && row.stage === winStage.value && !row.convertedProjectId
+
+const loadOptions = async () => {
+  try {
+    const data = await crmOptions()
+    winStage.value = data.winStage || 'WON'
+  } catch {
+    winStage.value = 'WON'
+  }
+}
+
 const loadSummary = async () => {
   summaryLoading.value = true
   try {
@@ -310,8 +332,8 @@ const emptyCustomer = () => ({
   customerName: '',
   customerLevel: 'B',
   industry: '',
-  ownerUserId: Number(store.profile?.id || 0),
-  ownerDeptId: Number(store.profile?.deptId || 0),
+  ownerUserId: idText(store.profile?.id),
+  ownerDeptId: idText(store.profile?.deptId),
   contactName: '',
   contactMobile: '',
   contactEmail: '',
@@ -327,8 +349,6 @@ const openCustomer = async (row?: any) => {
   customerEditingId.value = row ? String(row.id) : ''
   if (row) {
     customerForm.value = { ...emptyCustomer(), ...(await customerDetail(String(row.id))) }
-    customerForm.value.ownerUserId = Number(customerForm.value.ownerUserId || 0)
-    customerForm.value.ownerDeptId = Number(customerForm.value.ownerDeptId || 0)
   } else {
     customerForm.value = emptyCustomer()
   }
@@ -336,8 +356,8 @@ const openCustomer = async (row?: any) => {
 }
 
 const syncCustomerOwner = (userId: any) => {
-  const hit = staff.value.find((item) => Number(item.id) === Number(userId))
-  if (hit) customerForm.value.ownerDeptId = Number(hit.deptId || 0)
+  const hit = staff.value.find((item) => String(item.id) === String(userId))
+  if (hit) customerForm.value.ownerDeptId = idText(hit.deptId)
 }
 
 const saveCustomer = async () => {
@@ -349,8 +369,8 @@ const saveCustomer = async () => {
     customerName: customerForm.value.customerName.trim(),
     customerLevel: customerForm.value.customerLevel,
     industry: customerForm.value.industry,
-    ownerUserId: Number(customerForm.value.ownerUserId || 0),
-    ownerDeptId: Number(customerForm.value.ownerDeptId || 0),
+    ownerUserId: idOrZero(customerForm.value.ownerUserId),
+    ownerDeptId: idOrZero(customerForm.value.ownerDeptId),
     contactName: customerForm.value.contactName,
     contactMobile: customerForm.value.contactMobile,
     contactEmail: customerForm.value.contactEmail,
@@ -522,8 +542,8 @@ const emptyOpp = () => ({
   source: '',
   status: 'OPEN',
   lostReason: '',
-  ownerUserId: Number(store.profile?.id || 0),
-  ownerDeptId: Number(store.profile?.deptId || 0),
+  ownerUserId: idText(store.profile?.id),
+  ownerDeptId: idText(store.profile?.deptId),
   remark: ''
 })
 
@@ -532,9 +552,11 @@ const openOpp = async (row?: any) => {
   if (row) {
     const detail = await opportunityDetail(String(row.id))
     oppForm.value = { ...emptyOpp(), ...detail }
-    oppForm.value.customerId = toNumber(oppForm.value.customerId) || null
-    oppForm.value.ownerUserId = toNumber(oppForm.value.ownerUserId)
-    oppForm.value.ownerDeptId = toNumber(oppForm.value.ownerDeptId)
+    // 客户 / 负责人 ID 保持字符串（雪花 ID 转数字会改写末位）
+    const customerId = idText(oppForm.value.customerId)
+    oppForm.value.customerId = customerId && customerId !== '0' ? customerId : null
+    oppForm.value.ownerUserId = idText(oppForm.value.ownerUserId)
+    oppForm.value.ownerDeptId = idText(oppForm.value.ownerDeptId)
     oppForm.value.expectAmount = toNumber(oppForm.value.expectAmount)
     oppForm.value.winRate = toNumber(oppForm.value.winRate)
     oppForm.value.expectSignDate = oppForm.value.expectSignDate || ''
@@ -545,8 +567,8 @@ const openOpp = async (row?: any) => {
 }
 
 const syncOppOwner = (userId: any) => {
-  const hit = staff.value.find((item) => Number(item.id) === Number(userId))
-  if (hit) oppForm.value.ownerDeptId = Number(hit.deptId || 0)
+  const hit = staff.value.find((item) => String(item.id) === String(userId))
+  if (hit) oppForm.value.ownerDeptId = idText(hit.deptId)
 }
 
 const saveOpp = async () => {
@@ -560,14 +582,14 @@ const saveOpp = async () => {
   }
   const payload = {
     oppName: oppForm.value.oppName.trim(),
-    customerId: Number(oppForm.value.customerId),
+    customerId: idText(oppForm.value.customerId),
     expectAmount: Number(oppForm.value.expectAmount || 0),
     expectSignDate: oppForm.value.expectSignDate || '',
     stage: oppForm.value.stage,
     winRate: Number(oppForm.value.winRate || 0),
     source: oppForm.value.source,
-    ownerUserId: Number(oppForm.value.ownerUserId || 0),
-    ownerDeptId: Number(oppForm.value.ownerDeptId || 0),
+    ownerUserId: idOrZero(oppForm.value.ownerUserId),
+    ownerDeptId: idOrZero(oppForm.value.ownerDeptId),
     remark: oppForm.value.remark
   }
   if (oppEditingId.value) {
@@ -627,7 +649,7 @@ const openConvert = (row: any) => {
   convertRow.value = row
   convertForm.value = {
     projectName: [row.customerName, row.oppName].filter(Boolean).join('-'),
-    pmId: Number(row.ownerUserId || store.profile?.id || 0),
+    pmId: idText(row.ownerUserId || store.profile?.id),
     planStart: '',
     planEnd: ''
   }
@@ -637,7 +659,7 @@ const openConvert = (row: any) => {
 const doConvert = async () => {
   const result = await convertOpp(String(convertRow.value.id), {
     projectName: convertForm.value.projectName,
-    pmId: Number(convertForm.value.pmId || 0),
+    pmId: idOrZero(convertForm.value.pmId),
     planStart: convertForm.value.planStart || null,
     planEnd: convertForm.value.planEnd || null
   })
@@ -728,7 +750,7 @@ const onOppCommand = (command: string, row: any) => {
 onMounted(async () => {
   syncWidth()
   window.addEventListener('resize', syncWidth)
-  await Promise.all([loadDicts(), loadStaff()])
+  await Promise.all([loadDicts(), loadStaff(), loadOptions()])
   await refreshAll()
 })
 
@@ -1142,10 +1164,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 <el-dropdown-menu>
                   <el-dropdown-item command="follows">跟进记录</el-dropdown-item>
                   <el-dropdown-item command="edit" :disabled="!canOpp">编辑商机</el-dropdown-item>
-                  <el-dropdown-item
-                    command="convert"
-                    :disabled="row.stage !== 'WON' || Boolean(row.convertedProjectId)"
-                  >
+                  <el-dropdown-item command="convert" :disabled="!canConvert(row)">
                     {{ row.convertedProjectId ? '已转项目' : '转为项目' }}
                   </el-dropdown-item>
                   <el-dropdown-item v-if="canOpp" command="delete" divided>删除商机</el-dropdown-item>
@@ -1162,7 +1181,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 link
                 type="success"
                 size="small"
-                :disabled="row.stage !== 'WON' || Boolean(row.convertedProjectId)"
+                :disabled="!canConvert(row)"
                 @click="openConvert(row)"
               >
                 {{ row.convertedProjectId ? '已转项目' : '转项目' }}
@@ -1259,7 +1278,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               v-for="item in staff"
               :key="item.id"
               :label="`${item.realName}（${item.username}）`"
-              :value="Number(item.id)"
+              :value="item.id"
             />
           </el-select>
         </el-form-item>
@@ -1499,7 +1518,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               v-for="item in staff"
               :key="item.id"
               :label="`${item.realName}（${item.username}）`"
-              :value="Number(item.id)"
+              :value="item.id"
             />
           </el-select>
         </el-form-item>
@@ -1566,7 +1585,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
       <template #footer>
         <div class="dialog-footer">
-          <span class="form-tip">商机进入「赢单」阶段后，可在列表中转为项目。</span>
+          <span class="form-tip">
+            商机进入「{{ oppStageLabel(winStage) }}」阶段后，可在列表中转为项目。
+          </span>
           <div class="dialog-actions">
             <el-button @click="oppDialog = false">取消</el-button>
             <el-button type="primary" @click="saveOpp">保存</el-button>
@@ -1599,7 +1620,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               v-for="item in staff"
               :key="item.id"
               :label="`${item.realName}（${item.username}）`"
-              :value="Number(item.id)"
+              :value="item.id"
             />
           </el-select>
         </el-form-item>

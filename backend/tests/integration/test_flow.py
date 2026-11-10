@@ -113,6 +113,16 @@ async def test_crm_to_project_flow() -> None:
                 session, context, customer.id, name="张三", mobile="13800002222", is_primary=True
             )
             created[CrmContact].append(contact.id)
+            # 主联系人回写客户快照，列表与抽屉数据一致
+            assert customer.contact_name == "张三"
+            assert customer.contact_mobile == "13800002222"
+
+            backup = await crm_service.add_contact(session, context, customer.id, name="李四")
+            created[CrmContact].append(backup.id)
+            await crm_service.delete_contact(session, context, contact.id)
+            # 主联系人删除后顺延下一位
+            assert customer.contact_name == "李四"
+            assert backup.is_primary == 1
 
             # 3. 商机 → 赢单
             opportunity = await crm_service.create_opportunity(

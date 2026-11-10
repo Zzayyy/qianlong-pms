@@ -277,6 +277,9 @@ export const crmSummary = () => get<Record<string, any>>('/crm/summary')
 /** 数据范围内可选负责人 / 转项目负责人。 */
 export const crmStaff = () => get<Record<string, any>[]>('/crm/staff')
 
+/** 客户与商机页面参数（赢单阶段等后台可调）。 */
+export const crmOptions = () => get<{ winStage: string }>('/crm/options')
+
 export const listCustomers = (params: Record<string, unknown>) =>
   get<Page<Record<string, unknown>>>('/crm/customers', params)
 

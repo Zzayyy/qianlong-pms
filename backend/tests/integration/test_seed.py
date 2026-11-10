@@ -22,7 +22,7 @@ async def test_seed_is_idempotent() -> None:
         assert second.accounts, "应返回内置账号清单"
 
 
-async def test_admin_can_login_with_all_permissions() -> None:
+async def test_admin_can_login_with_all_permissions(seed_admin_account: None) -> None:
     """管理员账号可登录且具备系统参数权限。"""
     factory = get_session_factory()
     async with factory() as session:

@@ -18,6 +18,13 @@ from pms.core.database import get_session
 from pms.core.deps import Pagination, get_pagination, require_permissions
 from pms.crm import service
 from pms.crm.models import CrmContact, CrmCustomer, CrmFollow, CrmOpportunity
+from pms.crm.visibility import (
+    ensure_contact_access,
+    ensure_customer_access,
+    ensure_dept_assignable,
+    ensure_follow_access,
+    ensure_opportunity_access,
+)
 from pms.org.models import SysUser
 
 router = APIRouter(prefix="/api/v1/crm", tags=["客户与商机"])
@@ -311,6 +318,15 @@ async def summary(
     return ok(await service.crm_summary(session, _scope(context)))
 
 
+@router.get("/options", summary="客户与商机页面参数")
+async def options(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("crm:customer:view"))],
+) -> object:
+    """返回赢单阶段等可调参数，前端据此判断商机能否转项目。"""
+    return ok(await service.crm_options(session))
+
+
 @router.get("/staff", summary="可选负责人/项目经理")
 async def staff(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -371,7 +387,8 @@ async def create_customer(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:customer:manage"))],
 ) -> object:
-    """创建客户（名称唯一）。"""
+    """创建客户（名称唯一，负责人部门需在数据范围内）。"""
+    ensure_dept_assignable(context, body.ownerDeptId)
     customer = await service.create_customer(
         session,
         context,
@@ -400,8 +417,8 @@ async def customer_detail(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:customer:view"))],
 ) -> object:
-    """客户详情（含地址、来源、备注与时间字段）。"""
-    customer = await service.get_customer(session, customer_id)
+    """客户详情（含地址、来源、备注与时间字段，按数据范围校验可见性）。"""
+    customer = await ensure_customer_access(session, context, customer_id)
     names = await _user_names(session, {customer.owner_user_id})
     return ok(_customer_out(customer, context, names.get(customer.owner_user_id, "")))
 
@@ -413,7 +430,9 @@ async def update_customer(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:customer:manage"))],
 ) -> object:
-    """编辑客户全部业务字段。"""
+    """编辑客户全部业务字段（需可见，且负责人部门不可越界）。"""
+    await ensure_customer_access(session, context, customer_id)
+    ensure_dept_assignable(context, body.ownerDeptId or 0)
     customer = await service.update_customer(
         session,
         context,
@@ -445,6 +464,7 @@ async def update_customer_status(
     context: Annotated[AuthContext, Depends(require_permissions("crm:customer:manage"))],
 ) -> object:
     """快速修改客户状态。"""
+    await ensure_customer_access(session, context, customer_id)
     customer = await service.set_customer_status(session, context, customer_id, body.status)
     await session.commit()
     return ok({"id": customer.id, "status": customer.status})
@@ -456,7 +476,8 @@ async def delete_customer(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:customer:manage"))],
 ) -> object:
-    """逻辑删除客户（存在商机时禁止）。"""
+    """逻辑删除客户（存在商机时禁止，需可见）。"""
+    await ensure_customer_access(session, context, customer_id)
     await service.delete_customer(session, context, customer_id)
     await session.commit()
     return ok({"id": customer_id})
@@ -468,8 +489,8 @@ async def contacts(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:customer:view"))],
 ) -> object:
-    """联系人列表（手机/邮箱/微信默认脱敏）。"""
-    customer = await service.get_customer(session, customer_id)
+    """联系人列表（手机/邮箱/微信默认脱敏，需可见该客户）。"""
+    customer = await ensure_customer_access(session, context, customer_id)
     plain = _plain_sensitive(context, customer.owner_user_id)
     items = await service.list_contacts(session, customer_id)
     return ok([_contact_out(item, plain) for item in items])
@@ -482,7 +503,8 @@ async def create_contact(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:customer:manage"))],
 ) -> object:
-    """新增联系人，可设为主联系人。"""
+    """新增联系人，可设为主联系人（需可见该客户）。"""
+    await ensure_customer_access(session, context, customer_id)
     contact = await service.add_contact(
         session,
         context,
@@ -506,7 +528,8 @@ async def update_contact(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:customer:manage"))],
 ) -> object:
-    """编辑联系人并可调整主联系人。"""
+    """编辑联系人并可调整主联系人（需可见其所属客户）。"""
+    await ensure_contact_access(session, context, contact_id)
     contact = await service.update_contact(
         session,
         context,
@@ -529,7 +552,8 @@ async def delete_contact(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:customer:manage"))],
 ) -> object:
-    """逻辑删除联系人。"""
+    """逻辑删除联系人（需可见其所属客户）。"""
+    await ensure_contact_access(session, context, contact_id)
     await service.delete_contact(session, context, contact_id)
     await session.commit()
     return ok({"id": contact_id})
@@ -592,7 +616,9 @@ async def create_opportunity(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:opp:manage"))],
 ) -> object:
-    """创建商机（校验客户存在）。"""
+    """创建商机（校验客户存在且可见，负责人部门不可越界）。"""
+    await ensure_customer_access(session, context, body.customerId)
+    ensure_dept_assignable(context, body.ownerDeptId)
     opportunity = await service.create_opportunity(
         session,
         context,
@@ -617,8 +643,8 @@ async def opportunity_detail(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:opp:view"))],
 ) -> object:
-    """商机详情（含客户、负责人、预计签约、输单原因等字段）。"""
-    opportunity = await service.get_opportunity(session, opportunity_id)
+    """商机详情（含客户、负责人、预计签约、输单原因等字段，按数据范围校验可见性）。"""
+    opportunity = await ensure_opportunity_access(session, context, opportunity_id)
     names = await _user_names(session, {opportunity.owner_user_id})
     customer_names = await _customer_names(session, {opportunity.customer_id})
     return ok(
@@ -638,7 +664,11 @@ async def update_opportunity(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:opp:manage"))],
 ) -> object:
-    """编辑商机全部业务字段（阶段变化时同步状态）。"""
+    """编辑商机全部业务字段（阶段变化时同步状态；换客户需新客户可见）。"""
+    await ensure_opportunity_access(session, context, opportunity_id)
+    if body.customerId is not None:
+        await ensure_customer_access(session, context, body.customerId)
+    ensure_dept_assignable(context, body.ownerDeptId or 0)
     opportunity = await service.update_opportunity(
         session,
         context,
@@ -666,7 +696,8 @@ async def delete_opportunity(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:opp:manage"))],
 ) -> object:
-    """逻辑删除商机（已转项目时禁止）。"""
+    """逻辑删除商机（已转项目时禁止，需可见）。"""
+    await ensure_opportunity_access(session, context, opportunity_id)
     await service.delete_opportunity(session, context, opportunity_id)
     await session.commit()
     return ok({"id": opportunity_id})
@@ -679,7 +710,8 @@ async def update_stage(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:opp:manage"))],
 ) -> object:
-    """推进阶段；WON/LOST 同步商机状态，可附带输单原因。"""
+    """推进阶段；WON/LOST 同步商机状态，可附带输单原因（需可见）。"""
+    await ensure_opportunity_access(session, context, opportunity_id)
     opportunity = await service.update_stage(
         session,
         opportunity_id,
@@ -698,7 +730,8 @@ async def update_opportunity_status(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:opp:manage"))],
 ) -> object:
-    """快速修改商机状态（赢单/输单联动阶段，可记录输单原因）。"""
+    """快速修改商机状态（赢单/输单联动阶段，可记录输单原因；需可见）。"""
+    await ensure_opportunity_access(session, context, opportunity_id)
     opportunity = await service.set_opportunity_status(
         session, context, opportunity_id, body.status, body.lostReason
     )
@@ -713,9 +746,10 @@ async def convert(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:opp:manage"))],
 ) -> object:
-    """赢单商机一键生成项目草稿并回写商机。"""
+    """赢单商机一键生成项目草稿并回写商机（需可见）。"""
     from pms.project.models import PrjProject
 
+    await ensure_opportunity_access(session, context, opportunity_id)
     project = await service.convert_to_project(
         session,
         context,
@@ -743,8 +777,8 @@ async def follows(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:opp:view"))],
 ) -> object:
-    """跟进记录列表（含跟进人姓名与时间）。"""
-    await service.get_opportunity(session, opportunity_id)
+    """跟进记录列表（含跟进人姓名与时间，需可见该商机）。"""
+    await ensure_opportunity_access(session, context, opportunity_id)
     items = await service.list_follows(session, opportunity_id)
     names = await _user_names(session, {int(item.create_by or 0) for item in items})
     return ok([_follow_out(item, names.get(int(item.create_by or 0), "")) for item in items])
@@ -757,7 +791,8 @@ async def follow(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:opp:manage"))],
 ) -> object:
-    """新增跟进记录。"""
+    """新增跟进记录（需可见该商机）。"""
+    await ensure_opportunity_access(session, context, opportunity_id)
     record = await service.add_follow(
         session,
         context,
@@ -777,7 +812,8 @@ async def delete_follow(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:opp:manage"))],
 ) -> object:
-    """逻辑删除跟进记录。"""
+    """逻辑删除跟进记录（需可见其所属商机）。"""
+    await ensure_follow_access(session, context, follow_id)
     await service.delete_follow(session, context, follow_id)
     await session.commit()
     return ok({"id": follow_id})

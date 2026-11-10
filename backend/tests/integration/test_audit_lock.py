@@ -145,7 +145,7 @@ async def test_record_login_and_operate_written() -> None:
             await session.commit()
 
 
-async def test_audit_query_requires_permission() -> None:
+async def test_audit_query_requires_permission(seed_admin_account: None) -> None:
     """审计查询需 `sys:log:view`：ADMIN 可查，DEV 角色被拒。"""
     import httpx
 

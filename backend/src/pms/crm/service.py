@@ -45,6 +45,17 @@ def _keyword_like(keyword: str) -> str:
     return f"%{keyword.strip()}%"
 
 
+async def _win_stage(config: ConfigService) -> str:
+    """赢单阶段编码（参数 `crm.opp.winStage` 可调，统一大写便于与库中值比较）。"""
+    value = await config.get_str("crm.opp.winStage")
+    return str(value or _DEFAULT_WIN_STAGE).strip().upper()
+
+
+async def crm_options(session: AsyncSession) -> dict[str, object]:
+    """客户与商机页面参数（前端据此判断能否转项目，避免阶段编码硬编码）。"""
+    return {"winStage": await _win_stage(ConfigService(session))}
+
+
 async def next_customer_code(session: AsyncSession) -> str:
     """生成客户编码 `CUS-0001`（取已用最大序号 +1，删除后也不复用）。"""
     result = await session.execute(
@@ -81,6 +92,84 @@ async def get_customer(session: AsyncSession, customer_id: int) -> CrmCustomer:
     if customer is None or customer.deleted:
         raise NotFoundError("客户不存在")
     return customer
+
+
+async def _primary_contact(session: AsyncSession, customer_id: int) -> CrmContact | None:
+    """取客户当前的主联系人（最多一条）。"""
+    stmt = (
+        select(CrmContact)
+        .where(
+            CrmContact.customer_id == customer_id,
+            CrmContact.deleted == 0,
+            CrmContact.is_primary == 1,
+        )
+        .order_by(CrmContact.id)
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
+def _apply_snapshot(customer: CrmCustomer, contact: CrmContact) -> None:
+    """把主联系人写回客户快照字段（列表展示用，避免两处数据不一致）。"""
+    customer.contact_name = contact.name or ""
+    customer.contact_mobile = contact.mobile or ""
+    customer.contact_email = contact.email or ""
+
+
+async def _sync_primary_contact(
+    session: AsyncSession,
+    context: AuthContext,
+    customer: CrmCustomer,
+    *,
+    name: str | None = None,
+    mobile: str | None = None,
+    email: str | None = None,
+) -> CrmContact | None:
+    """客户表单里的联系人字段与主联系人同源双向：没有主联系人且填了姓名则新建。"""
+    contact = await _primary_contact(session, customer.id)
+    if contact is None:
+        if not str(name or "").strip():
+            return None
+        contact = CrmContact(
+            customer_id=customer.id,
+            name=str(name).strip(),
+            mobile=mobile or "",
+            email=email or "",
+            is_primary=1,
+            create_by=context.user_id,
+        )
+        session.add(contact)
+        await session.flush()
+        return contact
+    # 姓名不允许清空，其余字段按传入值覆盖
+    if name is not None and str(name).strip():
+        contact.name = str(name).strip()
+    if mobile is not None:
+        contact.mobile = mobile
+    if email is not None:
+        contact.email = email
+    contact.update_by = context.user_id
+    await session.flush()
+    return contact
+
+
+async def _promote_primary(
+    session: AsyncSession, context: AuthContext, customer_id: int
+) -> CrmContact | None:
+    """主联系人被删除后顺延一位（优先已有主联系人，其次最早创建者）并同步快照。"""
+    customer = await session.get(CrmCustomer, customer_id)
+    if customer is None or customer.deleted:
+        return None
+    remaining = await list_contacts(session, customer_id)
+    if not remaining:
+        return None
+    target = next((item for item in remaining if item.is_primary), remaining[0])
+    if not target.is_primary:
+        target.is_primary = 1
+        target.update_by = context.user_id
+    _apply_snapshot(customer, target)
+    await session.flush()
+    return target
 
 
 async def list_customers(
@@ -202,6 +291,16 @@ async def create_customer(
     )
     session.add(customer)
     await session.flush()
+    # 新建时就填了联系人信息，则同步生成主联系人，两处数据从一开始就一致
+    if contact_name:
+        await _sync_primary_contact(
+            session,
+            context,
+            customer,
+            name=contact_name,
+            mobile=contact_mobile,
+            email=contact_email,
+        )
     return customer
 
 
@@ -266,6 +365,16 @@ async def update_customer(
         customer.remark = remark
     customer.update_by = context.user_id
     await session.flush()
+    # 客户表单里改了联系人信息，同步到主联系人（没有则新建）
+    if contact_name is not None or contact_mobile is not None or contact_email is not None:
+        await _sync_primary_contact(
+            session,
+            context,
+            customer,
+            name=contact_name,
+            mobile=contact_mobile,
+            email=contact_email,
+        )
     return customer
 
 
@@ -333,8 +442,8 @@ async def add_contact(
     is_primary: bool = False,
     remark: str = "",
 ) -> CrmContact:
-    """新增联系人；设为主联系人时取消同客户其他主联系人。"""
-    await get_customer(session, customer_id)
+    """新增联系人；设为主联系人时取消同客户其他主联系人并回写客户快照。"""
+    customer = await get_customer(session, customer_id)
     if is_primary:
         for item in await list_contacts(session, customer_id):
             item.is_primary = 0
@@ -350,6 +459,8 @@ async def add_contact(
         create_by=context.user_id,
     )
     session.add(contact)
+    if is_primary:
+        _apply_snapshot(customer, contact)
     await session.flush()
     return contact
 
@@ -367,7 +478,7 @@ async def update_contact(
     is_primary: bool | None = None,
     remark: str | None = None,
 ) -> CrmContact:
-    """编辑联系人；设为主联系人时取消同客户其他主联系人。"""
+    """编辑联系人；设为主联系人时取消同客户其他主联系人并回写客户快照。"""
     contact = await get_contact(session, contact_id)
     if name is not None:
         contact.name = name
@@ -388,6 +499,9 @@ async def update_contact(
         else:
             contact.is_primary = 0
     contact.update_by = context.user_id
+    customer = await session.get(CrmCustomer, contact.customer_id)
+    if contact.is_primary and customer is not None and not customer.deleted:
+        _apply_snapshot(customer, contact)
     await session.flush()
     return contact
 
@@ -395,11 +509,15 @@ async def update_contact(
 async def delete_contact(
     session: AsyncSession, context: AuthContext, contact_id: int
 ) -> CrmContact:
-    """逻辑删除联系人。"""
+    """逻辑删除联系人（删除主联系人时顺延下一位并同步客户快照）。"""
     contact = await get_contact(session, contact_id)
+    was_primary = bool(contact.is_primary)
+    customer_id = int(contact.customer_id)
     contact.deleted = 1
     contact.update_by = context.user_id
     await session.flush()
+    if was_primary:
+        await _promote_primary(session, context, customer_id)
     return contact
 
 
@@ -677,7 +795,7 @@ async def convert_to_project(
     opportunity = await get_opportunity(session, opportunity_id)
 
     config = ConfigService(session)
-    win_stage = (await config.get_str("crm.opp.winStage")) or _DEFAULT_WIN_STAGE
+    win_stage = await _win_stage(config)
     if opportunity.stage != win_stage:
         raise ConflictError(f"商机未到 {win_stage} 阶段，不能转化")
     if opportunity.converted_project_id:
