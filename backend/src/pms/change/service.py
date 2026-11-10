@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 from typing import Final
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pms.change.models import ChgApproval, ChgImpact, ChgItem, ChgRequest
+from pms.change.models import ChgApproval, ChgImpact, ChgItem, ChgRequest, ChgSchedule
 from pms.change.rules import (
     ApprovalNode,
     ChangeLevel,
@@ -38,6 +39,10 @@ _CODE_PREFIX: Final[str] = "CR"
 # R-CHG-02：仅以下项目状态可提交变更
 _ALLOWED_PROJECT_STATUS: Final[frozenset[str]] = frozenset(
     {ProjectStatus.APPROVED, ProjectStatus.IN_PROGRESS, ProjectStatus.SUSPENDED}
+)
+# 周期排期只在「未定级」前可改：评估后审批链已按影响定级，改排期必须重新评估
+_SCHEDULE_EDITABLE_STATUS: Final[frozenset[str]] = frozenset(
+    {ChangeStatus.DRAFT, ChangeStatus.SUBMITTED}
 )
 
 
@@ -108,6 +113,36 @@ async def create_request(
     return request
 
 
+async def update_request(
+    session: AsyncSession,
+    request_id: int,
+    operator_id: int = 0,
+    *,
+    title: str | None = None,
+    reason: str | None = None,
+    content: str | None = None,
+    expect_result: str | None = None,
+    is_emergency: bool | None = None,
+) -> ChgRequest:
+    """编辑变更申请基本信息（仅草稿状态）。"""
+    request = await _get(session, request_id)
+    if request.status != ChangeStatus.DRAFT:
+        raise ConflictError(f"变更状态 {request.status} 不允许编辑，请撤回后修改")
+    if title is not None:
+        request.title = title
+    if reason is not None:
+        request.reason = reason
+    if content is not None:
+        request.content = content
+    if expect_result is not None:
+        request.expect_result = expect_result
+    if is_emergency is not None:
+        request.is_emergency = 1 if is_emergency else 0
+    request.update_by = operator_id
+    await session.flush()
+    return request
+
+
 async def submit(session: AsyncSession, request_id: int, operator_id: int = 0) -> ChgRequest:
     """提交变更：DRAFT → SUBMITTED。"""
     request = await _get(session, request_id)
@@ -136,15 +171,33 @@ async def assess(
     request.status = assert_transit(request.status, ChangeStatus.ASSESSED)
     request.update_by = operator_id
 
+    # 「要求补充评估」会退回 DRAFT，再次评估时先清空上一轮评估与审批链，避免重复行
+    for row in await list_impacts(session, request_id):
+        row.deleted = 1
+    for row in await list_items(session, request_id):
+        row.deleted = 1
+    for row in await list_approvals(session, request_id):
+        row.deleted = 1
+    await session.flush()
+
     for payload in impacts:
         session.add(ChgImpact(request_id=request_id, **_impact_kwargs(payload)))
     for payload in items or []:
         session.add(ChgItem(request_id=request_id, **_item_kwargs(payload)))
     await session.flush()
 
+    # 周期排期（角色负责人 + 日期范围）折算为项目/阶段计划的影响项
+    schedules = await list_schedules(session, request_id)
+    if schedules:
+        await _append_schedule_items(session, request, schedules)
+        await session.flush()
+
     impact_input = await _to_impact_input(
         session, request, impacts, contract_commitment, tech_architecture
     )
+    derived_days = await _schedule_impact_days(session, request, schedules)
+    if derived_days > impact_input.schedule_impact_days:
+        impact_input = replace(impact_input, schedule_impact_days=derived_days)
     config = ConfigService(session)
     level = evaluate_level(impact_input, await _thresholds(config))
     request.level = str(level)
@@ -200,6 +253,7 @@ async def approve(
         request.status = assert_transit(request.status, ChangeStatus.APPROVED)
         request.approve_time = date.today()
         await _apply_items(session, request, operator_id)
+        await _apply_schedules(session, request, operator_id)
         await _freeze_change_baseline(session, request, operator_id)
     return request
 
@@ -310,33 +364,74 @@ async def get_request(session: AsyncSession, request_id: int) -> ChgRequest:
     return await _get(session, request_id)
 
 
+def _request_filters(
+    project_id: int | None = None,
+    status: str = "",
+    change_type: str = "",
+    level: str = "",
+    keyword: str = "",
+    only_emergency: bool = False,
+) -> list[object]:
+    """变更台账查询条件（列表与计数共用，避免口径不一致）。"""
+    clauses: list[object] = []
+    if project_id:
+        clauses.append(ChgRequest.project_id == project_id)
+    if status:
+        # 支持逗号分组，便于前端用一段式页签表达「待审批 = SUBMITTED+ASSESSED」
+        values = [item.strip() for item in status.split(",") if item.strip()]
+        if len(values) > 1:
+            clauses.append(ChgRequest.status.in_(values))
+        elif values:
+            clauses.append(ChgRequest.status == values[0])
+    if change_type:
+        clauses.append(ChgRequest.change_type == change_type)
+    if level:
+        clauses.append(ChgRequest.level == level)
+    if only_emergency:
+        clauses.append(ChgRequest.is_emergency == 1)
+    if keyword:
+        like = f"%{keyword}%"
+        clauses.append(ChgRequest.title.like(like) | ChgRequest.request_code.like(like))
+    return clauses
+
+
 async def list_requests(
     session: AsyncSession,
     project_id: int | None = None,
     status: str = "",
     offset: int = 0,
     limit: int = 20,
+    *,
+    change_type: str = "",
+    level: str = "",
+    keyword: str = "",
+    only_emergency: bool = False,
 ) -> list[ChgRequest]:
-    """变更台账列表。"""
-    stmt = select(ChgRequest).where(ChgRequest.deleted == 0)
-    if project_id:
-        stmt = stmt.where(ChgRequest.project_id == project_id)
-    if status:
-        stmt = stmt.where(ChgRequest.status == status)
+    """变更台账列表（可按项目/状态/类型/级别/关键字过滤）。"""
+    stmt = select(ChgRequest).where(
+        ChgRequest.deleted == 0,
+        *_request_filters(project_id, status, change_type, level, keyword, only_emergency),
+    )
     stmt = stmt.order_by(ChgRequest.id.desc()).offset(offset).limit(limit)
     result = await session.execute(stmt)
     return list(result.scalars().all())
 
 
 async def count_requests(
-    session: AsyncSession, project_id: int | None = None, status: str = ""
+    session: AsyncSession,
+    project_id: int | None = None,
+    status: str = "",
+    *,
+    change_type: str = "",
+    level: str = "",
+    keyword: str = "",
+    only_emergency: bool = False,
 ) -> int:
-    """变更台账总数。"""
-    stmt = select(func.count(ChgRequest.id)).where(ChgRequest.deleted == 0)
-    if project_id:
-        stmt = stmt.where(ChgRequest.project_id == project_id)
-    if status:
-        stmt = stmt.where(ChgRequest.status == status)
+    """变更台账总数（过滤条件与列表一致）。"""
+    stmt = select(func.count(ChgRequest.id)).where(
+        ChgRequest.deleted == 0,
+        *_request_filters(project_id, status, change_type, level, keyword, only_emergency),
+    )
     result = await session.execute(stmt)
     return int(result.scalar_one())
 
@@ -372,6 +467,79 @@ async def list_impacts(session: AsyncSession, request_id: int) -> list[ChgImpact
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def list_schedules(session: AsyncSession, request_id: int) -> list[ChgSchedule]:
+    """周期排期明细（按角色+负责人登记的多段日期范围）。"""
+    stmt = (
+        select(ChgSchedule)
+        .where(ChgSchedule.request_id == request_id, ChgSchedule.deleted == 0)
+        .order_by(ChgSchedule.id)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def schedule_summary(
+    session: AsyncSession, request_ids: list[int]
+) -> dict[int, str]:
+    """台账用的排期摘要：每条变更涉及的角色（按登记顺序去重）。"""
+    ids = [item for item in request_ids if item]
+    if not ids:
+        return {}
+    stmt = (
+        select(ChgSchedule.request_id, ChgSchedule.role_name)
+        .where(ChgSchedule.request_id.in_(ids), ChgSchedule.deleted == 0)
+        .order_by(ChgSchedule.id)
+    )
+    summary: dict[int, list[str]] = {}
+    for request_id, role_name in (await session.execute(stmt)).all():
+        bucket = summary.setdefault(request_id, [])
+        if role_name and role_name not in bucket:
+            bucket.append(role_name)
+    return {key: "、".join(roles) for key, roles in summary.items()}
+
+
+async def replace_schedules(
+    session: AsyncSession,
+    request_id: int,
+    items: list[dict[str, object]],
+    operator_id: int = 0,
+) -> list[ChgSchedule]:
+    """整体覆盖保存周期排期（仅草稿 / 已提交可改，评估后需重新评估）。"""
+    request = await _get(session, request_id)
+    if request.status not in _SCHEDULE_EDITABLE_STATUS:
+        raise ConflictError(f"变更状态 {request.status} 不允许修改周期排期，请先撤回")
+    for row in await list_schedules(session, request_id):
+        row.deleted = 1
+        row.update_by = operator_id
+    await session.flush()
+
+    saved: list[ChgSchedule] = []
+    for payload in items:
+        role_name = str(payload.get("roleName", "")).strip()
+        if not role_name:
+            raise BizRuleError("排期角色不能为空（如开发 / 测试）")
+        start = _to_date(payload.get("planStart"))
+        end = _to_date(payload.get("planEnd"))
+        if start is None or end is None:
+            raise BizRuleError(f"角色「{role_name}」的排期起止日期不能为空")
+        if end < start:
+            raise BizRuleError(f"角色「{role_name}」的排期结束日期不能早于开始日期")
+        row = ChgSchedule(
+            request_id=request_id,
+            role_name=role_name,
+            owner_id=int(payload.get("ownerId", 0) or 0),
+            plan_start=start.isoformat(),
+            plan_end=end.isoformat(),
+            remark=str(payload.get("remark", "")),
+            applied=0,
+            create_by=operator_id,
+        )
+        session.add(row)
+        saved.append(row)
+    await session.flush()
+    return saved
 
 
 def _impact_kwargs(payload: dict[str, object]) -> dict[str, object]:
@@ -502,9 +670,10 @@ def _shift_date(value: object | None, days: int) -> str | None:
 
 
 async def _apply_items(session: AsyncSession, request: ChgRequest, operator_id: int) -> None:
-    """应用影响项到项目计划（阶段/里程碑/任务/资源/预算）。"""
+    """应用影响项到项目计划（项目/阶段/里程碑/任务/资源/预算）。"""
     items = await list_items(session, request.id)
     project = await session.get(PrjProject, request.project_id)
+    has_schedule = await _count_schedules(session, request.id) > 0
     for item in items:
         if item.applied:
             continue
@@ -528,6 +697,10 @@ async def _apply_items(session: AsyncSession, request: ChgRequest, operator_id: 
             if stage is not None and item.field_name in {"planStart", "planEnd"}:
                 item.before_value = str(getattr(stage, _field_of(item.field_name)) or "")
                 setattr(stage, _field_of(item.field_name), item.after_value)
+        elif item.item_type == "PROJECT" and project is not None:
+            if item.field_name in {"planStart", "planEnd"}:
+                item.before_value = str(getattr(project, _field_of(item.field_name)) or "")
+                setattr(project, _field_of(item.field_name), item.after_value)
         elif item.item_type == "BUDGET" and project is not None:
             if item.field_name == "contractAmount":
                 item.before_value = f"{float(project.contract_amount):.2f}"
@@ -545,7 +718,8 @@ async def _apply_items(session: AsyncSession, request: ChgRequest, operator_id: 
         item.applied = 1
         item.update_by = operator_id
 
-    if project is not None and float(request.schedule_impact_days) > 0:
+    # 有周期排期时由排期给出准确日期，不再按天数粗放顺延，避免重复叠加
+    if project is not None and float(request.schedule_impact_days) > 0 and not has_schedule:
         project.plan_end = _shift_date(project.plan_end, int(request.schedule_impact_days))
     await session.flush()
     await project_service.recalc_progress(session, request.project_id)
@@ -554,6 +728,139 @@ async def _apply_items(session: AsyncSession, request: ChgRequest, operator_id: 
 def _field_of(field_name: str) -> str:
     """驼峰字段转模型属性名。"""
     return {"planStart": "plan_start", "planEnd": "plan_end"}.get(field_name, "plan_end")
+
+
+async def _count_schedules(session: AsyncSession, request_id: int) -> int:
+    """周期排期条数（判断是否以排期为准）。"""
+    stmt = select(func.count(ChgSchedule.id)).where(
+        ChgSchedule.request_id == request_id, ChgSchedule.deleted == 0
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def _schedule_impact_days(
+    session: AsyncSession, request: ChgRequest, schedules: list[ChgSchedule]
+) -> float:
+    """排期相对项目计划结束日的顺延天数（用于自动定级）。"""
+    if not schedules:
+        return 0.0
+    project = await session.get(PrjProject, request.project_id)
+    current_end = _to_date(project.plan_end) if project is not None else None
+    ends = [moment for moment in (_to_date(row.plan_end) for row in schedules) if moment]
+    if current_end is None or not ends:
+        return 0.0
+    return float(max(0, (max(ends) - current_end).days))
+
+
+async def _append_schedule_items(
+    session: AsyncSession, request: ChgRequest, schedules: list[ChgSchedule]
+) -> None:
+    """把周期排期折算成影响项（项目计划起止 + 同名阶段计划起止）。
+
+    统一走 `t_chg_item`，审批通过后由 `_apply_items` 落库，前端「影响项」可直接看到前后值。
+    """
+    project = await session.get(PrjProject, request.project_id)
+    if project is None:
+        return
+    existing = await list_items(session, request.id)
+    seen = {(item.item_type, item.biz_id, item.field_name) for item in existing}
+    rows: list[dict[str, object]] = []
+
+    starts = [moment for moment in (_to_date(row.plan_start) for row in schedules) if moment]
+    ends = [moment for moment in (_to_date(row.plan_end) for row in schedules) if moment]
+    if starts:
+        new_start = min(starts)
+        old_start = _to_date(project.plan_start)
+        if old_start is None or new_start < old_start:
+            rows.append(
+                {
+                    "itemType": "PROJECT",
+                    "action": "UPDATE",
+                    "bizId": project.id,
+                    "fieldName": "planStart",
+                    "beforeValue": str(project.plan_start or ""),
+                    "afterValue": new_start.isoformat(),
+                }
+            )
+    if ends:
+        new_end = max(ends)
+        old_end = _to_date(project.plan_end)
+        if old_end is None or new_end > old_end:
+            rows.append(
+                {
+                    "itemType": "PROJECT",
+                    "action": "UPDATE",
+                    "bizId": project.id,
+                    "fieldName": "planEnd",
+                    "beforeValue": str(project.plan_end or ""),
+                    "afterValue": new_end.isoformat(),
+                }
+            )
+
+    stages = await project_service.list_stages(session, request.project_id)
+    for row in schedules:
+        matched = [stage for stage in stages if row.role_name and row.role_name in stage.stage_name]
+        for stage in matched:
+            if row.plan_start:
+                rows.append(
+                    {
+                        "itemType": "STAGE",
+                        "action": "UPDATE",
+                        "bizId": stage.id,
+                        "fieldName": "planStart",
+                        "beforeValue": str(stage.plan_start or ""),
+                        "afterValue": str(row.plan_start),
+                    }
+                )
+            if row.plan_end:
+                rows.append(
+                    {
+                        "itemType": "STAGE",
+                        "action": "UPDATE",
+                        "bizId": stage.id,
+                        "fieldName": "planEnd",
+                        "beforeValue": str(stage.plan_end or ""),
+                        "afterValue": str(row.plan_end),
+                    }
+                )
+
+    for row in rows:
+        key = (row["itemType"], row["bizId"], row["fieldName"])
+        if key in seen:
+            continue
+        seen.add(key)
+        session.add(ChgItem(request_id=request.id, **_item_kwargs(row)))
+
+
+async def _apply_schedules(
+    session: AsyncSession, request: ChgRequest, operator_id: int
+) -> None:
+    """审批通过后落排期：**只延长不缩短**地校准项目计划起止，并标记已应用。
+
+    排期通常只登记部分角色（如仅测试段），若直接以 `min(开始)` 覆盖，
+    会把项目开始日后移、把计划周期压短，与「变更顺延」的语义相反。
+    """
+    schedules = await list_schedules(session, request.id)
+    if not schedules:
+        return
+    project = await session.get(PrjProject, request.project_id)
+    if project is not None:
+        starts = [moment for moment in (_to_date(row.plan_start) for row in schedules) if moment]
+        ends = [moment for moment in (_to_date(row.plan_end) for row in schedules) if moment]
+        if starts:
+            new_start = min(starts)
+            current_start = _to_date(project.plan_start)
+            if current_start is None or new_start < current_start:
+                project.plan_start = new_start.isoformat()
+        if ends:
+            new_end = max(ends)
+            current_end = _to_date(project.plan_end)
+            if current_end is None or new_end > current_end:
+                project.plan_end = new_end.isoformat()
+    for row in schedules:
+        row.applied = 1
+        row.update_by = operator_id
+    await session.flush()
 
 
 async def _freeze_change_baseline(
@@ -586,8 +893,10 @@ async def _freeze_change_baseline(
 async def _can_initiate(
     session: AsyncSession, project: PrjProject, context: AuthContext
 ) -> bool:
-    """是否可发起变更：项目经理（负责人/组内 PM）或特权角色（PMO/公司领导）。"""
-    if context.is_privileged or project.pm_id == context.user_id:
+    """是否可发起变更：项目经理（负责人/组内 PM）、PMO/公司领导或系统管理员。"""
+    if context.is_privileged or context.has_any_role("ADMIN"):
+        return True
+    if project.pm_id == context.user_id:
         return True
     stmt = select(PrjMember.id).where(
         PrjMember.project_id == project.id,

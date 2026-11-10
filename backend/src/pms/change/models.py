@@ -74,6 +74,24 @@ class ChgItem(Base, CommonMixin):
     applied: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class ChgSchedule(Base, CommonMixin):
+    """周期排期明细 `t_chg_schedule`。
+
+    周期变更按「角色 + 负责人 + 日期范围」逐段登记（如开发、测试各一段），
+    审批通过后作为影响项落到项目计划与同名阶段的计划起止上。
+    """
+
+    __tablename__ = "t_chg_schedule"
+
+    request_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    role_name: Mapped[str] = mapped_column(String(32), default="")
+    owner_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    plan_start: Mapped[str | None] = mapped_column(Date, default=None)
+    plan_end: Mapped[str | None] = mapped_column(Date, default=None)
+    remark: Mapped[str] = mapped_column(String(255), default="")
+    applied: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class ChgApproval(Base, CommonMixin):
     """变更审批链节点 `t_chg_approval`（06 §4.3 串行）。"""
 

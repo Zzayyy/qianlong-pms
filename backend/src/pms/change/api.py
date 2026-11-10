@@ -10,12 +10,29 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pms.change import service
+from pms.change.rules import ChangeType, ImpactDimension
+from pms.change.state import ChangeStatus
 from pms.common.response import ok, paged
 from pms.core.context import AuthContext
 from pms.core.deps import Pagination, get_pagination, get_session, require_permissions
 from pms.org.models import SysUser
+from pms.project.models import PrjProject
+from pms.system.config_service import ConfigService
 
 router = APIRouter(prefix="/api/v1/changes", tags=["变更管理"])
+
+#: 周期排期角色（如开发 / 测试）默认值，可在「规则参数」中调整 `change.schedule.roles`
+_DEFAULT_SCHEDULE_ROLES: tuple[str, ...] = ("开发", "测试", "实施", "运维")
+
+
+class ScheduleIn(BaseModel):
+    """周期排期明细入参：角色 + 负责人 + 日期范围。"""
+
+    roleName: str = Field(min_length=1, max_length=32)
+    ownerId: int = 0
+    planStart: str
+    planEnd: str
+    remark: str = ""
 
 
 class ChangeIn(BaseModel):
@@ -29,6 +46,23 @@ class ChangeIn(BaseModel):
     expectResult: str = ""
     source: str = "INTERNAL"
     isEmergency: bool = False
+    schedules: list[ScheduleIn] = Field(default_factory=list)
+
+
+class ChangeUpdateIn(BaseModel):
+    """编辑变更申请（仅草稿）。"""
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    reason: str | None = None
+    content: str | None = None
+    expectResult: str | None = None
+    isEmergency: bool | None = None
+
+
+class SchedulesIn(BaseModel):
+    """周期排期保存入参（整体覆盖）。"""
+
+    items: list[ScheduleIn] = Field(default_factory=list)
 
 
 class AssessIn(BaseModel):
@@ -49,7 +83,9 @@ class OpinionIn(BaseModel):
     opinion: str = ""
 
 
-def _request_out(request: object) -> dict[str, object]:
+def _request_out(
+    request: object, project_name: str = "", schedule_roles: str = ""
+) -> dict[str, object]:
     """变更出参。"""
     from pms.change.models import ChgRequest
 
@@ -58,17 +94,69 @@ def _request_out(request: object) -> dict[str, object]:
         "id": request.id,
         "requestCode": request.request_code,
         "projectId": request.project_id,
+        "projectName": project_name,
+        "scheduleRoles": schedule_roles,
         "changeType": request.change_type,
         "title": request.title,
+        "reason": request.reason,
+        "content": request.content,
+        "expectResult": request.expect_result,
         "level": request.level,
         "status": request.status,
         "isEmergency": request.is_emergency,
         "emergencyDue": request.emergency_due,
         "scheduleImpactDays": float(request.schedule_impact_days),
         "costImpactAmount": float(request.cost_impact_amount),
+        "submitterId": request.submitter_id,
+        "pmId": request.pm_id,
+        "submitTime": request.submit_time,
+        "approveTime": request.approve_time,
+        "closeTime": request.close_time,
         "baselineBefore": request.baseline_before,
         "baselineAfter": request.baseline_after,
     }
+
+
+def _schedule_out(row: object, user_names: dict[int, str] | None = None) -> dict[str, object]:
+    """周期排期出参。"""
+    from pms.change.models import ChgSchedule
+
+    assert isinstance(row, ChgSchedule)
+    names = user_names or {}
+    return {
+        "id": row.id,
+        "roleName": row.role_name,
+        "ownerId": row.owner_id,
+        "ownerName": names.get(row.owner_id, ""),
+        "planStart": row.plan_start,
+        "planEnd": row.plan_end,
+        "remark": row.remark,
+        "applied": row.applied,
+    }
+
+
+async def _user_names(session: AsyncSession, user_ids: set[int]) -> dict[int, str]:
+    """批量取用户姓名（负责人展示）。"""
+    ids = {item for item in user_ids if item}
+    if not ids:
+        return {}
+    rows = await session.execute(
+        select(SysUser.id, SysUser.real_name).where(SysUser.id.in_(ids), SysUser.deleted == 0)
+    )
+    return {row[0]: row[1] for row in rows.all()}
+
+
+async def _project_names(session: AsyncSession, project_ids: set[int]) -> dict[int, str]:
+    """批量取项目名称（台账展示）。"""
+    ids = {item for item in project_ids if item}
+    if not ids:
+        return {}
+    rows = await session.execute(
+        select(PrjProject.id, PrjProject.project_name).where(
+            PrjProject.id.in_(ids), PrjProject.deleted == 0
+        )
+    )
+    return {row[0]: row[1] for row in rows.all()}
 
 
 @router.post("", summary="创建变更申请")
@@ -90,6 +178,13 @@ async def create_change(
         source=body.source,
         is_emergency=body.isEmergency,
     )
+    if body.schedules:
+        await service.replace_schedules(
+            session,
+            request.id,
+            [item.model_dump() for item in body.schedules],
+            context.user_id,
+        )
     await session.commit()
     return ok({"id": request.id, "requestCode": request.request_code})
 
@@ -101,14 +196,55 @@ async def list_changes(
     pagination: Annotated[Pagination, Depends(get_pagination)],
     projectId: Annotated[int | None, Query()] = None,
     status: Annotated[str, Query()] = "",
+    changeType: Annotated[str, Query()] = "",
+    level: Annotated[str, Query()] = "",
+    keyword: Annotated[str, Query()] = "",
+    emergency: Annotated[bool, Query()] = False,
 ) -> object:
-    """分页查询变更台账。"""
-    total = await service.count_requests(session, projectId, status)
+    """分页查询变更台账；支持项目 / 状态 / 类型 / 级别 / 关键字 / 紧急筛选。"""
+    filters = {
+        "change_type": changeType,
+        "level": level,
+        "keyword": keyword,
+        "only_emergency": emergency,
+    }
+    total = await service.count_requests(session, projectId, status, **filters)
     items = await service.list_requests(
-        session, projectId, status, pagination.offset, pagination.limit
+        session,
+        projectId,
+        status,
+        pagination.offset,
+        pagination.limit,
+        **filters,
     )
+    names = await _project_names(session, {item.project_id for item in items})
+    roles = await service.schedule_summary(session, [item.id for item in items])
     return paged(
-        [_request_out(item) for item in items], total, pagination.page_num, pagination.page_size
+        [
+            _request_out(item, names.get(item.project_id, ""), roles.get(item.id, ""))
+            for item in items
+        ],
+        total,
+        pagination.page_num,
+        pagination.page_size,
+    )
+
+
+@router.get("/options", summary="变更页面选项")
+async def change_options(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("change:view"))],
+) -> object:
+    """周期排期角色与变更类型/状态枚举（角色可在「规则参数」中调整）。"""
+    raw = await ConfigService(session).get_str("change.schedule.roles")
+    roles = [item.strip() for item in (raw or "").split(",") if item.strip()]
+    return ok(
+        {
+            "scheduleRoles": roles or list(_DEFAULT_SCHEDULE_ROLES),
+            "changeTypes": [item.value for item in ChangeType],
+            "dimensions": [item.value for item in ImpactDimension],
+            "statuses": [item.value for item in ChangeStatus],
+        }
     )
 
 
@@ -118,21 +254,23 @@ async def change_detail(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("change:view"))],
 ) -> object:
-    """变更详情：含评估、影响项与审批链。"""
+    """变更详情：含周期排期、评估、影响项与审批链。"""
     request = await service.get_request(session, request_id)
     approvals = await service.list_approvals(session, request_id)
     impacts = await service.list_impacts(session, request_id)
     change_items = await service.list_items(session, request_id)
-    approver_ids = {row.approver_id for row in approvals if row.approver_id}
-    names: dict[int, str] = {}
-    if approver_ids:
-        rows = await session.execute(
-            select(SysUser.id, SysUser.real_name).where(SysUser.id.in_(approver_ids))
-        )
-        names = {row[0]: row[1] for row in rows.all()}
+    schedules = await service.list_schedules(session, request_id)
+    project_names = await _project_names(session, {request.project_id})
+    names = await _user_names(
+        session,
+        {row.approver_id for row in approvals}
+        | {row.owner_id for row in schedules}
+        | {request.submitter_id, request.pm_id},
+    )
     return ok(
         {
-            "request": _request_out(request),
+            "request": _request_out(request, project_names.get(request.project_id, "")),
+            "schedules": [_schedule_out(row, names) for row in schedules],
             "approvals": [
                 {
                     "seq": row.seq,
@@ -147,7 +285,23 @@ async def change_detail(
                 for row in approvals
             ],
             "impacts": [
-                {"dimension": row.dimension, "description": row.description} for row in impacts
+                {
+                    "dimension": row.dimension,
+                    "description": row.description,
+                    "scopeExpanded": row.scope_expanded,
+                    "deliverableAdd": row.deliverable_add,
+                    "deliverableDel": row.deliverable_del,
+                    "scheduleImpactDays": float(row.schedule_impact_days),
+                    "newEndDate": row.new_end_date,
+                    "costImpactAmount": float(row.cost_impact_amount),
+                    "newBudget": float(row.new_budget),
+                    "headcountDelta": row.headcount_delta,
+                    "roleName": row.role_name,
+                    "allocation": float(row.allocation),
+                    "riskLevel": row.risk_level,
+                    "qualityDesc": row.quality_desc,
+                }
+                for row in impacts
             ],
             "items": [
                 {
@@ -163,6 +317,43 @@ async def change_detail(
             ],
         }
     )
+
+
+@router.put("/{request_id}", summary="编辑变更申请")
+async def update_change(
+    request_id: int,
+    body: ChangeUpdateIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("change:create"))],
+) -> object:
+    """编辑草稿的标题/原因/内容/期望结果/紧急标记（仅 DRAFT）。"""
+    request = await service.update_request(
+        session,
+        request_id,
+        context.user_id,
+        title=body.title,
+        reason=body.reason,
+        content=body.content,
+        expect_result=body.expectResult,
+        is_emergency=body.isEmergency,
+    )
+    await session.commit()
+    return ok({"id": request.id, "title": request.title, "status": request.status})
+
+
+@router.put("/{request_id}/schedules", summary="保存周期排期")
+async def save_schedules(
+    request_id: int,
+    body: SchedulesIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("change:create"))],
+) -> object:
+    """整体覆盖保存周期排期（角色 + 负责人 + 日期范围）；评估后需先撤回再改。"""
+    saved = await service.replace_schedules(
+        session, request_id, [item.model_dump() for item in body.items], context.user_id
+    )
+    await session.commit()
+    return ok({"count": len(saved)})
 
 
 @router.post("/{request_id}/submit", summary="提交变更")

@@ -55,8 +55,9 @@ export const approveProject = (id: string) => post<{ status: string }>(`/project
 export const rejectProject = (id: string, reason: string) =>
   post<{ status: string }>(`/projects/${id}/reject`, { reason })
 
-export const changeProjectStatus = (id: string, status: string) =>
-  put<{ status: string }>(`/projects/${id}/status`, { status })
+/** 项目状态流转：后端字段为 `target`（非 status）。 */
+export const changeProjectStatus = (id: string, target: string) =>
+  put<{ status: string }>(`/projects/${id}/status`, { target })
 
 export const listStages = (id: string) => get<Record<string, unknown>[]>(`/projects/${id}/stages`)
 
@@ -76,6 +77,12 @@ export const listTasks = (id: string) => get<Record<string, unknown>[]>(`/projec
 
 export const createTask = (id: string, data: Record<string, unknown>) =>
   post<{ id: string }>(`/projects/${id}/tasks`, data)
+
+export const updateTask = (id: string, taskId: string, data: Record<string, unknown>) =>
+  put<{ id: string }>(`/projects/${id}/tasks/${taskId}`, data)
+
+export const deleteTask = (id: string, taskId: string) =>
+  del<unknown>(`/projects/${id}/tasks/${taskId}`)
 
 export const updateTaskProgress = (id: string, taskId: string, progress: number) =>
   put<{ progress: number }>(`/projects/${id}/tasks/${taskId}/progress`, { progress })
@@ -131,24 +138,55 @@ export const changeProjectPm = (id: string, pmId: string) =>
 
 /* ------------------------------ 变更 ------------------------------ */
 
+/** 周期排期明细：角色（开发/测试…）+ 负责人 + 日期范围。 */
+export interface ChangeSchedule {
+  id?: string
+  roleName: string
+  ownerId: string | number
+  ownerName?: string
+  planStart: string
+  planEnd: string
+  remark?: string
+  applied?: number
+}
+
+export interface ChangeOptions {
+  scheduleRoles: string[]
+  changeTypes: string[]
+  dimensions: string[]
+  statuses: string[]
+}
+
 export const listChanges = (params: Record<string, unknown>) =>
   get<Page<Record<string, unknown>>>('/changes', params)
+
+/** 变更页面选项（排期角色、类型/状态枚举，后台可调）。 */
+export const changeOptions = () => get<ChangeOptions>('/changes/options')
 
 export const changeDetail = (id: string) => get<Record<string, unknown>>(`/changes/${id}`)
 
 export const createChange = (data: Record<string, unknown>) =>
   post<{ id: string; requestCode: string }>('/changes', data)
 
+/** 编辑草稿基本信息（标题/原因/内容/期望结果/紧急）。 */
+export const updateChange = (id: string, data: Record<string, unknown>) =>
+  put<{ id: string; title: string; status: string }>(`/changes/${id}`, data)
+
+/** 整体覆盖保存周期排期。 */
+export const saveChangeSchedules = (id: string, items: ChangeSchedule[]) =>
+  put<{ count: number }>(`/changes/${id}/schedules`, { items })
+
 export const submitChange = (id: string) => post<{ status: string }>(`/changes/${id}/submit`)
 
 export const assessChange = (id: string, data: Record<string, unknown>) =>
   post<{ level: string; status: string }>(`/changes/${id}/assess`, data)
 
-export const approveChange = (id: string, comment = '') =>
-  post<{ status: string }>(`/changes/${id}/approve`, { comment })
+/** 审批意见：后端字段为 `opinion`。 */
+export const approveChange = (id: string, opinion = '') =>
+  post<{ status: string }>(`/changes/${id}/approve`, { opinion })
 
-export const rejectChange = (id: string, reason = '') =>
-  post<{ status: string }>(`/changes/${id}/reject`, { reason })
+export const rejectChange = (id: string, opinion = '') =>
+  post<{ status: string }>(`/changes/${id}/reject`, { opinion })
 
 export const changeAction = (id: string, action: string, payload: Record<string, unknown> = {}) =>
   post<{ status: string }>(`/changes/${id}/${action}`, payload)

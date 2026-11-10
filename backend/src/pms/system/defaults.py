@@ -45,6 +45,7 @@ DEFAULT_CONFIGS: Final[Mapping[str, ConfigValue]] = {
     "change.sla.daysL2": "3",
     "change.sla.daysL3": "5",
     "change.emergency.days": "7",
+    "change.schedule.roles": "开发,测试,实施,运维",
     # ---- 立项审批阈值 ----
     "approval.project.amountL2": "500000",
     "approval.project.amountL3": "2000000",
@@ -105,6 +106,7 @@ CONFIG_REMARKS: Final[Mapping[str, str]] = {
     "change.sla.daysL2": "L2 重要变更审批时限（工作日），超时提醒并升级",
     "change.sla.daysL3": "L3 重大变更审批时限（工作日），超时提醒并纳入日报",
     "change.emergency.days": "紧急变更补办审批的期限（自然日），逾期上报 PMO",
+    "change.schedule.roles": "周期变更排期可选角色（英文逗号分隔），如「开发,测试,实施,运维」",
     # 立项审批
     "approval.project.amountL2": "立项金额达到该值（元）需部门负责人审批（L2）",
     "approval.project.amountL3": "立项金额达到该值（元）需公司领导审批（L3）",

@@ -43,8 +43,12 @@ async def ensure_project_visible(
 async def is_project_manager(
     session: AsyncSession, context: AuthContext, project: PrjProject
 ) -> bool:
-    """是否项目经理（负责人或组内 PM 角色）；PMO/公司领导视为可管理。"""
-    if context.is_privileged:
+    """是否项目经理（负责人或组内 PM 角色）。
+
+    兜底口径：PMO / 公司领导（`is_privileged`）与系统管理员可管理任意项目，
+    避免最高权限角色被项目级校验拦住、导致数据无法运维。
+    """
+    if context.is_privileged or context.has_any_role("ADMIN"):
         return True
     if project.pm_id == context.user_id:
         return True
@@ -62,14 +66,16 @@ async def ensure_project_manager(
 ) -> None:
     """非项目经理时抛 40301（节点/总监/文档管理用）。"""
     if not await is_project_manager(session, context, project):
-        raise ForbiddenError("仅项目经理（或 PMO）可执行该操作")
+        raise ForbiddenError("仅项目经理、PMO 或系统管理员可执行该操作")
 
 
 async def is_project_participant(
     session: AsyncSession, context: AuthContext, project: PrjProject
 ) -> bool:
-    """是否项目参与者（成员/负责人/特权角色），用于文档上传。"""
-    if context.is_privileged or project.pm_id == context.user_id:
+    """是否项目参与者（成员/负责人/特权角色/系统管理员），用于文档上传。"""
+    if context.is_privileged or context.has_any_role("ADMIN"):
+        return True
+    if project.pm_id == context.user_id:
         return True
     return await service.is_member(session, project.id, context.user_id)
 

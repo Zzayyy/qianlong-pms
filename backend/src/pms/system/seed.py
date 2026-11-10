@@ -234,7 +234,11 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
         _ROLE_VIEW_ALL
         + (
             "project:approve",
+            # 公司领导可兜底维护项目节点/成员/文档（数据层已视为项目管理者）
+            "project:edit",
+            "project:stage:edit",
             "project:doc:upload",
+            "project:doc:manage",
             "change:approve",
             "worklog:create",
             "report:export",

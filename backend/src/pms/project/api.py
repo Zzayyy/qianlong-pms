@@ -26,6 +26,7 @@ from pms.project.visibility import (
     can_view_project,
     ensure_project_manager,
     ensure_project_visible,
+    is_project_manager,
 )
 
 router = APIRouter(prefix="/api/v1/projects", tags=["项目周期"])
@@ -187,10 +188,13 @@ async def list_projects(
     context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
     pagination: Annotated[Pagination, Depends(get_pagination)],
     keyword: Annotated[str, Query()] = "",
+    status: Annotated[str, Query()] = "",
 ) -> object:
-    """分页查询项目，**逐条按四维权限过滤**（维度 ③）。"""
-    total = await service.count_projects(session, keyword)
-    items = await service.list_projects(session, pagination.offset, pagination.limit, keyword)
+    """分页查询项目，**逐条按四维权限过滤**（维度 ③）；`status` 支持逗号分组。"""
+    total = await service.count_projects(session, keyword, status)
+    items = await service.list_projects(
+        session, pagination.offset, pagination.limit, keyword, status
+    )
     visible_items = [item for item in items if await _can_view(session, context, item)]
     return paged(
         [_project_out(item) for item in visible_items],
@@ -206,13 +210,19 @@ async def project_detail(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
 ) -> object:
-    """项目详情；不可见时返回 40302（数据越权）。"""
+    """项目详情；不可见时返回 40302（数据越权）。
+
+    出参附加 `canManage`：当前用户是否本项目的项目经理 / PMO，
+    前端据此禁用节点、成员、总监等管理动作，避免点了才报 40301。
+    """
     from pms.common.exceptions import DataForbiddenError
 
     project = await service.get_project(session, project_id)
     if not await _can_view(session, context, project):
         raise DataForbiddenError("无该项目访问权限")
-    return ok(_project_out(project))
+    data = _project_out(project)
+    data["canManage"] = await is_project_manager(session, context, project)
+    return ok(data)
 
 
 @router.post("/{project_id}/submit", summary="提交立项审批")
@@ -432,6 +442,46 @@ async def create_task(
     )
     await session.commit()
     return ok({"id": task.id})
+
+
+@router.put("/{project_id}/tasks/{task_id}", summary="编辑任务")
+async def update_task(
+    project_id: int,
+    task_id: int,
+    body: TaskIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+) -> object:
+    """编辑任务名称/阶段/负责人/权重/工时/计划起止/优先级。"""
+    task = await service.update_task(
+        session,
+        project_id,
+        task_id,
+        task_name=body.taskName,
+        stage_id=body.stageId,
+        owner_id=body.ownerId,
+        weight=body.weight,
+        plan_hours=body.planHours,
+        plan_start=body.planStart,
+        plan_end=body.planEnd,
+        priority=body.priority,
+        operator_id=context.user_id,
+    )
+    await session.commit()
+    return ok({"id": task.id})
+
+
+@router.delete("/{project_id}/tasks/{task_id}", summary="删除任务")
+async def delete_task(
+    project_id: int,
+    task_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+) -> object:
+    """删除任务（软删）并重算项目进度。"""
+    await service.delete_task(session, project_id, task_id, context.user_id)
+    await session.commit()
+    return ok(message="任务已删除")
 
 
 @router.put("/{project_id}/tasks/{task_id}/progress", summary="更新任务进度")

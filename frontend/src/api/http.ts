@@ -53,7 +53,10 @@ http.interceptors.response.use(
       }
       return Promise.reject(error)
     }
-    if (status === 401 || body?.code === 40101 || body?.code === 40301) {
+    // 只有「未认证 / 登录失效」才清理登录态。
+    // 40301（缺少功能权限）与 40302（数据越权）属于业务权限不足：
+    // 提示后必须保留会话，否则用户点一个无权按钮就会被强制登出。
+    if (status === 401 || body?.code === 40101) {
       localStorage.removeItem('pms_token')
       if (!location.hash.startsWith('#/login')) {
         const current = location.hash.replace(/^#/, '') || '/dashboard'

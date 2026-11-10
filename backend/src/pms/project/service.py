@@ -483,6 +483,59 @@ async def update_task_progress(
     return task
 
 
+async def update_task(
+    session: AsyncSession,
+    project_id: int,
+    task_id: int,
+    *,
+    task_name: str | None = None,
+    stage_id: int | None = None,
+    owner_id: int | None = None,
+    weight: float | None = None,
+    plan_hours: float | None = None,
+    plan_start: str | None = None,
+    plan_end: str | None = None,
+    priority: str | None = None,
+    operator_id: int = 0,
+) -> PrjTask:
+    """编辑任务（名称/阶段/负责人/权重/工时/计划起止/优先级）。"""
+    task = await session.get(PrjTask, task_id)
+    if task is None or task.deleted or task.project_id != project_id:
+        raise NotFoundError("任务不存在")
+    if task_name is not None:
+        task.task_name = task_name
+    if stage_id is not None:
+        task.stage_id = stage_id
+    if owner_id is not None:
+        task.owner_id = owner_id
+    if weight is not None:
+        task.weight = weight
+    if plan_hours is not None:
+        task.plan_hours = plan_hours
+    if plan_start is not None:
+        task.plan_start = plan_start or None
+    if plan_end is not None:
+        task.plan_end = plan_end or None
+    if priority is not None:
+        task.priority = priority
+    task.update_by = operator_id
+    await session.flush()
+    return task
+
+
+async def delete_task(
+    session: AsyncSession, project_id: int, task_id: int, operator_id: int = 0
+) -> None:
+    """删除任务（软删）并重算项目进度。"""
+    task = await session.get(PrjTask, task_id)
+    if task is None or task.deleted or task.project_id != project_id:
+        raise NotFoundError("任务不存在")
+    task.deleted = 1
+    task.update_by = operator_id
+    await session.flush()
+    await recalc_progress(session, project_id)
+
+
 async def create_milestone(
     session: AsyncSession,
     project_id: int,
@@ -754,22 +807,37 @@ async def _get_milestone(
     return milestone
 
 
-async def count_projects(session: AsyncSession, keyword: str = "") -> int:
-    """项目总数。"""
-    stmt = select(func.count(PrjProject.id)).where(PrjProject.deleted == 0)
+def _project_filters(keyword: str = "", status: str = "") -> list[object]:
+    """项目列表查询条件（列表与计数共用）。"""
+    clauses: list[object] = []
     if keyword:
-        stmt = stmt.where(PrjProject.project_name.like(f"%{keyword}%"))
+        clauses.append(PrjProject.project_name.like(f"%{keyword}%"))
+    if status:
+        # 支持逗号分组，便于前端用一段式页签表达「进行中 = IN_PROGRESS+SUSPENDED」
+        values = [item.strip() for item in status.split(",") if item.strip()]
+        if len(values) > 1:
+            clauses.append(PrjProject.status.in_(values))
+        elif values:
+            clauses.append(PrjProject.status == values[0])
+    return clauses
+
+
+async def count_projects(session: AsyncSession, keyword: str = "", status: str = "") -> int:
+    """项目总数。"""
+    stmt = select(func.count(PrjProject.id)).where(
+        PrjProject.deleted == 0, *_project_filters(keyword, status)
+    )
     result = await session.execute(stmt)
     return int(result.scalar_one())
 
 
 async def list_projects(
-    session: AsyncSession, offset: int, limit: int, keyword: str = ""
+    session: AsyncSession, offset: int, limit: int, keyword: str = "", status: str = ""
 ) -> list[PrjProject]:
     """项目分页列表（可见性过滤在 API 层用 `project_visible` 完成）。"""
-    stmt = select(PrjProject).where(PrjProject.deleted == 0)
-    if keyword:
-        stmt = stmt.where(PrjProject.project_name.like(f"%{keyword}%"))
+    stmt = select(PrjProject).where(
+        PrjProject.deleted == 0, *_project_filters(keyword, status)
+    )
     stmt = stmt.order_by(PrjProject.id.desc()).offset(offset).limit(limit)
     result = await session.execute(stmt)
     return list(result.scalars().all())

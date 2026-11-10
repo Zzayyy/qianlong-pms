@@ -1,1 +1,2 @@
 cd D:\Code\Project\ql-pms\backend; .\.venv\Scripts\python.exe -m uvicorn pms.main:app --reload --reload-dir src --port 8000
+cd D:\Code\Project\ql-pms\backend; .\.venv\Scripts\python.exe -m uvicorn pms.main:app --reload --port 8000
