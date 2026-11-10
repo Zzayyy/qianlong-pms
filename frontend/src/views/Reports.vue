@@ -11,7 +11,8 @@ import {
   TrendingUp,
   TriangleAlert
 } from 'lucide-vue-next'
-import { deptBoard, projectBoard, reportDepts } from '@/api'
+import { deptBoard, deptMembers, deptTrend, projectBoard, reportDepts } from '@/api'
+import ChartBox from '@/components/ChartBox.vue'
 import { useUserStore } from '@/stores/user'
 
 interface DeptRow {
@@ -84,6 +85,27 @@ interface ProjectBoardData {
   milestones: MilestoneItem[]
 }
 
+interface TrendPoint {
+  date: string
+  projectCount: number
+  avgProgress: number
+  avgSpi: number
+  redCount: number
+  yellowCount: number
+  avgDelayDays: number
+  actualHours: number
+}
+
+interface MemberLoad {
+  userId: string
+  realName: string
+  deptId: string
+  hours: number
+  projects: number
+  logDays: number
+  fillRate: number
+}
+
 type TagType = 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
 const ALL_DEPT = '__all__'
@@ -108,6 +130,149 @@ const summary = ref<BoardSummary>({
   byHealth: {}
 })
 const projects = ref<ProjectMetric[]>([])
+/** 是否连同下级部门一起统计（部门领导看整棵子树）。 */
+const includeSub = ref(false)
+/** 项目明细的快捷筛选与关键字（纯前端过滤，KPI 卡片可联动）。 */
+const filterKey = ref('')
+const keyword = ref('')
+const FILTER_TABS = [
+  { key: '', label: '全部' },
+  { key: 'RUNNING', label: '进行中' },
+  { key: 'DELAYED', label: '延期' },
+  { key: 'RISK', label: '有风险' }
+]
+const filteredProjects = computed(() => {
+  const kw = keyword.value.trim().toLowerCase()
+  return projects.value.filter((row) => {
+    if (filterKey.value === 'RUNNING' && row.status !== 'IN_PROGRESS') return false
+    if (filterKey.value === 'DELAYED' && Number(row.delayDays || 0) <= 0) return false
+    if (filterKey.value === 'RISK' && Number(row.riskOpen || 0) <= 0) return false
+    if (!kw) return true
+    return String(row.projectName || '').toLowerCase().includes(kw)
+  })
+})
+const toggleFilter = (key?: string) => {
+  if (!key) return
+  filterKey.value = filterKey.value === key ? '' : key
+}
+
+/* ------------------------------ 趋势与成员负载 ------------------------------ */
+const trendDays = ref(30)
+const trend = ref<TrendPoint[]>([])
+const memberLoad = ref<MemberLoad[]>([])
+/**
+ * 趋势图配置：平均进度折线（左轴 0~100）+ 健康度「风险」项目数柱（右轴）。
+ * 配色统一到系统主色的深浅两档，柱状用极浅的蓝，避免抢折线的视觉。
+ */
+const trendOption = computed(() => {
+  const items = trend.value
+  const axisText = { fontSize: 10, color: '#8a93a6' }
+  return {
+    grid: { left: 4, right: 4, top: 28, bottom: 2, containLabel: true },
+    tooltip: {
+      trigger: 'axis',
+      confine: true,
+      axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(51,112,255,0.06)' } },
+      formatter: (params: any) => {
+        const list = Array.isArray(params) ? params : [params]
+        const head = list[0]?.axisValueLabel || list[0]?.name || ''
+        const rows = list.map((item: any) => {
+          const isProgress = item.seriesName === '平均进度'
+          const value = isProgress
+            ? `${Number(item.value || 0).toFixed(1)}%`
+            : `${Number(item.value || 0)} 个`
+          return `${item.marker}${item.seriesName}　<b>${value}</b>`
+        })
+        return [head, ...rows].join('<br/>')
+      }
+    },
+    legend: {
+      top: 0,
+      right: 0,
+      itemWidth: 10,
+      itemHeight: 10,
+      itemGap: 14,
+      textStyle: { fontSize: 11, color: '#5b6479' }
+    },
+    xAxis: {
+      type: 'category',
+      data: items.map((point) => String(point.date || '').slice(5)),
+      axisTick: { show: false },
+      axisLine: { lineStyle: { color: '#e3e9f4' } },
+      axisLabel: axisText
+    },
+    yAxis: [
+      {
+        // 轴名会与右上角图例重叠，单位已由 tooltip 与图例表达，这里不再重复
+        type: 'value',
+        max: 100,
+        splitNumber: 2,
+        axisLabel: { ...axisText, formatter: '{value}%' },
+        splitLine: { lineStyle: { color: '#eef2f8' } }
+      },
+      {
+        type: 'value',
+        minInterval: 1,
+        axisLabel: axisText,
+        splitLine: { show: false }
+      }
+    ],
+    series: [
+      {
+        name: '平均进度',
+        type: 'line',
+        smooth: true,
+        symbol: 'circle',
+        symbolSize: 4,
+        showSymbol: false,
+        data: items.map((point) => Number(point.avgProgress || 0)),
+        lineStyle: { width: 2, color: '#3370ff' },
+        itemStyle: { color: '#3370ff', borderColor: '#fff', borderWidth: 1.5 },
+        areaStyle: {
+          color: {
+            type: 'linear',
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 1,
+            colorStops: [
+              { offset: 0, color: 'rgba(51,112,255,0.16)' },
+              { offset: 1, color: 'rgba(51,112,255,0)' }
+            ]
+          }
+        }
+      },
+      {
+        name: '风险项目',
+        type: 'bar',
+        yAxisIndex: 1,
+        barWidth: '34%',
+        data: items.map((point) => Number(point.redCount || 0)),
+        itemStyle: { color: '#cfe0ff', borderRadius: [4, 4, 0, 0] },
+        emphasis: { itemStyle: { color: '#b9d2ff' } }
+      }
+    ]
+  }
+})
+
+const trendLatest = computed(() => trend.value[trend.value.length - 1] || null)
+const trendRange = computed(() => {
+  if (!trend.value.length) return ''
+  const first = String(trend.value[0].date || '').slice(5)
+  const last = String(trend.value[trend.value.length - 1].date || '').slice(5)
+  return `${first} → ${last}`
+})
+
+const loadInsights = async () => {
+  const ids = selectedDeptIds()
+  if (!ids.length) return
+  const [trendData, memberData] = await Promise.all([
+    deptTrend(ids, includeSub.value, trendDays.value).catch(() => null),
+    deptMembers(ids, includeSub.value, trendDays.value).catch(() => null)
+  ])
+  trend.value = ((trendData?.points as unknown as TrendPoint[]) || []).slice()
+  memberLoad.value = ((memberData?.members as unknown as MemberLoad[]) || []).slice()
+}
 
 const STATUS_META: Record<string, { label: string; tone: TagType }> = {
   DRAFT: { label: '草稿', tone: 'info' },
@@ -209,6 +374,8 @@ interface KpiItem {
   icon: Component
   tone?: string
   value: string
+  /** 可点击的 KPI 会带上对应筛选键，点击联动下方项目明细。 */
+  filter?: string
 }
 
 const kpis = computed<KpiItem[]>(() => [
@@ -223,14 +390,16 @@ const kpis = computed<KpiItem[]>(() => [
     label: '进行中',
     icon: CirclePlay,
     tone: 'primary',
-    value: num(summary.value.inProgressCount)
+    value: num(summary.value.inProgressCount),
+    filter: 'RUNNING'
   },
   {
     key: 'delayedCount',
     label: '延期项目',
     icon: TriangleAlert,
     tone: 'warning',
-    value: num(summary.value.delayedCount)
+    value: num(summary.value.delayedCount),
+    filter: 'DELAYED'
   },
   {
     key: 'avgProgress',
@@ -255,7 +424,8 @@ const kpis = computed<KpiItem[]>(() => [
     label: '开放风险',
     icon: ShieldAlert,
     tone: 'danger',
-    value: num(summary.value.riskOpen)
+    value: num(summary.value.riskOpen),
+    filter: 'RISK'
   },
   {
     key: 'avgLogFillRate',
@@ -284,7 +454,7 @@ const loadBoard = async () => {
   if (!deptId.value) return
   loading.value = true
   try {
-    const data = await deptBoard(selectedDeptIds())
+    const data = await deptBoard(selectedDeptIds(), includeSub.value)
     summary.value = (data.summary as unknown as BoardSummary) || summary.value
     const rows = ((data.projects as unknown as ProjectMetric[]) || []).slice()
     const healthOrder: Record<string, number> = { RED: 0, YELLOW: 1, GREEN: 2 }
@@ -294,6 +464,7 @@ const loadBoard = async () => {
         Number(b.delayDays || 0) - Number(a.delayDays || 0)
     )
     projects.value = rows
+    await loadInsights()
   } catch {
     projects.value = []
   } finally {
@@ -354,6 +525,7 @@ onMounted(async () => {
           placeholder="选择部门"
           @change="loadBoard"
         />
+        <el-checkbox v-model="includeSub" size="small" @change="loadBoard">含下级部门</el-checkbox>
         <el-button :loading="loading" @click="loadBoard">刷新</el-button>
       </div>
     </div>
@@ -363,7 +535,11 @@ onMounted(async () => {
         v-for="item in kpis"
         :key="item.key"
         class="kpi"
-        :class="`tone-${item.tone || 'default'}`"
+        :class="[
+          `tone-${item.tone || 'default'}`,
+          { 'is-clickable': Boolean(item.filter), 'is-active': item.filter && filterKey === item.filter }
+        ]"
+        @click="toggleFilter(item.filter)"
       >
         <span class="kpi-icon">
           <component :is="item.icon" :size="16" :stroke-width="1.75" />
@@ -431,12 +607,112 @@ onMounted(async () => {
       </div>
     </div>
 
+    <div class="insight-grid">
+    <div class="pms-card">
+      <div class="card-head">
+        <h3>
+          近 {{ trendDays }} 天趋势
+          <span class="card-note">折线＝平均进度，柱＝当天健康度为「风险」的项目数</span>
+        </h3>
+        <el-select v-model="trendDays" size="small" class="days-select" @change="loadInsights">
+          <el-option :value="7" label="近 7 天" />
+          <el-option :value="30" label="近 30 天" />
+          <el-option :value="90" label="近 90 天" />
+        </el-select>
+      </div>
+      <template v-if="trend.length >= 2">
+        <ChartBox :option="trendOption" height="176px" />
+        <div class="trend-meta">
+          <span class="card-note">{{ trendRange }}</span>
+          <span v-if="trendLatest">
+            最新：平均进度 <b>{{ num(trendLatest.avgProgress, 1) }}%</b>
+            · 风险项目 <b>{{ trendLatest.redCount }}</b>
+            · 预警项目 <b>{{ trendLatest.yellowCount }}</b>
+            · 实际工时 <b>{{ num(trendLatest.actualHours, 1) }}h</b>
+          </span>
+        </div>
+      </template>
+      <el-empty
+        v-else
+        description="暂无日聚合快照：执行一次「日预聚合」后即可看到趋势"
+        :image-size="60"
+      />
+    </div>
+
+    <div class="pms-card">
+      <h3>
+        成员负载
+        <span class="card-note">近 {{ trendDays }} 天 · {{ memberLoad.length }} 人</span>
+      </h3>
+      <el-table :data="memberLoad" size="small" max-height="264">
+        <template #empty>
+          <el-empty description="该范围内暂无在职成员，或还没有已确认的工时" :image-size="60" />
+        </template>
+        <el-table-column label="成员" min-width="120">
+          <template #default="{ row }">{{ row.realName || row.userId }}</template>
+        </el-table-column>
+        <el-table-column label="工时" width="88" align="right">
+          <template #default="{ row }">
+            <b class="num-cell">{{ num(row.hours, 1) }}h</b>
+          </template>
+        </el-table-column>
+        <el-table-column label="项目" width="80" align="right">
+          <template #default="{ row }">{{ row.projects }}</template>
+        </el-table-column>
+        <el-table-column label="日志" width="80" align="right" class-name="pms-mobile-hide">
+          <template #default="{ row }">{{ row.logDays }}</template>
+        </el-table-column>
+        <el-table-column label="填写率" min-width="140">
+          <template #default="{ row }">
+            <div class="progress-cell">
+              <el-progress
+                :percentage="Math.min(Math.max(Number(row.fillRate) || 0, 0), 100)"
+                :stroke-width="6"
+                :show-text="false"
+              />
+              <span class="progress-text" :class="{ 'danger-text': Number(row.fillRate) < 60 }">
+                {{ num(row.fillRate, 0) }}%
+              </span>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+    </div>
+
     <div class="pms-card">
       <h3>
         项目明细
         <span class="card-note">风险优先排序，点击查看项目看板</span>
       </h3>
-      <el-table :data="projects" size="small" empty-text="当前部门暂无可查看项目">
+      <div class="table-toolbar">
+        <div class="filter-tabs">
+          <button
+            v-for="item in FILTER_TABS"
+            :key="item.key"
+            type="button"
+            :class="{ 'is-active': filterKey === item.key }"
+            @click="filterKey = item.key"
+          >
+            {{ item.label }}
+          </button>
+        </div>
+        <span class="card-note">{{ filteredProjects.length }} / {{ projects.length }} 个项目</span>
+        <el-input
+          v-model="keyword"
+          class="table-search"
+          size="small"
+          placeholder="搜索项目名称"
+          clearable
+        />
+      </div>
+      <el-table :data="filteredProjects" size="small">
+        <template #empty>
+          <el-empty
+            :description="filterKey || keyword ? '没有匹配的项目' : '当前部门暂无可查看项目'"
+            :image-size="64"
+          />
+        </template>
         <el-table-column prop="projectName" label="项目" min-width="170" show-overflow-tooltip />
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
@@ -482,6 +758,13 @@ onMounted(async () => {
         <el-table-column label="风险" width="72">
           <template #default="{ row }">
             <span :class="{ 'danger-text': Number(row.riskOpen) > 0 }">{{ row.riskOpen }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="日志填写率" width="110" class-name="pms-mobile-hide">
+          <template #default="{ row }">
+            <span :class="{ 'danger-text': Number(row.logFillRate) < 60 }">
+              {{ num(row.logFillRate, 0) }}%
+            </span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="72">
@@ -670,6 +953,64 @@ onMounted(async () => {
   background: #fbfcff;
 }
 
+/* 可点击的 KPI（进行中 / 延期 / 开放风险）→ 联动下方项目明细 */
+.kpi.is-clickable {
+  cursor: pointer;
+}
+
+.kpi.is-active {
+  background: #f2f7ff;
+  box-shadow: inset 0 0 0 1.5px var(--pms-primary);
+}
+
+/* ---------------- 项目明细工具栏 ---------------- */
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.filter-tabs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid #e3e9f4;
+  border-radius: 9px;
+  background: #eef2f8;
+}
+
+.filter-tabs button {
+  height: 26px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--pms-text-2);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    color 0.16s ease;
+}
+
+.filter-tabs button:hover {
+  color: var(--pms-text);
+}
+
+.filter-tabs button.is-active {
+  background: var(--pms-surface);
+  color: var(--pms-primary-deep);
+  box-shadow: 0 1px 2px rgba(16, 35, 70, 0.08);
+}
+
+.table-search {
+  width: 200px;
+  margin-left: auto;
+}
+
 .kpi-icon {
   width: 28px;
   height: 28px;
@@ -731,6 +1072,48 @@ onMounted(async () => {
   font-size: 12px;
   font-weight: 400;
   color: var(--pms-text-3);
+}
+
+/* ---------------- 趋势卡片 ---------------- */
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+/* 卡片头里的 h3 不是 .pms-card 的直接子元素，需补回与其它卡片一致的标题字号 */
+.card-head h3 {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--pms-text);
+}
+
+.days-select {
+  width: 112px;
+}
+
+.trend-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--pms-text-2);
+}
+
+.num-cell {
+  font-variant-numeric: tabular-nums;
 }
 
 .health-bar {
@@ -1067,6 +1450,23 @@ onMounted(async () => {
 
   .pd-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .table-search {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .days-select {
+    width: 100%;
+  }
+
+  .card-head {
+    align-items: flex-start;
+  }
+
+  .card-head h3 {
+    font-size: 14px;
   }
 }
 </style>

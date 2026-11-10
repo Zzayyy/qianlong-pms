@@ -320,8 +320,28 @@ export const companyBoard = () => get<Record<string, unknown>>('/reports/company
 export const reportDepts = () =>
   get<{ id: string; parentId: string; deptName: string }[]>('/reports/depts')
 
-export const deptBoard = (deptIds: string[]) =>
-  get<Record<string, unknown>>('/reports/dept', { deptIds: deptIds.join(',') })
+/** 部门看板；`includeSub` 为 true 时连同下级部门一起统计。 */
+export const deptBoard = (deptIds: string[], includeSub = false) =>
+  get<Record<string, unknown>>('/reports/dept', {
+    deptIds: deptIds.join(','),
+    ...(includeSub ? { includeSub: true } : {})
+  })
+
+/** 部门近 N 天趋势（读日聚合快照）。 */
+export const deptTrend = (deptIds: string[], includeSub = false, days = 30) =>
+  get<Record<string, unknown>>('/reports/dept/trend', {
+    deptIds: deptIds.join(','),
+    days,
+    ...(includeSub ? { includeSub: true } : {})
+  })
+
+/** 部门成员近 N 天负载（已确认工时 / 项目数 / 日志填写率）。 */
+export const deptMembers = (deptIds: string[], includeSub = false, days = 30) =>
+  get<Record<string, unknown>>('/reports/dept/members', {
+    deptIds: deptIds.join(','),
+    days,
+    ...(includeSub ? { includeSub: true } : {})
+  })
 
 export const projectBoard = (id: string) => get<Record<string, unknown>>(`/reports/project/${id}`)
 

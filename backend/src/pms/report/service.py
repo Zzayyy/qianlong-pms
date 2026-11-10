@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Final
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pms.org.models import SysUser
 from pms.project import service as project_service
 from pms.project.models import PrjProject, PrjRisk
 from pms.project.progress import HealthThresholds, evaluate_health
@@ -229,6 +230,118 @@ async def dept_dashboard(session: AsyncSession, dept_ids: list[int]) -> dict[str
         "summary": summarize(metrics),
         "topDelayed": [_metric_out(item) for item in top_delayed(metrics, 5)],
         "projects": [_metric_out(item) for item in metrics],
+    }
+
+
+async def dept_trend(
+    session: AsyncSession, dept_ids: list[int], days: int = 30
+) -> dict[str, object]:
+    """部门近 N 天趋势：读日聚合快照（平均进度 / SPI / 红黄数量 / 实际工时）。
+
+    依赖 `t_st_project_daily`，若定时任务未执行会返回空列表，由前端提示先跑日聚合。
+    """
+    span = max(int(days), 1)
+    date_from = (date.today() - timedelta(days=span - 1)).isoformat()
+    stmt = (
+        select(
+            StProjectDaily.stat_date,
+            func.count(StProjectDaily.id),
+            func.avg(StProjectDaily.progress),
+            func.avg(StProjectDaily.spi),
+            func.sum(case((StProjectDaily.health == "RED", 1), else_=0)),
+            func.sum(case((StProjectDaily.health == "YELLOW", 1), else_=0)),
+            func.avg(StProjectDaily.delay_days),
+            func.sum(StProjectDaily.actual_hours),
+        )
+        .where(
+            StProjectDaily.deleted == 0,
+            StProjectDaily.stat_date >= date_from,
+            StProjectDaily.dept_id.in_(dept_ids or [0]),
+        )
+        .group_by(StProjectDaily.stat_date)
+        .order_by(StProjectDaily.stat_date)
+    )
+    rows = (await session.execute(stmt)).all()
+    return {
+        "days": span,
+        "points": [
+            {
+                "date": stat_date,
+                "projectCount": int(count or 0),
+                "avgProgress": round(float(progress or 0), 2),
+                "avgSpi": round(float(spi_value or 0), 4),
+                "redCount": int(red or 0),
+                "yellowCount": int(yellow or 0),
+                "avgDelayDays": round(float(delay or 0), 2),
+                "actualHours": round(float(hours or 0), 2),
+            }
+            for stat_date, count, progress, spi_value, red, yellow, delay, hours in rows
+        ],
+    }
+
+
+async def dept_member_load(
+    session: AsyncSession, dept_ids: list[int], days: int = 30
+) -> dict[str, object]:
+    """部门成员负载：近 N 天已确认工时、参与项目数、日志天数与填写率。
+
+    以「部门在职人员」为主表左连工时汇总，没填日志的人也会出现在列表里（工时为 0）。
+    """
+    span = max(int(days), 1)
+    date_to = date.today()
+    date_from = date_to - timedelta(days=span - 1)
+    workdays = max(workdays_between(date_from, date_to), 1)
+    sub = (
+        select(
+            WlWorklog.user_id.label("uid"),
+            func.sum(WlItem.hours).label("hours"),
+            func.count(func.distinct(WlItem.project_id)).label("projects"),
+            func.count(func.distinct(WlWorklog.log_date)).label("log_days"),
+        )
+        .join(WlItem, WlItem.worklog_id == WlWorklog.id)
+        .where(
+            WlWorklog.deleted == 0,
+            WlItem.deleted == 0,
+            WlWorklog.status == _CONFIRMED,
+            WlWorklog.log_date >= date_from.isoformat(),
+            WlWorklog.log_date <= date_to.isoformat(),
+        )
+        .group_by(WlWorklog.user_id)
+        .subquery()
+    )
+    stmt = (
+        select(
+            SysUser.id,
+            SysUser.real_name,
+            SysUser.dept_id,
+            func.coalesce(sub.c.hours, 0),
+            func.coalesce(sub.c.projects, 0),
+            func.coalesce(sub.c.log_days, 0),
+        )
+        .outerjoin(sub, sub.c.uid == SysUser.id)
+        .where(
+            SysUser.deleted == 0,
+            SysUser.status == "ENABLED",
+            SysUser.dept_id.in_(dept_ids or [0]),
+        )
+        .order_by(func.coalesce(sub.c.hours, 0).desc(), SysUser.id)
+    )
+    rows = (await session.execute(stmt)).all()
+    return {
+        "days": span,
+        "workdays": workdays,
+        "members": [
+            {
+                "userId": int(user_id),
+                "realName": real_name,
+                "deptId": int(dept_id or 0),
+                "hours": round(float(hours or 0), 2),
+                "projects": int(projects or 0),
+                "logDays": int(log_days or 0),
+                "fillRate": round(min(int(log_days or 0) / workdays * 100, 100), 1),
+            }
+            for user_id, real_name, dept_id, hours, projects, log_days in rows
+        ],
     }
 
 
