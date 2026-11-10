@@ -28,6 +28,14 @@ from pms.worklog.rules import workdays_between
 
 _CONFIRMED: Final[str] = "CONFIRMED"
 
+#: 只有进行中的项目才判定健康度；已交付/关闭的项目不再因为延期与日志率被标红
+_HEALTH_ACTIVE: Final[frozenset[str]] = frozenset(
+    {"APPROVING", "APPROVED", "IN_PROGRESS", "SUSPENDED"}
+)
+_HEALTH_TERMINAL: Final[frozenset[str]] = frozenset(
+    {"COMPLETED", "ACCEPTED", "CLOSED", "TERMINATED"}
+)
+
 
 async def _health_thresholds(config: ConfigService) -> HealthThresholds:
     """读取健康度阈值参数（08 §2.4，全部后台可调）。"""
@@ -50,7 +58,10 @@ async def project_metric(session: AsyncSession, project: PrjProject) -> ProjectM
     planned = float(sum(float(task.plan_hours) for task in tasks))
     actual = float(sum(float(task.actual_hours) for task in tasks))
     progress = float(project.progress)
-    spi = schedule_index(planned, progress)
+    start_date = project.plan_start
+    if start_date is not None and not isinstance(start_date, date):
+        start_date = date.fromisoformat(str(start_date))
+    spi = schedule_index(planned, progress, project.plan_start, project.plan_end)
     cpi = cost_index(planned, actual, progress)
     delayed = delay_days(project.plan_end)
 
@@ -90,18 +101,22 @@ async def project_metric(session: AsyncSession, project: PrjProject) -> ProjectM
             )
         ).scalar_one()
     )
-    fill_rate = await _project_fill_rate(session, project.id)
+    fill_rate = await _project_fill_rate(session, project.id, start_date)
 
     config = ConfigService(session)
-    health = evaluate_health(
-        spi_value=spi,
-        cpi_value=cpi,
-        delay_days=delayed,
-        high_risk_open=risk_open > 0,
-        log_fill_rate=fill_rate,
-        open_issue_count=issue_open,
-        thresholds=await _health_thresholds(config),
-    )
+    # 未到计划开始日：还没有考核基准，暂按健康处理（否则新立项项目因无日志直接被判红）
+    if start_date is not None and date.today() < start_date:
+        health = "GREEN"
+    else:
+        health = evaluate_health(
+            spi_value=spi,
+            cpi_value=cpi,
+            delay_days=delayed,
+            high_risk_open=risk_open > 0,
+            log_fill_rate=fill_rate,
+            open_issue_count=issue_open,
+            thresholds=await _health_thresholds(config),
+        )
     return ProjectMetric(
         project_id=project.id,
         project_name=project.project_name,
@@ -121,23 +136,57 @@ async def project_metric(session: AsyncSession, project: PrjProject) -> ProjectM
     )
 
 
-async def _project_fill_rate(session: AsyncSession, project_id: int) -> float:
-    """项目日志填写率（近 30 天，成员 × 工作日）。"""
+async def _project_fill_rate(
+    session: AsyncSession, project_id: int, started_on: date | None = None
+) -> float:
+    """项目日志填写率（成员 × 工作日）。
+
+    观测窗口取「近 30 天」与「项目计划开始日」的较晚者：
+    否则新立项的项目会因为立项前的空档被算成低填写率而直接判红。
+    """
     members = await project_service.list_members(session, project_id)
     if not members:
         return 100.0
-    date_to = date.today().isoformat()
-    date_from = (date.today() - timedelta(days=30)).isoformat()
+    date_to = date.today()
+    date_from = date_to - timedelta(days=30)
+    if started_on is not None and started_on > date_from:
+        date_from = started_on
+    if date_from > date_to:
+        return 100.0
+    date_to_text = date_to.isoformat()
+    date_from_text = date_from.isoformat()
     submitted = 0
     for member in members:
         stats = await worklog_service.stats(
-            session, user_id=member.user_id, date_from=date_from, date_to=date_to
+            session,
+            user_id=member.user_id,
+            date_from=date_from_text,
+            date_to=date_to_text,
         )
         submitted += int(stats["submittedDays"])
-    required = workdays_between(date.fromisoformat(date_from), date.today()) * len(members)
+    required = workdays_between(date_from, date_to) * len(members)
     if required <= 0:
         return 100.0
     return round(submitted / required * 100, 2)
+
+
+async def refresh_project_health(session: AsyncSession, project_id: int) -> str:
+    """重算并回写项目健康度（详情打开、日聚合共用）。
+
+    说明：健康度原先只在看板里实时计算，`t_prj_project.health` 一直是默认 GREEN，
+    项目列表因此永远显示「健康」。这里显式回写，让列表与看板口径一致。
+    """
+    project = await project_service.get_project(session, project_id)
+    if str(project.status) in _HEALTH_TERMINAL:
+        if str(project.health) != "GREEN":
+            project.health = "GREEN"
+            await session.flush()
+        return "GREEN"
+    metric = await project_metric(session, project)
+    if str(project.health) != metric.health:
+        project.health = metric.health
+        await session.flush()
+    return metric.health
 
 
 async def project_dashboard(session: AsyncSession, project_id: int) -> dict[str, object]:
@@ -240,6 +289,9 @@ async def aggregate_daily(session: AsyncSession, stat_date: str | None = None) -
     count_projects = 0
     for project in projects:
         metric = await project_metric(session, project)
+        # 顺带回写项目健康度，列表页才有非默认值（终态项目保持健康）
+        if str(project.status) in _HEALTH_ACTIVE and str(project.health) != metric.health:
+            project.health = metric.health
         session.add(
             StProjectDaily(
                 project_id=metric.project_id,

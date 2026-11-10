@@ -814,11 +814,24 @@ async def _get_milestone(
     return milestone
 
 
-def _project_filters(keyword: str = "", status: str = "") -> list[object]:
+def _project_filters(
+    keyword: str = "",
+    status: str = "",
+    dept_id: int = 0,
+    pm_id: int = 0,
+    health: str = "",
+) -> list[object]:
     """项目列表查询条件（列表与计数共用）。"""
     clauses: list[object] = []
     if keyword:
-        clauses.append(PrjProject.project_name.like(f"%{keyword}%"))
+        like = f"%{keyword}%"
+        clauses.append(PrjProject.project_name.like(like) | PrjProject.project_code.like(like))
+    if dept_id:
+        clauses.append(PrjProject.dept_id == dept_id)
+    if pm_id:
+        clauses.append(PrjProject.pm_id == pm_id)
+    if health:
+        clauses.append(PrjProject.health == health)
     if status:
         # 支持逗号分组，便于前端用一段式页签表达「进行中 = IN_PROGRESS+SUSPENDED」
         values = [item.strip() for item in status.split(",") if item.strip()]
@@ -829,21 +842,39 @@ def _project_filters(keyword: str = "", status: str = "") -> list[object]:
     return clauses
 
 
-async def count_projects(session: AsyncSession, keyword: str = "", status: str = "") -> int:
+async def count_projects(
+    session: AsyncSession,
+    keyword: str = "",
+    status: str = "",
+    *,
+    dept_id: int = 0,
+    pm_id: int = 0,
+    health: str = "",
+) -> int:
     """项目总数。"""
     stmt = select(func.count(PrjProject.id)).where(
-        PrjProject.deleted == 0, *_project_filters(keyword, status)
+        PrjProject.deleted == 0,
+        *_project_filters(keyword, status, dept_id, pm_id, health),
     )
     result = await session.execute(stmt)
     return int(result.scalar_one())
 
 
 async def list_projects(
-    session: AsyncSession, offset: int, limit: int, keyword: str = "", status: str = ""
+    session: AsyncSession,
+    offset: int,
+    limit: int,
+    keyword: str = "",
+    status: str = "",
+    *,
+    dept_id: int = 0,
+    pm_id: int = 0,
+    health: str = "",
 ) -> list[PrjProject]:
     """项目分页列表（可见性过滤在 API 层用 `project_visible` 完成）。"""
     stmt = select(PrjProject).where(
-        PrjProject.deleted == 0, *_project_filters(keyword, status)
+        PrjProject.deleted == 0,
+        *_project_filters(keyword, status, dept_id, pm_id, health),
     )
     stmt = stmt.order_by(PrjProject.id.desc()).offset(offset).limit(limit)
     result = await session.execute(stmt)

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import date
+import re
+from datetime import date, datetime
 from pathlib import Path
 from typing import Final
 from uuid import uuid4
@@ -63,9 +64,23 @@ def upload_root() -> Path:
     return configured if configured.is_absolute() else _PROJECT_ROOT / configured
 
 
-def project_dir(project_id: int) -> Path:
-    """项目文档目录：`<upload_dir>/project_<id>/`。"""
-    return upload_root() / f"project_{project_id}"
+_ILLEGAL_SEGMENT = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def _safe_segment(value: str, fallback: str = "") -> str:
+    """目录名安全化：去掉路径分隔符与 Windows 非法字符，超长截断。"""
+    text = _ILLEGAL_SEGMENT.sub("_", (value or "").strip()).strip(" .")
+    return text[:48] or fallback
+
+
+def project_folder(project_code: str, project_id: int) -> str:
+    """项目文件夹名：优先用可读的项目编号，缺失时回落到 `project_<id>`。"""
+    return _safe_segment(project_code, f"project_{project_id}")
+
+
+def project_dir(project_code: str, project_id: int) -> Path:
+    """项目文档目录：`<upload_dir>/<项目编号>/`。"""
+    return upload_root() / project_folder(project_code, project_id)
 
 
 def resolve_storage_path(storage_path: str) -> Path:
@@ -85,8 +100,20 @@ def _ext_of(name: str) -> str:
     return Path(name).suffix.lower()
 
 
-async def save_upload(upload: UploadFile, project_id: int) -> StoredFile:
-    """保存上传文件：校验扩展名与大小后写入项目目录。"""
+async def save_upload(
+    upload: UploadFile,
+    project_id: int,
+    *,
+    project_code: str = "",
+    biz_type: str = "PROJECT",
+    biz_label: str = "",
+) -> StoredFile:
+    """保存上传文件：校验扩展名与大小后写入项目目录。
+
+    目录结构（便于管理员直接在磁盘上按项目、按归属翻阅）：:
+
+        <upload_dir>/<项目编号>/<归属类型>/[<阶段或里程碑名>/]<年>/<月>/<时间戳_随机串>.<ext>
+    """
     settings = get_settings()
     origin_name = (upload.filename or "unnamed").strip()
     ext = _ext_of(origin_name)
@@ -108,9 +135,16 @@ async def save_upload(upload: UploadFile, project_id: int) -> StoredFile:
         raise BizRuleError("空文件不允许上传")
 
     today = date.today()
-    relative_dir = Path(f"project_{project_id}") / f"{today.year}" / f"{today.month:02d}"
+    kind = _safe_segment((biz_type or "OTHER").lower(), "other")
+    label = _safe_segment(biz_label, "")
+    segments = [project_folder(project_code, project_id), kind]
+    if label:
+        segments.append(label)
+    segments += [str(today.year), f"{today.month:02d}"]
+    relative_dir = Path(*segments)
     target_dir = upload_root() / relative_dir
-    file_key = f"{uuid4().hex}{ext}"
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_key = f"{stamp}_{uuid4().hex[:8]}{ext}"
     target = target_dir / file_key
     await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
     await asyncio.to_thread(target.write_bytes, b"".join(chunks))

@@ -57,6 +57,9 @@ const rows = ref<any[]>([])
 const total = ref(0)
 const page = ref({ pageNum: 1, pageSize: 10 })
 const keyword = ref('')
+const deptFilter = ref('')
+const pmFilter = ref('')
+const healthFilter = ref('')
 const loading = ref(false)
 
 /* 组织基础数据：部门与人员（用于下拉选择） */
@@ -141,7 +144,7 @@ const directorIds = ref<string[]>([])
 const docs = ref<any[]>([])
 const docFilter = ref('')
 const docKeyword = ref('')
-const docUploadTarget = ref<'PROJECT' | 'STAGE' | 'MILESTONE'>('PROJECT')
+const docUploadTarget = ref<'PROJECT' | 'STAGE' | 'MILESTONE' | 'OTHER'>('PROJECT')
 const docUploadBizId = ref('')
 const uploading = ref(false)
 const stageVisible = ref(false)
@@ -151,6 +154,21 @@ const loadNodeData = async () => {
   directors.value = await projectDirectors(detail.value.id)
   directorIds.value = directors.value.map((item: any) => String(item.userId))
   docs.value = await projectAttachments(detail.value.id)
+}
+
+/* 项目总监：多选只做「待添加」，已保存的以标签列在下方，保存后清空选择框 */
+const directorDraft = ref<string[]>([])
+const directorOptions = computed(() =>
+  users.value.filter((item) => !directorIds.value.includes(String(item.id)))
+)
+const directorsDirty = computed(
+  () =>
+    directorDraft.value.length > 0 ||
+    [...directorIds.value].sort().join(',') !==
+      directors.value.map((item: any) => String(item.userId)).sort().join(',')
+)
+const removeDirector = (userId: string) => {
+  directorIds.value = directorIds.value.filter((item) => item !== userId)
 }
 
 const docCount = (stageId: string | number) =>
@@ -163,14 +181,22 @@ const DOC_TYPE_LABEL: Record<string, string> = {
   PROJECT: '项目文档',
   STAGE: '阶段文档',
   MILESTONE: '里程碑文档',
-  TASK: '任务文档'
+  TASK: '任务文档',
+  OTHER: '其他'
 }
 const DOC_TABS = [
   { key: '', label: '全部' },
   { key: 'PROJECT', label: '项目文档' },
   { key: 'STAGE', label: '阶段文档' },
-  { key: 'MILESTONE', label: '里程碑文档' }
+  { key: 'MILESTONE', label: '里程碑文档' },
+  { key: 'OTHER', label: '其他' }
 ]
+const docTagType = (bizType: string): 'info' | 'success' | 'warning' | 'primary' => {
+  if (bizType === 'PROJECT') return 'info'
+  if (bizType === 'STAGE') return 'success'
+  if (bizType === 'MILESTONE') return 'warning'
+  return 'primary'
+}
 const docCountOf = (type: string) =>
   type ? docs.value.filter((item) => item.bizType === type).length : docs.value.length
 
@@ -214,30 +240,95 @@ const docExt = (fileName: string) => {
   return parts.length > 1 ? parts[parts.length - 1].toUpperCase().slice(0, 4) : 'FILE'
 }
 
+/** `YYYY-MM-DD` → Date，供日期选择器的 default-value 定位到对应月份。 */
+const toDate = (iso?: string): Date | undefined => {
+  if (!iso) return undefined
+  const date = new Date(`${iso}T00:00:00`)
+  return Number.isNaN(date.getTime()) ? undefined : date
+}
+
+/** 日期 +1 天（用于「接着上一阶段排期」的建议值）。 */
+const nextDayText = (iso: string) => {
+  if (!iso) return ''
+  const date = new Date(`${iso}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return ''
+  date.setDate(date.getDate() + 1)
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${date.getFullYear()}-${month}-${day}`
+}
+
+/** 新增阶段时参考上一个阶段：默认从上一阶段结束的次日开始。 */
+const lastStage = computed(() =>
+  [...stages.value].sort((a, b) => Number(a.seq || 0) - Number(b.seq || 0)).at(-1)
+)
+
+const stageReference = computed(() => {
+  if (stageForm.value.id) return ''
+  const prev = lastStage.value
+  if (!prev) {
+    return detail.value.planStart
+      ? `项目计划开始于 ${detail.value.planStart}，可直接沿用`
+      : '尚未有阶段，可先按项目计划起点排期'
+  }
+  if (!prev.planStart && !prev.planEnd) {
+    return `上一阶段「${prev.stageName}」尚未排期，建议先补上它的计划起止`
+  }
+  const range = `${prev.planStart || '—'} ~ ${prev.planEnd || '—'}`
+  const suggest = nextDayText(prev.planEnd || '')
+  return `上一阶段「${prev.stageName}」${range}${suggest ? `，建议本阶段从 ${suggest} 开始` : ''}`
+})
+
 const openStage = (row?: any) => {
-  stageForm.value = row
-    ? {
-        id: row.id,
-        stageName: row.stageName,
-        weight: Number(row.weight || 1),
-        seq: Number(row.seq || 1),
-        planStart: row.planStart || '',
-        planEnd: row.planEnd || ''
-      }
-    : {
-        id: '',
-        stageName: '',
-        weight: 1,
-        seq: stages.value.length + 1,
-        planStart: detail.value.planStart || '',
-        planEnd: detail.value.planEnd || ''
-      }
+  if (row) {
+    stageForm.value = {
+      id: row.id,
+      stageName: row.stageName,
+      weight: Number(row.weight || 1),
+      seq: Number(row.seq || 1),
+      planStart: row.planStart || '',
+      planEnd: row.planEnd || ''
+    }
+  } else {
+    // 新建：默认接在上一阶段结束的次日，避免不知道从哪天开始
+    const prev = lastStage.value
+    stageForm.value = {
+      id: '',
+      stageName: '',
+      weight: 1,
+      seq: stages.value.length + 1,
+      planStart: prev?.planEnd ? nextDayText(prev.planEnd) : detail.value.planStart || '',
+      planEnd: ''
+    }
+  }
   stageVisible.value = true
+}
+
+/** 起止跨度（含头含尾）。 */
+const daySpan = (start?: string, end?: string) => {
+  if (!start || !end) return ''
+  const days = (new Date(end).getTime() - new Date(start).getTime()) / 86400000
+  return `${Math.round(days) + 1} 天`
+}
+
+/** 把上一阶段结束的次日填入计划开始，并给出明确反馈。 */
+const applySuggestedStart = () => {
+  const suggest = nextDayText(lastStage.value?.planEnd || '')
+  if (!suggest) {
+    ElMessage.info('上一阶段还没有计划结束日期，请先补全或手动选择')
+    return
+  }
+  stageForm.value.planStart = suggest
+  ElMessage.success(`已填入建议开始日 ${suggest}`)
 }
 
 const saveStage = async () => {
   if (!stageForm.value.stageName.trim()) {
     ElMessage.warning('请填写阶段名称')
+    return
+  }
+  if (stageForm.value.planStart && stageForm.value.planEnd && stageForm.value.planEnd < stageForm.value.planStart) {
+    ElMessage.warning('计划结束不能早于计划开始')
     return
   }
   const payload = {
@@ -288,8 +379,10 @@ const removeMilestone = async (row: any) => {
 }
 
 const saveDirectors = async () => {
-  await setProjectDirectors(detail.value.id, directorIds.value)
-  ElMessage.success('项目总监已更新（变更审批将由其会签）')
+  const next = Array.from(new Set([...directorIds.value, ...directorDraft.value]))
+  await setProjectDirectors(detail.value.id, next)
+  ElMessage.success('项目总监已保存，本项目变更将由其会签')
+  directorDraft.value = []
   await loadNodeData()
 }
 
@@ -299,7 +392,7 @@ const doUpload = async (options: any) => {
     ElMessage.warning('当前账号无文档上传权限')
     return
   }
-  if (docUploadTarget.value !== 'PROJECT' && !docUploadBizId.value) {
+  if (!['PROJECT', 'OTHER'].includes(docUploadTarget.value) && !docUploadBizId.value) {
     ElMessage.warning(`请先选择${docUploadTarget.value === 'STAGE' ? '所属阶段' : '所属里程碑'}`)
     return
   }
@@ -339,7 +432,10 @@ const load = async () => {
       pageNum: page.value.pageNum,
       pageSize: page.value.pageSize,
       keyword: keyword.value.trim() || undefined,
-      status: activeStatus.value || undefined
+      status: activeStatus.value || undefined,
+      deptId: deptFilter.value || undefined,
+      pmId: pmFilter.value || undefined,
+      health: healthFilter.value || undefined
     })
     rows.value = data.list || []
     total.value = data.total || 0
@@ -361,6 +457,9 @@ const switchTab = (key: string) => {
 
 const resetFilters = () => {
   keyword.value = ''
+  deptFilter.value = ''
+  pmFilter.value = ''
+  healthFilter.value = ''
   tab.value = 'ALL'
   search()
 }
@@ -475,12 +574,36 @@ const doAddMember = async () => {
 }
 
 const doRemoveMember = async (row: any) => {
+  const name = row.realName || row.username || '该成员'
+  const stillDirector = directors.value.some(
+    (item: any) => String(item.userId) === String(row.userId)
+  )
+  try {
+    await ElMessageBox.confirm(
+      stillDirector
+        ? `「${name}」同时是本项目总监，移出成员后仍保留变更会签权；如需取消请到「项目总监」页签移除。确认移出？`
+        : `移出后该成员将无法查看本项目，也不能再填报本项目日志。确认移出「${name}」？`,
+      '移出成员',
+      { type: 'warning', confirmButtonText: '移出', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
   await removeMember(detail.value.id, row.id)
   ElMessage.success('成员已移出')
   await refreshDetail()
 }
 
 const doSubmit = async () => {
+  try {
+    await ElMessageBox.confirm('提交后进入立项审批，审批期间仍可补充成员与节点。确认提交？', '提交立项审批', {
+      type: 'info',
+      confirmButtonText: '提交',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
   await submitProject(detail.value.id)
   ElMessage.success('已提交立项审批')
   detailVisible.value = false
@@ -488,6 +611,15 @@ const doSubmit = async () => {
 }
 
 const doApprove = async () => {
+  try {
+    await ElMessageBox.confirm('通过后项目立项并冻结初始基线，后续调整需走变更流程。确认通过？', '审批通过', {
+      type: 'warning',
+      confirmButtonText: '通过',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
   await approveProject(detail.value.id)
   ElMessage.success('立项已通过并冻结基线')
   detailVisible.value = false
@@ -495,13 +627,79 @@ const doApprove = async () => {
 }
 
 const doReject = async () => {
-  await rejectProject(detail.value.id, '前端驳回')
+  let reason = ''
+  try {
+    const result = await ElMessageBox.prompt('请填写驳回原因，便于申请人修改后重新提交', '驳回立项', {
+      confirmButtonText: '驳回',
+      cancelButtonText: '取消',
+      inputPlaceholder: '驳回原因（必填）',
+      inputValidator: (value: string) => (value && value.trim() ? true : '请填写驳回原因')
+    })
+    reason = String(result.value || '').trim()
+  } catch {
+    return
+  }
+  await rejectProject(detail.value.id, reason)
   ElMessage.success('已驳回')
   detailVisible.value = false
   await load()
 }
 
+/** 状态流转的二次确认文案（重启/暂停/完成/验收/关闭都会改项目可见状态，确认一下更稳）。 */
+const STATUS_ACTIONS: Record<string, { title: string; tip: string; confirm: string; type: 'warning' | 'info' | 'success' }> = {
+  IN_PROGRESS: {
+    title: '启动项目',
+    tip: '启动后项目进入执行阶段，成员可填报任务与工作日志。',
+    confirm: '启动',
+    type: 'info'
+  },
+  SUSPENDED: {
+    title: '暂停项目',
+    tip: '暂停后任务与工时填报会受影响，确认暂停？',
+    confirm: '暂停',
+    type: 'warning'
+  },
+  COMPLETED: {
+    title: '标记完成',
+    tip: '标记完成后进入验收环节，期间仍可退回进行中。确认项目交付已完成？',
+    confirm: '标记完成',
+    type: 'warning'
+  },
+  ACCEPTED: {
+    title: '验收通过',
+    tip: '验收通过后只能关闭项目或退回进行中，确认验收通过？',
+    confirm: '验收通过',
+    type: 'success'
+  },
+  CLOSED: {
+    title: '关闭项目',
+    tip: '关闭后项目归档，不能再流转。确认关闭？',
+    confirm: '关闭',
+    type: 'warning'
+  }
+}
+
 const doStatus = async (status: string) => {
+  const action = STATUS_ACTIONS[status]
+  if (action) {
+    const resuming =
+      status === 'IN_PROGRESS' && String(detail.value.status || '') === 'SUSPENDED'
+    const reopening =
+      status === 'IN_PROGRESS' && String(detail.value.status || '') === 'COMPLETED'
+    try {
+      await ElMessageBox.confirm(
+        resuming ? '恢复后项目回到进行中，继续计入进度与工时。' : reopening ? '重新打开后项目回到进行中，可继续调整节点与任务。' : action.tip,
+        resuming ? '恢复项目' : reopening ? '重新打开项目' : action.title,
+        {
+          type: action.type,
+          confirmButtonText: resuming ? '恢复' : reopening ? '重新打开' : action.confirm,
+          cancelButtonText: '取消'
+        }
+      )
+    } catch {
+      return
+    }
+  }
   await changeProjectStatus(detail.value.id, status)
   ElMessage.success(`状态已变更为 ${statusMeta(status).label}`)
   await refreshDetail()
@@ -685,6 +883,25 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           @keyup.enter="search"
           @clear="search"
         />
+        <el-select v-model="deptFilter" class="f-dept" placeholder="全部部门" clearable filterable>
+          <el-option v-for="dept in depts" :key="dept.id" :label="dept.deptName" :value="dept.id" />
+        </el-select>
+        <el-select v-model="pmFilter" class="f-pm" placeholder="全部负责人" clearable filterable>
+          <el-option
+            v-for="user in users"
+            :key="user.id"
+            :label="`${user.realName}（${user.username}）`"
+            :value="user.id"
+          />
+        </el-select>
+        <el-select v-model="healthFilter" class="f-health" placeholder="全部健康度" clearable>
+          <el-option
+            v-for="(item, code) in HEALTH_STATUS"
+            :key="code"
+            :label="item.label"
+            :value="code"
+          />
+        </el-select>
         <div class="filter-actions">
           <el-button type="primary" :loading="loading" @click="search">查询</el-button>
           <el-button @click="resetFilters">重置</el-button>
@@ -782,7 +999,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </div>
           <div class="field span-2">
             <label>项目组成员</label>
-            <el-select v-model="createForm.memberIds" multiple filterable collapse-tags collapse-tags-tooltip placeholder="可选，负责人会自动入组">
+            <el-select
+              v-model="createForm.memberIds"
+              multiple
+              filterable
+              collapse-tags
+              collapse-tags-tooltip
+              :max-collapse-tags="4"
+              placeholder="可选，负责人会自动入组"
+            >
               <el-option
                 v-for="user in users"
                 :key="user.id"
@@ -910,47 +1135,66 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <el-table-column prop="joinDate" label="加入日期" width="120" class-name="pms-mobile-hide" />
               <el-table-column label="操作" width="90">
                 <template #default="{ row }">
-                  <el-button link type="danger" :disabled="!canEdit" @click="doRemoveMember(row)">移出</el-button>
+                  <el-button
+                    link
+                    type="danger"
+                    :disabled="!canEdit || String(row.userId) === String(detail.pmId)"
+                    :title="String(row.userId) === String(detail.pmId) ? '项目负责人需先变更负责人' : ''"
+                    @click="doRemoveMember(row)"
+                  >
+                    移出
+                  </el-button>
                 </template>
               </el-table-column>
             </el-table>
           </el-tab-pane>
 
           <el-tab-pane label="项目总监" name="directors">
-            <el-alert
-              type="info"
-              :closable="false"
-              show-icon
-              title="项目总监是项目级授权（可多人），不是岗位；被指派者自动入组并取得本项目变更的会签审核权"
-            />
             <div class="pane-ops">
               <el-select
-                v-model="directorIds"
+                v-model="directorDraft"
                 class="ops-select wide"
                 multiple
                 filterable
                 collapse-tags
                 collapse-tags-tooltip
+                :max-collapse-tags="3"
                 size="small"
-                placeholder="选择项目总监（可多人）"
+                placeholder="添加项目总监（可多人，一次多选）"
                 :disabled="!canEdit || !canManage"
               >
                 <el-option
-                  v-for="user in users"
+                  v-for="user in directorOptions"
                   :key="user.id"
                   :label="`${user.realName}（${user.username}）`"
-                  :value="user.id"
+                  :value="String(user.id)"
                 />
               </el-select>
-              <el-button size="small" type="primary" :disabled="!canEdit || !canManage" @click="saveDirectors">
-                保存总监
+              <el-button
+                size="small"
+                type="primary"
+                :disabled="!canEdit || !canManage || !directorsDirty"
+                @click="saveDirectors"
+              >
+                保存总监<template v-if="directorDraft.length">（+{{ directorDraft.length }}）</template>
               </el-button>
+              <span v-if="directorsDirty" class="ops-hint">有未保存的改动</span>
+              <span v-else class="ops-hint">可多人会签 · 被指派者自动入组并取得变更审核权</span>
             </div>
-            <div class="tag-list">
-              <el-tag v-for="item in directors" :key="item.userId" effect="plain">
-                {{ item.realName || item.userId }}
+
+            <div v-if="directorIds.length" class="tag-list">
+              <el-tag
+                v-for="userId in directorIds"
+                :key="userId"
+                effect="plain"
+                :closable="canEdit && canManage"
+                @close="removeDirector(userId)"
+              >
+                {{ userName(userId) }}
               </el-tag>
-              <span v-if="!directors.length" class="empty-tip">尚未指派项目总监</span>
+            </div>
+            <div v-else class="tag-list">
+              <span class="empty-tip">尚未指派：未指派时本项目无法提交变更评估</span>
             </div>
           </el-tab-pane>
 
@@ -966,6 +1210,19 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 </el-empty>
               </template>
               <el-table-column prop="stageName" label="阶段" min-width="140" />
+              <el-table-column label="计划起止" width="210">
+                <template #default="{ row }">
+                  <template v-if="row.planStart || row.planEnd">
+                    <div class="cell-main num-cell">
+                      {{ row.planStart || '—' }} ~ {{ row.planEnd || '—' }}
+                    </div>
+                    <div v-if="daySpan(row.planStart, row.planEnd)" class="cell-sub">
+                      {{ daySpan(row.planStart, row.planEnd) }}
+                    </div>
+                  </template>
+                  <span v-else class="muted">未排期</span>
+                </template>
+              </el-table-column>
               <el-table-column prop="weight" label="权重" width="80" />
               <el-table-column label="进度" width="90">
                 <template #default="{ row }">{{ Math.round(Number(row.progress || 0)) }}%</template>
@@ -1162,6 +1419,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                     <el-option label="项目文档" value="PROJECT" />
                     <el-option label="阶段文档" value="STAGE" />
                     <el-option label="里程碑文档" value="MILESTONE" />
+                    <el-option label="其他（不归档到节点）" value="OTHER" />
                   </el-select>
                 </div>
                 <div v-if="docUploadTarget === 'STAGE'" class="field">
@@ -1233,11 +1491,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               </el-table-column>
               <el-table-column label="归属" width="190">
                 <template #default="{ row }">
-                  <el-tag
-                    size="small"
-                    effect="plain"
-                    :type="row.bizType === 'PROJECT' ? 'info' : row.bizType === 'STAGE' ? 'success' : 'warning'"
-                  >
+                  <el-tag size="small" effect="plain" :type="docTagType(row.bizType)">
                     {{ DOC_TYPE_LABEL[row.bizType] || row.bizType }}
                   </el-tag>
                   <span v-if="docScopeName(row)" class="doc-scope">{{ docScopeName(row) }}</span>
@@ -1268,7 +1522,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             驳回
           </el-button>
           <span class="footer-spacer"></span>
-          <el-button @click="detailVisible = false">关闭</el-button>
           <el-button v-if="detail.status === 'DRAFT' && canCreateProject" type="primary" @click="doSubmit">
             提交审批
           </el-button>
@@ -1280,20 +1533,32 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </el-button>
           <el-button v-if="detail.status === 'IN_PROGRESS' && canEdit" @click="doStatus('SUSPENDED')">暂停</el-button>
           <el-button v-if="detail.status === 'SUSPENDED' && canEdit" @click="doStatus('IN_PROGRESS')">恢复</el-button>
-          <el-button
-            v-if="['IN_PROGRESS', 'COMPLETED'].includes(detail.status) && canEdit"
-            @click="doStatus('COMPLETED')"
-          >
-            完成
+          <el-button v-if="detail.status === 'IN_PROGRESS' && canEdit" @click="doStatus('COMPLETED')">完成</el-button>
+          <el-button v-if="detail.status === 'COMPLETED' && canEdit" @click="doStatus('IN_PROGRESS')">
+            重新打开
           </el-button>
           <el-button v-if="detail.status === 'COMPLETED' && canEdit" type="success" @click="doStatus('ACCEPTED')">
             验收
+          </el-button>
+          <el-button v-if="detail.status === 'ACCEPTED' && canEdit" type="primary" @click="doStatus('CLOSED')">
+            关闭项目
           </el-button>
         </div>
       </template>
     </el-drawer>
 
     <el-dialog v-model="stageVisible" :title="stageForm.id ? '编辑阶段' : '新增阶段'" width="min(560px, 94vw)" align-center>
+      <p v-if="stageReference" class="form-hint stage-ref">
+        {{ stageReference }}
+        <el-button
+          v-if="!stageForm.id && lastStage?.planEnd"
+          link
+          type="primary"
+          @click="applySuggestedStart"
+        >
+          使用建议日期
+        </el-button>
+      </p>
       <div class="form-grid">
         <div class="field span-2">
           <label>阶段名称 <em>*</em></label>
@@ -1309,11 +1574,24 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </div>
         <div class="field">
           <label>计划开始</label>
-          <el-date-picker v-model="stageForm.planStart" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" />
+          <el-date-picker
+            v-model="stageForm.planStart"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="选择日期"
+            :default-value="toDate(stageForm.planStart)"
+          />
         </div>
         <div class="field">
           <label>计划结束</label>
-          <el-date-picker v-model="stageForm.planEnd" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" />
+          <!-- 结束日期默认落在计划开始所在月份，省得每次手动翻月 -->
+          <el-date-picker
+            v-model="stageForm.planEnd"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="选择日期"
+            :default-value="toDate(stageForm.planStart) || toDate(stageForm.planEnd)"
+          />
         </div>
       </div>
       <template #footer>
@@ -1369,11 +1647,23 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </div>
         <div class="field">
           <label>计划开始</label>
-          <el-date-picker v-model="taskForm.planStart" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" />
+          <el-date-picker
+            v-model="taskForm.planStart"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="选择日期"
+            :default-value="toDate(taskForm.planStart)"
+          />
         </div>
         <div class="field">
           <label>计划结束</label>
-          <el-date-picker v-model="taskForm.planEnd" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" />
+          <el-date-picker
+            v-model="taskForm.planEnd"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="选择日期"
+            :default-value="toDate(taskForm.planStart) || toDate(taskForm.planEnd)"
+          />
         </div>
       </div>
       <template #footer>
@@ -1396,7 +1686,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </div>
         <div class="field">
           <label>计划日期 <em>*</em></label>
-          <el-date-picker v-model="milestoneForm.planDate" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" />
+          <el-date-picker
+            v-model="milestoneForm.planDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="选择日期"
+            :default-value="toDate(milestoneForm.planDate) || toDate(detail.planEnd)"
+          />
         </div>
         <div class="field">
           <label>负责人</label>
@@ -1521,7 +1817,20 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   min-width: 180px;
 }
 
-.filter-row :deep(.el-input) {
+.filter-row :deep(.f-dept) {
+  flex: 0 0 170px;
+}
+
+.filter-row :deep(.f-pm) {
+  flex: 0 0 180px;
+}
+
+.filter-row :deep(.f-health) {
+  flex: 0 0 132px;
+}
+
+.filter-row :deep(.el-input),
+.filter-row :deep(.el-select) {
   width: 100%;
 }
 
@@ -1623,6 +1932,17 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   font-size: 12.5px;
   line-height: 1.6;
   color: var(--pms-text-3);
+}
+
+.stage-ref {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f7f9fd;
+  color: var(--pms-text-2);
 }
 
 .form-grid {
@@ -1807,19 +2127,26 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 .upload-panel {
-  display: grid;
-  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
-  gap: 14px;
-  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
   border: 1px dashed var(--pms-line);
   border-radius: 10px;
   background: #fafbfe;
 }
 
 .upload-fields {
-  display: grid;
-  align-content: start;
-  gap: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 12px;
+}
+
+/* 归属选择固定宽度、与拖拽区的紧凑标题行对齐，避免左侧两行把右侧拖拽框撑高 */
+.upload-fields .field {
+  width: 190px;
+  gap: 4px;
 }
 
 .upload-fields .field :deep(.el-select) {
@@ -1827,19 +2154,26 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 .doc-drop :deep(.el-upload) {
+  display: block;
   width: 100%;
 }
 
 .doc-drop :deep(.el-upload-dragger) {
-  padding: 16px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
   border-radius: 8px;
   background: #fff;
 }
 
 .doc-drop-text {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 2px 10px;
   line-height: 1.6;
 }
 
@@ -1938,8 +2272,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     width: 100%;
   }
 
-  .upload-panel {
-    grid-template-columns: 1fr;
+  .upload-fields .field {
+    width: 100%;
   }
 
   .pager {

@@ -18,7 +18,8 @@ from pms.project.models import PrjAttachment, PrjMilestone, PrjStage, PrjTask
 from pms.system.models import SysFile
 
 BIZ_TYPES: Final[frozenset[str]] = frozenset(
-    {"PROJECT", "STAGE", "MILESTONE", "TASK", "CHANGE"}
+    # OTHER：不属于任何节点/任务的散装资料（合同扫描件、会议纪要等）
+    {"PROJECT", "STAGE", "MILESTONE", "TASK", "CHANGE", "OTHER"}
 )
 
 
@@ -35,9 +36,16 @@ async def create_attachment(
     kind = (biz_type or "PROJECT").upper()
     if kind not in BIZ_TYPES:
         raise BizRuleError(f"不支持的文档归属类型：{kind}")
-    await _ensure_biz_owner(session, project_id, kind, biz_id)
+    label = await _ensure_biz_owner(session, project_id, kind, biz_id)
+    project = await project_service.get_project(session, project_id)
 
-    stored: StoredFile = await save_upload(upload, project_id)
+    stored: StoredFile = await save_upload(
+        upload,
+        project_id,
+        project_code=project.project_code,
+        biz_type=kind,
+        biz_label=label,
+    )
     file = SysFile(
         file_key=stored.file_key,
         origin_name=stored.origin_name,
@@ -69,26 +77,29 @@ async def create_attachment(
 
 async def _ensure_biz_owner(
     session: AsyncSession, project_id: int, biz_type: str, biz_id: int
-) -> None:
-    """校验节点/任务归属当前项目，避免把文档挂到别的项目节点。"""
-    if biz_type == "PROJECT":
-        return
+) -> str:
+    """校验节点/任务归属当前项目，返回用于磁盘分目录的节点名（无则空串）。"""
+    if biz_type in {"PROJECT", "OTHER"}:
+        # 项目级与「其他」不绑定节点，无需再校验归属
+        return ""
     if biz_id <= 0:
         raise BizRuleError("请选择文档所属节点")
     if biz_type == "STAGE":
         stage = await session.get(PrjStage, biz_id)
         if stage is None or stage.deleted or stage.project_id != project_id:
             raise NotFoundError("阶段不存在")
-        return
+        return stage.stage_name
     if biz_type == "MILESTONE":
         milestone = await session.get(PrjMilestone, biz_id)
         if milestone is None or milestone.deleted or milestone.project_id != project_id:
             raise NotFoundError("里程碑不存在")
-        return
+        return milestone.milestone_name
     if biz_type == "TASK":
         task = await session.get(PrjTask, biz_id)
         if task is None or task.deleted or task.project_id != project_id:
             raise NotFoundError("任务不存在")
+        return task.task_code or task.task_name
+    return ""
 
 
 async def list_attachments(

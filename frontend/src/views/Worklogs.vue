@@ -1939,6 +1939,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             filterable
             collapse-tags
             collapse-tags-tooltip
+            :max-collapse-tags="3"
             placeholder="选择尚未提交日志的成员"
             :loading="reminderTargetsLoading"
           >

@@ -189,11 +189,26 @@ async def list_projects(
     pagination: Annotated[Pagination, Depends(get_pagination)],
     keyword: Annotated[str, Query()] = "",
     status: Annotated[str, Query()] = "",
+    deptId: Annotated[int | None, Query()] = None,
+    pmId: Annotated[int | None, Query()] = None,
+    health: Annotated[str, Query()] = "",
 ) -> object:
-    """分页查询项目，**逐条按四维权限过滤**（维度 ③）；`status` 支持逗号分组。"""
-    total = await service.count_projects(session, keyword, status)
+    """分页查询项目，**逐条按四维权限过滤**（维度 ③）。
+
+    `status` 支持逗号分组；`deptId` / `pmId` / `health` 为可选的精确筛选。
+    """
+    total = await service.count_projects(
+        session, keyword, status, dept_id=deptId or 0, pm_id=pmId or 0, health=health
+    )
     items = await service.list_projects(
-        session, pagination.offset, pagination.limit, keyword, status
+        session,
+        pagination.offset,
+        pagination.limit,
+        keyword,
+        status,
+        dept_id=deptId or 0,
+        pm_id=pmId or 0,
+        health=health,
     )
     visible_items = [item for item in items if await _can_view(session, context, item)]
     return paged(
@@ -222,6 +237,14 @@ async def project_detail(
         raise DataForbiddenError("无该项目访问权限")
     data = _project_out(project)
     data["canManage"] = await is_project_manager(session, context, project)
+
+    # 读取详情时顺带校准健康度：单项目计算开销小，避免列表长期停留在默认 GREEN
+    from pms.report import service as report_service
+
+    health = await report_service.refresh_project_health(session, project_id)
+    if str(data["health"]) != health:
+        data["health"] = health
+        await session.commit()
     return ok(data)
 
 

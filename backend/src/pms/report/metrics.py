@@ -35,11 +35,49 @@ def earned_value(planned_hours: float, progress: float) -> float:
     return planned_hours * progress / 100
 
 
-def schedule_index(planned_hours: float, progress: float) -> float:
-    """进度绩效 SPI = EV / PV（PV 取计划工时）。"""
+def elapsed_ratio(
+    plan_start: date | str | None,
+    plan_end: date | str | None,
+    today: date | None = None,
+) -> float:
+    """计划时间轴上「已过去」的比例（0~1）；缺少日期视为无时间轴。"""
+    if plan_start is None or plan_end is None:
+        return 0.0
+    start = plan_start if isinstance(plan_start, date) else date.fromisoformat(str(plan_start))
+    end = plan_end if isinstance(plan_end, date) else date.fromisoformat(str(plan_end))
+    if end <= start:
+        return 0.0
+    base = today or date.today()
+    if base <= start:
+        return 0.0
+    total = (end - start).days + 1
+    elapsed = (min(base, end) - start).days + 1
+    return max(0.0, min(elapsed / total, 1.0))
+
+
+def schedule_index(
+    planned_hours: float,
+    progress: float,
+    plan_start: date | str | None = None,
+    plan_end: date | str | None = None,
+    today: date | None = None,
+) -> float:
+    """进度绩效 SPI = EV / PV。
+
+    PV 默认取计划工时（旧口径）；传入项目计划起止时按时间轴折算「此刻应完成的量」，
+    否则任何未完工项目都会被判成落后（进度 60% 即 SPI 0.6 < 0.8 红线）。
+    """
     if planned_hours <= 0:
         return 1.0
-    return earned_value(planned_hours, progress) / planned_hours
+    earned = earned_value(planned_hours, progress)
+    if plan_start is None or plan_end is None:
+        # 没有计划起止：退回旧口径（EV / 计划工时）
+        return earned / planned_hours
+    ratio = elapsed_ratio(plan_start, plan_end, today)
+    if ratio <= 0:
+        # 尚未到计划开始日：还没有考核基准，不判落后
+        return 1.0
+    return round(earned / (planned_hours * ratio), 4)
 
 
 def cost_index(planned_hours: float, actual_hours: float, progress: float) -> float:

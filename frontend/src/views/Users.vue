@@ -611,6 +611,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             multiple
             collapse-tags
             collapse-tags-tooltip
+            :max-collapse-tags="3"
             placeholder="可稍后在角色授权中调整"
           >
             <el-option v-for="role in roles" :key="role.id" :label="role.roleName" :value="role.id" />

@@ -1135,7 +1135,6 @@ watch(
           <el-button v-if="!closed && canExecute" type="warning" link @click="doEmergency">标记紧急</el-button>
           <el-button v-if="!closed && canCreate" link @click="doWithdraw">撤回</el-button>
           <span class="footer-spacer"></span>
-          <el-button @click="detailVisible = false">关闭</el-button>
           <el-button v-if="status === 'DRAFT' && canCreate" type="primary" @click="doSubmit">提交变更</el-button>
           <el-button v-if="status === 'SUBMITTED' && canCreate" type="primary" @click="doAssess">评估定级</el-button>
           <el-button v-if="['SUBMITTED', 'ASSESSED'].includes(status)" @click="doMore">退回补充</el-button>
