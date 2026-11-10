@@ -75,6 +75,33 @@ export const ASSIGNABLE_MEMBER_ROLE: Record<string, string> = {
   SALES: '销售'
 }
 
+/** 风险 / 问题类型（`t_prj_risk.risk_type`）。 */
+export const RISK_TYPE: Record<string, DictItem> = {
+  RISK: { label: '风险', type: 'warning' },
+  ISSUE: { label: '问题', type: 'danger' }
+}
+
+/** 风险等级。 */
+export const RISK_LEVEL: Record<string, DictItem> = {
+  HIGH: { label: '高', type: 'danger' },
+  MEDIUM: { label: '中', type: 'warning' },
+  LOW: { label: '低', type: 'info' }
+}
+
+/** 风险状态。 */
+export const RISK_STATUS: Record<string, DictItem> = {
+  OPEN: { label: '开放', type: 'danger' },
+  CLOSED: { label: '已关闭', type: 'success' }
+}
+
+/** 基线类型。 */
+export const BASELINE_TYPE: Record<string, string> = {
+  SCOPE: '范围基线',
+  SCHEDULE: '进度基线',
+  COST: '成本基线',
+  CHANGE: '变更基线'
+}
+
 /** 项目健康度。 */
 export const HEALTH_STATUS: Record<string, DictItem> = {
   GREEN: { label: '健康', type: 'success' },

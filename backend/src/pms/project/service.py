@@ -19,6 +19,7 @@ from pms.project.models import (
     PrjMember,
     PrjMilestone,
     PrjProject,
+    PrjRisk,
     PrjStage,
     PrjTask,
 )
@@ -334,6 +335,9 @@ async def recalc_progress(session: AsyncSession, project_id: int) -> float:
     for stage in stages:
         if stage.id in by_stage:
             stage.progress = stage_progress(by_stage[stage.id])
+            # 任务有了进度，阶段自动进入「进行中」；完成阶段仍需人工点击（要校验交付文档）
+            if stage.progress > 0 and stage.status == "NOT_STARTED":
+                stage.status = "IN_PROGRESS"
     await session.flush()
     return value
 
@@ -892,3 +896,189 @@ async def _get_project(session: AsyncSession, project_id: int) -> PrjProject:
 async def get_project(session: AsyncSession, project_id: int) -> PrjProject:
     """取项目（对外）。"""
     return await _get_project(session, project_id)
+
+
+# ------------------------------ 基线 ------------------------------
+
+async def list_baselines(session: AsyncSession, project_id: int) -> list[PrjBaseline]:
+    """项目基线列表：立项基线与各次变更基线，按冻结顺序倒序。"""
+    stmt = (
+        select(PrjBaseline)
+        .where(PrjBaseline.project_id == project_id, PrjBaseline.deleted == 0)
+        .order_by(PrjBaseline.id.desc())
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def get_baseline(
+    session: AsyncSession, project_id: int, baseline_id: int
+) -> PrjBaseline:
+    """取单条基线，校验归属项目。"""
+    baseline = await session.get(PrjBaseline, baseline_id)
+    if baseline is None or baseline.deleted or baseline.project_id != project_id:
+        raise NotFoundError("基线不存在")
+    return baseline
+
+
+# ------------------------------ 风险 / 问题 ------------------------------
+
+_RISK_TYPES: Final[frozenset[str]] = frozenset({"RISK", "ISSUE"})
+_RISK_LEVELS: Final[frozenset[str]] = frozenset({"HIGH", "MEDIUM", "LOW"})
+_RISK_STATUSES: Final[frozenset[str]] = frozenset({"OPEN", "CLOSED"})
+
+
+def _risk_filters(risk_type: str = "", status: str = "") -> list[object]:
+    """风险台账查询条件（列表与计数共用）。"""
+    clauses: list[object] = []
+    if risk_type:
+        clauses.append(PrjRisk.risk_type == risk_type)
+    if status:
+        clauses.append(PrjRisk.status == status)
+    return clauses
+
+
+async def list_risks(
+    session: AsyncSession, project_id: int, *, risk_type: str = "", status: str = ""
+) -> list[PrjRisk]:
+    """项目风险与问题列表（按等级、截止日排序，高风险在前）。"""
+    stmt = (
+        select(PrjRisk)
+        .where(
+            PrjRisk.project_id == project_id,
+            PrjRisk.deleted == 0,
+            *_risk_filters(risk_type, status),
+        )
+        .order_by(PrjRisk.status, PrjRisk.id.desc())
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def _get_risk(session: AsyncSession, project_id: int, risk_id: int) -> PrjRisk:
+    """取单条风险，校验归属项目。"""
+    risk = await session.get(PrjRisk, risk_id)
+    if risk is None or risk.deleted or risk.project_id != project_id:
+        raise NotFoundError("风险条目不存在")
+    return risk
+
+
+async def create_risk(
+    session: AsyncSession,
+    project_id: int,
+    operator_id: int,
+    *,
+    risk_type: str = "RISK",
+    title: str,
+    description: str = "",
+    level: str = "MEDIUM",
+    probability: float = 0,
+    impact: str = "",
+    strategy: str = "",
+    owner_id: int = 0,
+    due_date: str | None = None,
+) -> PrjRisk:
+    """登记风险或问题。"""
+    kind = (risk_type or "RISK").upper()
+    if kind not in _RISK_TYPES:
+        raise BizRuleError("类型只能是 RISK（风险）或 ISSUE（问题）")
+    if not title.strip():
+        raise BizRuleError("请填写风险标题")
+    grade = (level or "MEDIUM").upper()
+    if grade not in _RISK_LEVELS:
+        raise BizRuleError("等级只能是 HIGH / MEDIUM / LOW")
+    if not 0 <= float(probability) <= 100:
+        raise BizRuleError("发生概率应在 0~100 之间")
+    risk = PrjRisk(
+        project_id=project_id,
+        risk_type=kind,
+        title=title.strip(),
+        description=description,
+        level=grade,
+        probability=float(probability),
+        impact=impact,
+        strategy=strategy,
+        owner_id=owner_id,
+        due_date=due_date or None,
+        status="OPEN",
+        create_by=operator_id,
+    )
+    session.add(risk)
+    await session.flush()
+    return risk
+
+
+async def update_risk(
+    session: AsyncSession,
+    project_id: int,
+    risk_id: int,
+    operator_id: int,
+    *,
+    risk_type: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    level: str | None = None,
+    probability: float | None = None,
+    impact: str | None = None,
+    strategy: str | None = None,
+    owner_id: int | None = None,
+    due_date: str | None = None,
+) -> PrjRisk:
+    """编辑风险条目（不改状态，状态走 `change_risk_status`）。"""
+    risk = await _get_risk(session, project_id, risk_id)
+    if risk_type is not None:
+        kind = risk_type.upper()
+        if kind not in _RISK_TYPES:
+            raise BizRuleError("类型只能是 RISK（风险）或 ISSUE（问题）")
+        risk.risk_type = kind
+    if title is not None:
+        if not title.strip():
+            raise BizRuleError("请填写风险标题")
+        risk.title = title.strip()
+    if level is not None:
+        grade = level.upper()
+        if grade not in _RISK_LEVELS:
+            raise BizRuleError("等级只能是 HIGH / MEDIUM / LOW")
+        risk.level = grade
+    if probability is not None:
+        if not 0 <= float(probability) <= 100:
+            raise BizRuleError("发生概率应在 0~100 之间")
+        risk.probability = float(probability)
+    if description is not None:
+        risk.description = description
+    if impact is not None:
+        risk.impact = impact
+    if strategy is not None:
+        risk.strategy = strategy
+    if owner_id is not None:
+        risk.owner_id = owner_id
+    if due_date is not None:
+        risk.due_date = due_date or None
+    risk.update_by = operator_id
+    await session.flush()
+    return risk
+
+
+async def change_risk_status(
+    session: AsyncSession, project_id: int, risk_id: int, target: str, operator_id: int
+) -> PrjRisk:
+    """关闭 / 重新打开风险；关闭时记录关闭日期。"""
+    risk = await _get_risk(session, project_id, risk_id)
+    status = (target or "").upper()
+    if status not in _RISK_STATUSES:
+        raise BizRuleError("状态只能是 OPEN（开放）或 CLOSED（已关闭）")
+    risk.status = status
+    risk.close_time = date.today().isoformat() if status == "CLOSED" else None
+    risk.update_by = operator_id
+    await session.flush()
+    return risk
+
+
+async def delete_risk(
+    session: AsyncSession, project_id: int, risk_id: int, operator_id: int
+) -> None:
+    """删除风险条目（软删）。"""
+    risk = await _get_risk(session, project_id, risk_id)
+    risk.deleted = 1
+    risk.update_by = operator_id
+    await session.flush()

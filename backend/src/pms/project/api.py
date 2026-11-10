@@ -793,3 +793,261 @@ async def list_attachments(
             session, project_id, biz_type=bizType, biz_id=bizId
         )
     )
+
+
+# ------------------------------ 风险 / 问题 ------------------------------
+
+
+class RiskIn(BaseModel):
+    """风险或问题入参。"""
+
+    riskType: str = "RISK"
+    title: str = Field(min_length=1, max_length=200)
+    description: str = ""
+    level: str = "MEDIUM"
+    probability: float = 0
+    impact: str = ""
+    strategy: str = ""
+    ownerId: int = 0
+    dueDate: str | None = None
+
+
+class RiskUpdateIn(BaseModel):
+    """编辑风险（全部可选）。"""
+
+    riskType: str | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+    level: str | None = None
+    probability: float | None = None
+    impact: str | None = None
+    strategy: str | None = None
+    ownerId: int | None = None
+    dueDate: str | None = None
+
+
+class RiskStatusIn(BaseModel):
+    """风险状态流转（OPEN / CLOSED）。"""
+
+    status: str
+
+
+def _risk_out(risk: object, names: dict[int, str] | None = None) -> dict[str, object]:
+    """风险出参。"""
+    from pms.project.models import PrjRisk
+
+    assert isinstance(risk, PrjRisk)
+    owner = (names or {}).get(risk.owner_id, "")
+    return {
+        "id": risk.id,
+        "riskType": risk.risk_type,
+        "title": risk.title,
+        "description": risk.description,
+        "level": risk.level,
+        "probability": float(risk.probability),
+        "impact": risk.impact,
+        "strategy": risk.strategy,
+        "ownerId": risk.owner_id,
+        "ownerName": owner,
+        "dueDate": risk.due_date,
+        "closeTime": risk.close_time,
+        "status": risk.status,
+        "createTime": risk.create_time,
+    }
+
+
+async def _refresh_health(session: AsyncSession, project_id: int) -> None:
+    """风险变化会影响健康度（高风险判红、未关闭问题计数），随手校准一次。"""
+    from pms.report import service as report_service
+
+    await report_service.refresh_project_health(session, project_id)
+
+
+@router.get("/{project_id}/risks", summary="风险与问题列表")
+async def list_risks(
+    project_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
+    riskType: Annotated[str, Query()] = "",
+    status: Annotated[str, Query()] = "",
+) -> object:
+    """项目风险 / 问题列表（可按类型与状态过滤）。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_visible(session, context, project)
+    risks = await service.list_risks(
+        session, project_id, risk_type=riskType.upper(), status=status.upper()
+    )
+    owner_ids = {risk.owner_id for risk in risks if risk.owner_id}
+    names: dict[int, str] = {}
+    if owner_ids:
+        rows = await session.execute(
+            select(SysUser.id, SysUser.real_name).where(SysUser.id.in_(owner_ids))
+        )
+        names = {row[0]: row[1] for row in rows.all()}
+    return ok([_risk_out(risk, names) for risk in risks])
+
+
+@router.post("/{project_id}/risks", summary="登记风险/问题")
+async def create_risk(
+    project_id: int,
+    body: RiskIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+) -> object:
+    """登记风险或问题（项目经理 / PMO / 管理员）。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_manager(session, context, project)
+    risk = await service.create_risk(
+        session,
+        project_id,
+        context.user_id,
+        risk_type=body.riskType,
+        title=body.title,
+        description=body.description,
+        level=body.level,
+        probability=body.probability,
+        impact=body.impact,
+        strategy=body.strategy,
+        owner_id=body.ownerId,
+        due_date=body.dueDate,
+    )
+    await _refresh_health(session, project_id)
+    await session.commit()
+    return ok({"id": risk.id})
+
+
+@router.put("/{project_id}/risks/{risk_id}", summary="编辑风险/问题")
+async def update_risk(
+    project_id: int,
+    risk_id: int,
+    body: RiskUpdateIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+) -> object:
+    """编辑风险条目的标题/等级/概率/影响/应对/责任人/截止日。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_manager(session, context, project)
+    risk = await service.update_risk(
+        session,
+        project_id,
+        risk_id,
+        context.user_id,
+        risk_type=body.riskType,
+        title=body.title,
+        description=body.description,
+        level=body.level,
+        probability=body.probability,
+        impact=body.impact,
+        strategy=body.strategy,
+        owner_id=body.ownerId,
+        due_date=body.dueDate,
+    )
+    await _refresh_health(session, project_id)
+    await session.commit()
+    return ok({"id": risk.id})
+
+
+@router.put("/{project_id}/risks/{risk_id}/status", summary="风险状态")
+async def change_risk_status(
+    project_id: int,
+    risk_id: int,
+    body: RiskStatusIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+) -> object:
+    """关闭或重新打开风险 / 问题。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_manager(session, context, project)
+    risk = await service.change_risk_status(
+        session, project_id, risk_id, body.status, context.user_id
+    )
+    await _refresh_health(session, project_id)
+    await session.commit()
+    return ok({"id": risk.id, "status": risk.status})
+
+
+@router.delete("/{project_id}/risks/{risk_id}", summary="删除风险/问题")
+async def delete_risk(
+    project_id: int,
+    risk_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+) -> object:
+    """删除风险条目（软删）。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_manager(session, context, project)
+    await service.delete_risk(session, project_id, risk_id, context.user_id)
+    await _refresh_health(session, project_id)
+    await session.commit()
+    return ok(message="已删除")
+
+
+# ------------------------------ 基线 ------------------------------
+
+BASELINE_TYPE_LABEL: dict[str, str] = {
+    "SCOPE": "范围基线",
+    "SCHEDULE": "进度基线",
+    "COST": "成本基线",
+    "CHANGE": "变更基线",
+}
+
+
+def _baseline_out(baseline: object, names: dict[int, str] | None = None) -> dict[str, object]:
+    """基线出参（列表不含内容，详情才带 content）。"""
+    from pms.project.models import PrjBaseline
+
+    assert isinstance(baseline, PrjBaseline)
+    return {
+        "id": baseline.id,
+        "baselineType": baseline.baseline_type,
+        "baselineTypeLabel": BASELINE_TYPE_LABEL.get(baseline.baseline_type, ""),
+        "baselineName": baseline.baseline_name,
+        "version": baseline.version,
+        "frozenBy": baseline.frozen_by,
+        "frozenByName": (names or {}).get(baseline.frozen_by, ""),
+        "frozenTime": baseline.frozen_time,
+        "changeId": baseline.change_id,
+        "status": baseline.status,
+    }
+
+
+@router.get("/{project_id}/baselines", summary="基线列表")
+async def list_baselines(
+    project_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
+) -> object:
+    """项目基线列表：立项基线 + 每次变更通过后冻结的基线。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_visible(session, context, project)
+    baselines = await service.list_baselines(session, project_id)
+    user_ids = {item.frozen_by for item in baselines if item.frozen_by}
+    names: dict[int, str] = {}
+    if user_ids:
+        rows = await session.execute(
+            select(SysUser.id, SysUser.real_name).where(SysUser.id.in_(user_ids))
+        )
+        names = {row[0]: row[1] for row in rows.all()}
+    return ok([_baseline_out(item, names) for item in baselines])
+
+
+@router.get("/{project_id}/baselines/{baseline_id}", summary="基线详情")
+async def baseline_detail(
+    project_id: int,
+    baseline_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
+) -> object:
+    """基线详情：含冻结时的阶段/任务/进度快照（JSON）。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_visible(session, context, project)
+    baseline = await service.get_baseline(session, project_id, baseline_id)
+    names: dict[int, str] = {}
+    if baseline.frozen_by:
+        rows = await session.execute(
+            select(SysUser.real_name).where(SysUser.id == baseline.frozen_by)
+        )
+        names[baseline.frozen_by] = rows.scalar_one_or_none() or ""
+    data = _baseline_out(baseline, names)
+    data["content"] = baseline.content_json
+    return ok(data)

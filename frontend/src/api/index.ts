@@ -125,6 +125,29 @@ export const deleteProjectFile = (fileId: string) => del<unknown>(`/files/${file
 export const downloadProjectFile = (fileId: string, fileName: string) =>
   download(`/files/${fileId}/download`, fileName)
 
+/** 风险与问题（risk_type 区分 RISK / ISSUE）。 */
+export const listRisks = (id: string, params: Record<string, unknown> = {}) =>
+  get<Record<string, unknown>[]>(`/projects/${id}/risks`, params)
+
+export const createRisk = (id: string, data: Record<string, unknown>) =>
+  post<{ id: string }>(`/projects/${id}/risks`, data)
+
+export const updateRisk = (id: string, riskId: string, data: Record<string, unknown>) =>
+  put<{ id: string }>(`/projects/${id}/risks/${riskId}`, data)
+
+export const changeRiskStatus = (id: string, riskId: string, status: string) =>
+  put<{ id: string; status: string }>(`/projects/${id}/risks/${riskId}/status`, { status })
+
+export const deleteRisk = (id: string, riskId: string) =>
+  del<unknown>(`/projects/${id}/risks/${riskId}`)
+
+/** 项目基线（立项基线 + 每次变更通过后的冻结快照）。 */
+export const listBaselines = (id: string) =>
+  get<Record<string, unknown>[]>(`/projects/${id}/baselines`)
+
+export const baselineDetail = (id: string, baselineId: string) =>
+  get<Record<string, unknown>>(`/projects/${id}/baselines/${baselineId}`)
+
 export const listMembers = (id: string) => get<Record<string, unknown>[]>(`/projects/${id}/members`)
 
 export const addMember = (id: string, data: Record<string, unknown>) =>
