@@ -8,8 +8,11 @@ import {
   changeDetail,
   createChange,
   listChanges,
+  listProjects,
+  listUsers,
   rejectChange,
-  submitChange
+  submitChange,
+  type Page
 } from '@/api'
 
 const rows = ref<any[]>([])
@@ -17,8 +20,27 @@ const total = ref(0)
 const page = ref({ pageNum: 1, pageSize: 10 })
 const loading = ref(false)
 
+/** 雪花 ID 超出 JS 安全整数，选择框与入参一律用字符串，禁止 Number() 转换。 */
+const projects = ref<any[]>([])
+const users = ref<any[]>([])
+
+const loadOptions = async () => {
+  try {
+    const data = await listProjects({ pageNum: 1, pageSize: 200 })
+    projects.value = data.list || []
+  } catch {
+    projects.value = []
+  }
+  try {
+    const data: Page<Record<string, unknown>> = await listUsers({ pageNum: 1, pageSize: 200 })
+    users.value = (data.list || []) as any[]
+  } catch {
+    users.value = []
+  }
+}
+
 const createVisible = ref(false)
-const createForm = ref<any>({ projectId: 0, changeType: 'SCHEDULE', title: '', reason: '', isEmergency: false })
+const createForm = ref<any>({ projectId: '', changeType: 'SCHEDULE', title: '', reason: '', isEmergency: false })
 
 const detailVisible = ref(false)
 const detail = ref<any>({})
@@ -34,8 +56,8 @@ const assessForm = ref<any>({
   needNewResource: false,
   techArchitecture: false,
   highRisk: false,
-  deptLeaderId: 0,
-  pmoId: 0
+  deptLeaderId: '',
+  pmoId: ''
 })
 
 const load = async () => {
@@ -50,7 +72,11 @@ const load = async () => {
 }
 
 const doCreate = async () => {
-  await createChange(createForm.value)
+  if (!createForm.value.projectId) {
+    ElMessage.warning('请选择所属项目')
+    return
+  }
+  await createChange({ ...createForm.value, projectId: String(createForm.value.projectId) })
   createVisible.value = false
   ElMessage.success('变更申请已创建')
   await load()
@@ -82,8 +108,8 @@ const doAssess = async () => {
       { dimension: 'RISK', highRisk: assessForm.value.highRisk }
     ],
     items: [],
-    deptLeaderId: assessForm.value.deptLeaderId,
-    pmoId: assessForm.value.pmoId
+    deptLeaderId: assessForm.value.deptLeaderId || 0,
+    pmoId: assessForm.value.pmoId || 0
   })
   ElMessage.success(`评估完成，定级 ${result.level}`)
   await openDetail(detail.value)
@@ -111,7 +137,10 @@ const doAction = async (action: string) => {
   await load()
 }
 
-onMounted(load)
+onMounted(async () => {
+  await loadOptions()
+  await load()
+})
 </script>
 
 <template>
@@ -141,7 +170,16 @@ onMounted(load)
 
     <el-dialog v-model="createVisible" title="新建变更申请" width="90%">
       <el-form :model="createForm" label-width="110px">
-        <el-form-item label="项目ID"><el-input-number v-model="createForm.projectId" /></el-form-item>
+        <el-form-item label="所属项目">
+          <el-select v-model="createForm.projectId" filterable placeholder="选择项目">
+            <el-option
+              v-for="item in projects"
+              :key="item.id"
+              :label="`${item.projectName}（${item.projectCode}）`"
+              :value="item.id"
+            />
+          </el-select>
+        </el-form-item>
         <el-form-item label="变更类型">
           <el-select v-model="createForm.changeType">
             <el-option label="范围" value="SCOPE" />
@@ -179,8 +217,26 @@ onMounted(load)
         <el-form-item label="需新增资源"><el-switch v-model="assessForm.needNewResource" /></el-form-item>
         <el-form-item label="影响技术架构"><el-switch v-model="assessForm.techArchitecture" /></el-form-item>
         <el-form-item label="引入高风险"><el-switch v-model="assessForm.highRisk" /></el-form-item>
-        <el-form-item label="部门领导ID"><el-input-number v-model="assessForm.deptLeaderId" /></el-form-item>
-        <el-form-item label="PMO ID"><el-input-number v-model="assessForm.pmoId" /></el-form-item>
+        <el-form-item label="部门领导">
+          <el-select v-model="assessForm.deptLeaderId" filterable clearable placeholder="留空则按部门负责人">
+            <el-option
+              v-for="user in users"
+              :key="user.id"
+              :label="`${user.realName}（${user.username}）`"
+              :value="user.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="PMO">
+          <el-select v-model="assessForm.pmoId" filterable clearable placeholder="留空则按 PMO 角色">
+            <el-option
+              v-for="user in users"
+              :key="user.id"
+              :label="`${user.realName}（${user.username}）`"
+              :value="user.id"
+            />
+          </el-select>
+        </el-form-item>
       </el-form>
 
       <el-row :gutter="8">

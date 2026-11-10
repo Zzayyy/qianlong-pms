@@ -77,8 +77,9 @@ const clearSelection = () => tableRef.value?.clearSelection()
 const isSelf = (row: any) => String(row.id) === String(store.profile?.id || '')
 const selectionIds = () => selection.value.map((row) => String(row.id))
 
-const deptName = (id: number) => {
-  const hit = depts.value.find((item) => Number(item.id) === Number(id))
+/** 雪花 ID 超出 JS 安全整数，按字符串比较，避免 Number() 改写末位。 */
+const deptName = (id: string | number) => {
+  const hit = depts.value.find((item) => String(item.id) === String(id))
   return hit ? String(hit.deptName) : String(id || '—')
 }
 

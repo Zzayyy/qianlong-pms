@@ -48,20 +48,21 @@ const depts = ref<any[]>([])
 const users = ref<any[]>([])
 const canEdit = computed(() => store.has('project:edit'))
 
-const userName = (id: number) => {
-  const hit = users.value.find((item) => Number(item.id) === Number(id))
+/** 雪花 ID 超出 JS 安全整数（后端以字符串返回），一律按字符串比较与透传。 */
+const userName = (id: string | number) => {
+  const hit = users.value.find((item) => String(item.id) === String(id))
   return hit ? `${hit.realName}（${hit.username}）` : String(id || '—')
 }
 
 const createVisible = ref(false)
 const createForm = ref<any>({
   projectName: '',
-  deptId: 0,
-  pmId: 0,
+  deptId: '',
+  pmId: '',
   contractAmount: 0,
   planStart: '',
   planEnd: '',
-  memberIds: [] as number[]
+  memberIds: [] as string[]
 })
 
 const detailVisible = ref(false)
@@ -71,7 +72,7 @@ const tasks = ref<any[]>([])
 const milestones = ref<any[]>([])
 const members = ref<any[]>([])
 const newPmId = ref('')
-const addMemberId = ref<number | null>(null)
+const addMemberId = ref<string | null>(null)
 
 /* 项目节点与文档 */
 const canManageStage = computed(() => store.has('project:stage:edit'))
@@ -79,10 +80,10 @@ const directors = ref<any[]>([])
 const directorIds = ref<string[]>([])
 const docs = ref<any[]>([])
 const docBizType = ref<'PROJECT' | 'STAGE' | 'MILESTONE'>('PROJECT')
-const docBizId = ref(0)
+const docBizId = ref('')
 const fileInput = ref<HTMLInputElement | null>(null)
 const stageVisible = ref(false)
-const stageForm = ref<any>({ id: 0, stageName: '', weight: 1, seq: 1, planStart: '', planEnd: '' })
+const stageForm = ref<any>({ id: '', stageName: '', weight: 1, seq: 1, planStart: '', planEnd: '' })
 
 const loadNodeData = async () => {
   directors.value = await projectDirectors(detail.value.id)
@@ -90,13 +91,15 @@ const loadNodeData = async () => {
   docs.value = await projectAttachments(detail.value.id)
 }
 
-const docCount = (stageId: number) =>
-  docs.value.filter((item) => item.bizType === 'STAGE' && Number(item.bizId) === Number(stageId)).length
+const docCount = (stageId: string | number) =>
+  docs.value.filter(
+    (item) => item.bizType === 'STAGE' && String(item.bizId) === String(stageId)
+  ).length
 
 const openStage = (row?: any) => {
   stageForm.value = row
     ? {
-        id: Number(row.id),
+        id: row.id,
         stageName: row.stageName,
         weight: Number(row.weight || 1),
         seq: Number(row.seq || 1),
@@ -104,7 +107,7 @@ const openStage = (row?: any) => {
         planEnd: row.planEnd || ''
       }
     : {
-        id: 0,
+        id: '',
         stageName: '',
         weight: 1,
         seq: stages.value.length + 1,
@@ -231,7 +234,7 @@ const openCreate = () => {
 }
 
 const doCreate = async () => {
-  const memberIds: number[] = createForm.value.memberIds || []
+  const memberIds: string[] = createForm.value.memberIds || []
   const result = await createProject({
     projectName: createForm.value.projectName,
     deptId: createForm.value.deptId,
@@ -284,10 +287,10 @@ const doAddMember = async () => {
     ElMessage.warning('请先选择人员')
     return
   }
-  const user = users.value.find((item) => Number(item.id) === Number(addMemberId.value))
+  const user = users.value.find((item) => String(item.id) === String(addMemberId.value))
   await addMember(detail.value.id, {
-    userId: Number(addMemberId.value),
-    deptId: Number(user?.deptId || 0),
+    userId: addMemberId.value,
+    deptId: String(user?.deptId || '0'),
     roleInProject: 'MEMBER'
   })
   addMemberId.value = null
@@ -564,12 +567,12 @@ onMounted(async () => {
             </el-col>
             <el-col v-if="docBizType === 'STAGE'" :xs="24" :sm="5">
               <el-select v-model="docBizId" size="small" placeholder="选择阶段" style="width: 100%">
-                <el-option v-for="item in stages" :key="item.id" :label="item.stageName" :value="Number(item.id)" />
+                <el-option v-for="item in stages" :key="item.id" :label="item.stageName" :value="item.id" />
               </el-select>
             </el-col>
             <el-col v-if="docBizType === 'MILESTONE'" :xs="24" :sm="5">
               <el-select v-model="docBizId" size="small" placeholder="选择里程碑" style="width: 100%">
-                <el-option v-for="item in milestones" :key="item.id" :label="item.milestoneName" :value="Number(item.id)" />
+                <el-option v-for="item in milestones" :key="item.id" :label="item.milestoneName" :value="item.id" />
               </el-select>
             </el-col>
             <el-col :xs="24" :sm="8">
