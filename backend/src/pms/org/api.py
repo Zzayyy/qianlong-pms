@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pms.audit.service import record_login
-from pms.common.exceptions import BizRuleError
+from pms.common.exceptions import BizRuleError, ForbiddenError
 from pms.common.response import ok, paged
 from pms.core.context import AuthContext
 from pms.core.deps import (
@@ -18,6 +18,7 @@ from pms.core.deps import (
     get_current_user,
     get_pagination,
     get_session,
+    require_any_permission,
     require_permissions,
 )
 from pms.core.redis import blacklist_add
@@ -419,6 +420,9 @@ async def user_create(
     context: Annotated[AuthContext, Depends(require_permissions("org:user:manage"))],
 ) -> object:
     """创建用户并校验用户名唯一（可同时分配角色，单事务完成）。"""
+    # 角色分配属于独立权限，不能借用人员管理权限在创建时绕过
+    if body.roleIds and not context.has_permission("org:role:manage"):
+        raise ForbiddenError("缺少权限：org:role:manage")
     user = await service.create_user(
         session,
         username=body.username,
@@ -570,9 +574,11 @@ async def assign_roles(
 @router.get("/roles", summary="角色列表")
 async def role_list(
     session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("org:role:view"))],
+    context: Annotated[
+        AuthContext, Depends(require_any_permission("org:role:view", "org:role:manage"))
+    ],
 ) -> object:
-    """返回角色、数据范围、用户数与权限数。"""
+    """返回角色、数据范围、用户数与权限数（查看或授权场景均可读取）。"""
     return ok(await service.list_roles_with_stats(session))
 
 

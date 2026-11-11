@@ -129,6 +129,23 @@ def require_permissions(*codes: str):
     return _guard
 
 
+def require_any_permission(*codes: str):
+    """生成「任一功能权限」校验依赖。
+
+    用于「查看」与「管理」二选一的场景，例如角色列表既要给查看页用，
+    也要给人员页的角色授权下拉用；只授 manage 未授 view 时不应被拦截。
+    """
+
+    async def _guard(
+        context: Annotated[AuthContext, Depends(load_permissions)],
+    ) -> AuthContext:
+        if not any(context.has_permission(code) for code in codes):
+            raise ForbiddenError(f"缺少权限：{' 或 '.join(codes)}")
+        return context
+
+    return _guard
+
+
 @dataclass(slots=True)
 class Pagination:
     """分页参数（设计稿 09 §1：pageNum 从 1 开始）。"""

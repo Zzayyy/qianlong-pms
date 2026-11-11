@@ -23,6 +23,11 @@ import { useUserStore } from '@/stores/user'
 const store = useUserStore()
 const canManage = computed(() => store.has('org:user:manage'))
 const canDelete = computed(() => store.has('org:user:delete'))
+/** 角色查看 / 授权是两个独立权限，不能因为看人员就无条件拉角色列表。 */
+const canViewRoles = computed(() => store.has('org:role:view'))
+const canAssignRoles = computed(() => store.has('org:role:manage'))
+/** 部门树是人员页的辅助数据，无部门查看权限时不请求，避免 403。 */
+const canViewDepts = computed(() => store.has('org:dept:view'))
 
 const rows = ref<any[]>([])
 const depts = ref<any[]>([])
@@ -138,7 +143,12 @@ const doUnlock = async (row: any) => {
 }
 
 const loadBase = async () => {
-  depts.value = (await deptTree()) as any[]
+  depts.value = canViewDepts.value ? ((await deptTree()) as any[]) : []
+  // 没有角色查看/授权权限时不请求角色列表，避免 403 提示
+  if (!canViewRoles.value && !canAssignRoles.value) {
+    roles.value = []
+    return
+  }
   try {
     roles.value = (await listRoles()) as any[]
   } catch {
@@ -227,7 +237,8 @@ const doCreate = async () => {
       deptId: createForm.value.deptId,
       mobile: createForm.value.mobile,
       email: createForm.value.email,
-      roleIds: createForm.value.roleIds || []
+      // 无角色授权权限时不携带角色，避免越权分配
+      roleIds: canAssignRoles.value ? createForm.value.roleIds || [] : []
     })
     createVisible.value = false
     ElMessage.success('账号已创建')
@@ -309,6 +320,10 @@ const removeSelected = async () => {
 }
 
 const openRoles = async (row: any) => {
+  if (!canAssignRoles.value) {
+    ElMessage.warning('当前账号无角色授权权限')
+    return
+  }
   try {
     const data = await userRoleIds(row.id)
     roleForm.value = { id: row.id, realName: row.realName, roleIds: data.roleIds || [] }
@@ -507,7 +522,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item command="edit" :disabled="!canManage">编辑资料</el-dropdown-item>
-                  <el-dropdown-item command="roles" :disabled="!canManage">角色授权</el-dropdown-item>
+                  <el-dropdown-item command="roles" :disabled="!canAssignRoles">
+                    角色授权
+                  </el-dropdown-item>
                   <el-dropdown-item command="password" :disabled="!canManage">重置密码</el-dropdown-item>
                   <el-dropdown-item v-if="isLocked(row)" command="unlock" :disabled="!canManage">
                     解除锁定
@@ -535,7 +552,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 link
                 type="primary"
                 size="small"
-                :disabled="!canManage"
+                :disabled="!canAssignRoles"
                 @click="openRoles(row)"
               >
                 角色
@@ -614,7 +631,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <el-option v-for="dept in depts" :key="dept.id" :label="dept.deptName" :value="dept.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="角色" class="span-2">
+        <el-form-item v-if="canAssignRoles" label="角色" class="span-2">
           <el-select
             v-model="createForm.roleIds"
             multiple
