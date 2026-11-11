@@ -249,7 +249,7 @@ async def reject_project(
 
 
 async def change_status(
-    session: AsyncSession, project_id: int, target: str, operator_id: int
+    session: AsyncSession, project_id: int, target: str, operator_id: int, reason: str = ""
 ) -> PrjProject:
     """通用状态流转（启动 / 挂起 / 完成 / 验收 / 关闭 / 终止）。"""
     project = await _get_project(session, project_id)
@@ -259,6 +259,9 @@ async def change_status(
         project.actual_start = date.today().isoformat()
     if project.status == ProjectStatus.COMPLETED and project.actual_end is None:
         project.actual_end = date.today().isoformat()
+    if project.status == ProjectStatus.TERMINATED:
+        # 终止必须留痕：原因写在项目上，前端详情可直接展示
+        project.terminate_reason = (reason or "").strip()
     await session.flush()
     return project
 

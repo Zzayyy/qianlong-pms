@@ -338,6 +338,15 @@ const openBaseline = async (row: any) => {
 
 /* 项目总监：多选只做「待添加」，已保存的以标签列在下方，保存后清空选择框 */
 const directorDraft = ref<string[]>([])
+/** 总监姓名：接口已下发 realName，避免没有人员列表权限时把 ID 显示出来。 */
+const directorNames = computed(() => {
+  const map: Record<string, string> = {}
+  directors.value.forEach((item: any) => {
+    map[String(item.userId)] = item.realName || ''
+  })
+  return map
+})
+const directorName = (userId: string) => directorNames.value[userId] || userName(userId)
 const directorOptions = computed(() =>
   users.value.filter((item) => !directorIds.value.includes(String(item.id)))
 )
@@ -900,6 +909,37 @@ const doStatus = async (status: string) => {
   await load()
 }
 
+/** 可终止的状态：草稿 / 已立项 / 进行中 / 已暂停（审批中走驳回，完成与验收后走关闭）。 */
+const canTerminate = computed(() =>
+  ['DRAFT', 'APPROVED', 'IN_PROGRESS', 'SUSPENDED'].includes(String(detail.value.status || ''))
+)
+
+/** 终止项目：必填原因，写入 `t_prj_project.terminate_reason`，便于追溯。 */
+const doTerminate = async () => {
+  let reason = ''
+  try {
+    const result = await ElMessageBox.prompt(
+      '终止后项目归档且不可恢复，成员也不能再填报本项目日志。请填写终止原因，会记录在项目详情中。',
+      '终止项目',
+      {
+        type: 'warning',
+        confirmButtonText: '确认终止',
+        cancelButtonText: '取消',
+        inputType: 'textarea',
+        inputPlaceholder: '终止原因（必填）',
+        inputValidator: (value: string) => (value && value.trim() ? true : '请填写终止原因')
+      }
+    )
+    reason = String(result.value || '').trim()
+  } catch {
+    return
+  }
+  await changeProjectStatus(detail.value.id, 'TERMINATED', reason)
+  ElMessage.success('项目已终止')
+  await refreshDetail()
+  await load()
+}
+
 /* 任务：新增 / 编辑 / 删除 / 进度 */
 const taskVisible = ref(false)
 const taskForm = ref<any>({
@@ -1114,17 +1154,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
 <template>
   <div class="pms-page">
-    <div class="pms-card page-head">
-      <div class="head-copy">
-        <h2>项目周期</h2>
-        <p>从立项审批到阶段、任务、里程碑与交付文档按周期推进，关键节点冻结基线；周期或范围调整走详情里的「周期变更」。</p>
-      </div>
-      <div class="head-ops">
-        <el-button :loading="loading" @click="refreshAll">刷新</el-button>
-        <el-button v-if="canCreateProject" type="primary" @click="openCreate">新建项目</el-button>
-      </div>
-    </div>
-
     <div class="pms-card list-card">
       <div class="list-head">
         <div class="seg">
@@ -1138,7 +1167,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             {{ item.label }}
           </button>
         </div>
-        <span class="list-total">共 {{ total }} 个项目</span>
+        <div class="list-side">
+          <span class="list-total">共 {{ total }} 个项目</span>
+          <el-button size="small" :loading="loading" @click="refreshAll">刷新</el-button>
+          <el-button v-if="canCreateProject" size="small" type="primary" @click="openCreate">
+            新建项目
+          </el-button>
+        </div>
       </div>
 
       <div class="filter-row">
@@ -1207,7 +1242,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </template>
         </el-table-column>
         <el-table-column label="负责人" width="110" class-name="pms-mobile-hide">
-          <template #default="{ row }">{{ userName(row.pmId) }}</template>
+          <template #default="{ row }">{{ row.pmName || userName(row.pmId) }}</template>
         </el-table-column>
         <el-table-column label="计划周期" width="190" class-name="pms-mobile-hide">
           <template #default="{ row }">{{ row.planStart || '—' }} ~ {{ row.planEnd || '—' }}</template>
@@ -1312,7 +1347,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <div>
             <h3>{{ detail.projectName || '项目详情' }}</h3>
             <p class="detail-meta">
-              {{ detail.projectCode }} · 负责人 {{ userName(detail.pmId) }}
+              {{ detail.projectCode }} · 负责人 {{ detail.pmName || userName(detail.pmId) }}
             </p>
           </div>
           <div class="detail-tags">
@@ -1346,20 +1381,33 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </div>
 
         <div class="ops-row">
-          <el-select v-model="newPmId" class="ops-select" filterable size="small" placeholder="选择新的负责人">
-            <el-option
-              v-for="user in users"
-              :key="user.id"
-              :label="`${user.realName}（${user.username}）`"
-              :value="user.id"
-            />
-          </el-select>
-          <el-button size="small" :disabled="!canEdit" @click="doChangePm">设为负责人</el-button>
-          <el-button size="small" :disabled="!canEdit && Boolean(detail.pmId)" @click="claimProject">认领给我</el-button>
-          <span v-if="!canManage && !isOwner" class="ops-hint">
+          <!-- 无 project:edit 的角色（如销售）看不到人员下拉，直接展示负责人姓名 -->
+          <template v-if="canEdit">
+            <el-select v-model="newPmId" class="ops-select" filterable size="small" placeholder="选择新的负责人">
+              <el-option
+                v-for="user in users"
+                :key="user.id"
+                :label="`${user.realName}（${user.username}）`"
+                :value="user.id"
+              />
+            </el-select>
+            <el-button size="small" @click="doChangePm">设为负责人</el-button>
+            <el-button size="small" :disabled="Boolean(detail.pmId)" @click="claimProject">认领给我</el-button>
+          </template>
+          <span v-else class="ops-hint">负责人：{{ detail.pmName || userName(detail.pmId) }}</span>
+          <span v-if="canEdit && !canManage && !isOwner" class="ops-hint">
             仅项目经理、PMO 或管理员可维护成员、节点与文档状态
           </span>
         </div>
+
+        <el-alert
+          v-if="detail.status === 'TERMINATED'"
+          class="terminate-alert"
+          type="error"
+          :closable="false"
+          show-icon
+          :title="`项目已终止：${detail.terminateReason || '未填写原因'}`"
+        />
 
         <el-tabs v-model="activeTab" style="margin-top: 14px">
           <el-tab-pane label="团队" name="team">
@@ -1407,7 +1455,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 :closable="canEdit && canManage"
                 @close="removeDirector(userId)"
               >
-                {{ userName(userId) }}
+                {{ directorName(userId) }}
               </el-tag>
             </div>
             <div v-else class="tag-list">
@@ -1446,7 +1494,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             </div>
             <el-table :data="members" size="small" empty-text="暂无成员">
               <el-table-column label="姓名" min-width="130">
-                <template #default="{ row }">{{ row.realName || row.userId }}</template>
+                <template #default="{ row }">
+                  <span :class="{ muted: row.userMissing }">{{ row.realName || '账号已删除' }}</span>
+                </template>
               </el-table-column>
               <el-table-column prop="username" label="账号" min-width="120" class-name="pms-mobile-hide" />
               <el-table-column label="组内角色" width="110">
@@ -1525,7 +1575,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                         </template>
                         <template v-else-if="row.__kind === 'pseudo'">未绑定阶段的任务</template>
                         <template v-else>
-                          负责人 {{ userName(row.ownerId) }} · {{ row.taskCode || '—' }}
+                          负责人 {{ row.ownerName || userName(row.ownerId) }} ·
+                          {{ row.taskCode || '—' }}
                         </template>
                       </div>
                     </div>
@@ -1656,7 +1707,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 </template>
               </el-table-column>
               <el-table-column label="负责人" width="100">
-                <template #default="{ row }">{{ userName(row.ownerId) }}</template>
+                <template #default="{ row }">{{ row.ownerName || userName(row.ownerId) }}</template>
               </el-table-column>
               <el-table-column label="达成情况" width="180">
                 <template #default="{ row }">
@@ -1822,7 +1873,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                     <el-option label="项目文档" value="PROJECT" />
                     <el-option label="阶段文档" value="STAGE" />
                     <el-option label="里程碑文档" value="MILESTONE" />
-                    <el-option label="其他（不归档到节点）" value="OTHER" />
+                    <el-option label="其他" value="OTHER" />
                   </el-select>
                 </div>
                 <div v-if="docUploadTarget === 'STAGE'" class="field">
@@ -1924,6 +1975,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           >
             驳回
           </el-button>
+          <el-button
+            v-if="canTerminate && canEdit"
+            type="danger"
+            plain
+            @click="doTerminate"
+          >
+            终止项目
+          </el-button>
           <span class="footer-spacer"></span>
           <el-button v-if="detail.status === 'DRAFT' && canCreateProject" type="primary" @click="doSubmit">
             提交审批
@@ -1934,9 +1993,24 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-button v-if="detail.status === 'APPROVED' && canEdit" type="primary" @click="doStatus('IN_PROGRESS')">
             启动项目
           </el-button>
-          <el-button v-if="detail.status === 'IN_PROGRESS' && canEdit" @click="doStatus('SUSPENDED')">暂停</el-button>
-          <el-button v-if="detail.status === 'SUSPENDED' && canEdit" @click="doStatus('IN_PROGRESS')">恢复</el-button>
-          <el-button v-if="detail.status === 'IN_PROGRESS' && canEdit" @click="doStatus('COMPLETED')">完成</el-button>
+          <el-button
+            v-if="detail.status === 'IN_PROGRESS' && canEdit"
+            type="warning"
+            plain
+            @click="doStatus('SUSPENDED')"
+          >
+            暂停
+          </el-button>
+          <el-button v-if="detail.status === 'SUSPENDED' && canEdit" type="primary" plain @click="doStatus('IN_PROGRESS')">
+            恢复
+          </el-button>
+          <el-button
+            v-if="detail.status === 'IN_PROGRESS' && canEdit"
+            type="success"
+            @click="doStatus('COMPLETED')"
+          >
+            完成
+          </el-button>
           <el-button v-if="detail.status === 'COMPLETED' && canEdit" @click="doStatus('IN_PROGRESS')">
             重新打开
           </el-button>
@@ -2149,7 +2223,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <el-option
               v-for="member in members"
               :key="member.userId"
-              :label="member.realName || String(member.userId)"
+              :label="member.realName || '账号已删除'"
               :value="String(member.userId)"
             />
           </el-select>
@@ -2226,44 +2300,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 </template>
 
 <style scoped>
-/* ---------------- 页头 ---------------- */
-.page-head {
-  display: flex;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.head-copy {
-  flex: 1 1 360px;
-  min-width: 0;
-}
-
-.head-copy h2 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
-.head-copy p {
-  margin: 6px 0 0;
-  font-size: 12.5px;
-  line-height: 1.7;
-  color: var(--pms-text-3);
-}
-
-.head-ops {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-}
-
 /* ---------------- 列表 ---------------- */
 .list-head {
   display: flex;
@@ -2584,6 +2620,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   gap: 8px;
 }
 
+.terminate-alert {
+  margin-top: 12px;
+}
+
 .pane-ops {
   display: flex;
   align-items: center;
@@ -2855,10 +2895,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--pms-primary-deep);
 }
 
+/* 左：归属字段（纵向排列）　右：拖拽区（始终撑满剩余宽高） */
 .upload-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 12px;
   padding: 12px 14px;
   border: 1px dashed var(--pms-line);
   border-radius: 10px;
@@ -2867,14 +2909,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
 .upload-fields {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 10px 12px;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
 }
 
-/* 归属选择固定宽度、与拖拽区的紧凑标题行对齐，避免左侧两行把右侧拖拽框撑高 */
 .upload-fields .field {
-  width: 190px;
+  width: 100%;
   gap: 4px;
 }
 
@@ -2882,16 +2923,27 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   width: 100%;
 }
 
+.doc-drop {
+  display: flex;
+  min-width: 0;
+  /* 只有一行字段时也保留可拖拽高度 */
+  min-height: 96px;
+}
+
 .doc-drop :deep(.el-upload) {
-  display: block;
+  display: flex;
   width: 100%;
+  height: 100%;
 }
 
 .doc-drop :deep(.el-upload-dragger) {
   display: flex;
+  flex: 1;
   align-items: center;
   justify-content: center;
-  padding: 10px 14px;
+  width: 100%;
+  height: 100%;
+  padding: 10px 16px;
   border-radius: 8px;
   background: #fff;
 }
@@ -2975,12 +3027,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 @media (max-width: 768px) {
-  .page-head .head-ops {
-    width: 100%;
-    margin-left: 0;
-    justify-content: flex-end;
-  }
-
   .filter-row > * {
     flex: 1 1 100%;
     min-width: 0;
@@ -3036,8 +3082,16 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     width: 100%;
   }
 
+  .upload-panel {
+    grid-template-columns: 1fr;
+  }
+
   .upload-fields .field {
     width: 100%;
+  }
+
+  .doc-drop {
+    min-height: 84px;
   }
 
   .pager {

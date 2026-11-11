@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pms.audit.service import record_login
@@ -279,9 +280,22 @@ async def dept_tree(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("org:dept:view"))],
 ) -> object:
-    """返回全部部门（含人数，前端自行组装树）。"""
+    """返回全部部门（含负责人姓名与人数，前端自行组装树）。
+
+    负责人姓名随行下发：部门领导账号的人员列表受数据范围限制，
+    只靠前端查用户表会把别的部门负责人显示成雪花 ID。
+    """
     depts: list[SysDept] = await service.list_dept_tree(session)
     counts = await service.count_users_by_dept(session)
+    leader_ids = {dept.leader_id for dept in depts if dept.leader_id}
+    leader_names: dict[int, str] = {}
+    if leader_ids:
+        rows = await session.execute(
+            select(SysUser.id, SysUser.real_name, SysUser.username).where(
+                SysUser.id.in_(leader_ids)
+            )
+        )
+        leader_names = {row[0]: f"{row[1]}（{row[2]}）" for row in rows.all()}
     return ok(
         [
             {
@@ -291,6 +305,7 @@ async def dept_tree(
                 "deptCode": dept.dept_code,
                 "deptType": dept.dept_type,
                 "leaderId": dept.leader_id,
+                "leaderName": leader_names.get(dept.leader_id, ""),
                 "level": dept.level,
                 "sort": dept.sort,
                 "status": dept.status,

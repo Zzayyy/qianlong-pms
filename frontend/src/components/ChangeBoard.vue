@@ -563,17 +563,6 @@ watch(
 
 <template>
   <div v-loading="loading">
-    <div v-if="!embedded" class="pms-card page-head">
-      <div class="head-copy">
-        <h2>变更管理</h2>
-        <p>范围 / 进度 / 成本 / 技术 / 资源 / 其他六类变更集中受理：排期登记影响 → 六维评估自动定级 → 会签审批 → 落库冻结基线。</p>
-      </div>
-      <div class="head-ops">
-        <el-button :loading="loading" @click="load">刷新</el-button>
-        <el-button v-if="canCreate" type="primary" @click="openCreate">新建变更</el-button>
-      </div>
-    </div>
-
     <div :class="embedded ? 'list-plain' : 'pms-card list-card'">
       <div class="list-head">
         <div class="seg">
@@ -591,12 +580,13 @@ watch(
           <span class="list-total">
             <template v-if="embedded && projectName">{{ projectName }} · </template>共 {{ total }} 条
           </span>
-          <template v-if="embedded">
-            <el-button size="small" :loading="loading" @click="load">刷新</el-button>
-            <el-button v-if="canCreate" size="small" type="primary" @click="goCreateInChanges">
-              去变更管理新建
-            </el-button>
-          </template>
+          <el-button size="small" :loading="loading" @click="load">刷新</el-button>
+          <el-button v-if="canCreate && !embedded" size="small" type="primary" @click="openCreate">
+            新建变更
+          </el-button>
+          <el-button v-if="canCreate && embedded" size="small" type="primary" @click="goCreateInChanges">
+            去变更管理新建
+          </el-button>
         </div>
       </div>
 
@@ -1159,44 +1149,6 @@ watch(
 </template>
 
 <style scoped>
-/* ---------------- 页头 ---------------- */
-.page-head {
-  display: flex;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.head-copy {
-  flex: 1 1 360px;
-  min-width: 0;
-}
-
-.head-copy h2 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
-.head-copy p {
-  margin: 6px 0 0;
-  font-size: 12.5px;
-  line-height: 1.7;
-  color: var(--pms-text-3);
-}
-
-.head-ops {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-}
-
 /* ---------------- 列表 ---------------- */
 .list-plain {
   padding: 0;
@@ -1579,12 +1531,6 @@ watch(
 }
 
 @media (max-width: 768px) {
-  .page-head .head-ops {
-    width: 100%;
-    margin-left: 0;
-    justify-content: flex-end;
-  }
-
   .list-side {
     width: 100%;
     margin-left: 0;

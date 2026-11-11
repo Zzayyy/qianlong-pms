@@ -37,8 +37,19 @@ async def _can_view(session: AsyncSession, context: AuthContext, project: PrjPro
     return await can_view_project(session, context, project)
 
 
-def _project_out(project: PrjProject) -> dict[str, object]:
-    """项目出参。"""
+async def _user_names(session: AsyncSession, user_ids: set[int]) -> dict[int, str]:
+    """批量取用户姓名（项目出参里的人名，避免前端依赖人员列表权限）。"""
+    ids = {item for item in user_ids if item}
+    if not ids:
+        return {}
+    rows = await session.execute(
+        select(SysUser.id, SysUser.real_name).where(SysUser.id.in_(ids), SysUser.deleted == 0)
+    )
+    return {row[0]: row[1] for row in rows.all()}
+
+
+def _project_out(project: PrjProject, pm_name: str = "") -> dict[str, object]:
+    """项目出参（`pmName` 随行下发，仅 `project:view` 的角色也能看到负责人姓名）。"""
     return {
         "id": project.id,
         "projectCode": project.project_code,
@@ -48,12 +59,14 @@ def _project_out(project: PrjProject) -> dict[str, object]:
         "progress": float(project.progress),
         "deptId": project.dept_id,
         "pmId": project.pm_id,
+        "pmName": pm_name or "",
         "customerId": project.customer_id,
         "opportunityId": project.opportunity_id,
         "contractAmount": float(project.contract_amount),
         "planStart": project.plan_start,
         "planEnd": project.plan_end,
         "approvalLevel": project.approval_level,
+        "terminateReason": project.terminate_reason,
     }
 
 
@@ -78,6 +91,7 @@ class StatusIn(BaseModel):
     """状态流转入参。"""
 
     target: str = Field(min_length=2, max_length=32)
+    reason: str = Field(default="", max_length=500)
 
 
 class StageIn(BaseModel):
@@ -211,8 +225,9 @@ async def list_projects(
         health=health,
     )
     visible_items = [item for item in items if await _can_view(session, context, item)]
+    names = await _user_names(session, {item.pm_id for item in visible_items})
     return paged(
-        [_project_out(item) for item in visible_items],
+        [_project_out(item, names.get(item.pm_id, "")) for item in visible_items],
         len(visible_items) if len(visible_items) != len(items) else total,
         pagination.page_num,
         pagination.page_size,
@@ -235,7 +250,8 @@ async def project_detail(
     project = await service.get_project(session, project_id)
     if not await _can_view(session, context, project):
         raise DataForbiddenError("无该项目访问权限")
-    data = _project_out(project)
+    names = await _user_names(session, {project.pm_id})
+    data = _project_out(project, names.get(project.pm_id, ""))
     data["canManage"] = await is_project_manager(session, context, project)
 
     # 读取详情时顺带校准健康度：单项目计算开销小，避免列表长期停留在默认 GREEN
@@ -298,8 +314,13 @@ async def change_status(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
 ) -> object:
-    """启动 / 挂起 / 完成 / 验收 / 关闭 / 终止（状态机拦截非法流转）。"""
-    project = await service.change_status(session, project_id, body.target, context.user_id)
+    """启动 / 挂起 / 完成 / 验收 / 关闭 / 终止（状态机拦截非法流转）。
+
+    `reason` 仅在终止时记录，用于追溯「为什么废弃这个项目」。
+    """
+    project = await service.change_status(
+        session, project_id, body.target, context.user_id, reason=body.reason
+    )
     await session.commit()
     return ok({"id": project.id, "status": project.status})
 
@@ -419,6 +440,7 @@ async def tasks(
 ) -> object:
     """WBS 任务列表（甘特数据源）。"""
     items = await service.list_tasks(session, project_id)
+    names = await _user_names(session, {item.owner_id for item in items})
     return ok(
         [
             {
@@ -428,6 +450,7 @@ async def tasks(
                 "stageId": item.stage_id,
                 "parentId": item.parent_id,
                 "ownerId": item.owner_id,
+                "ownerName": names.get(item.owner_id, ""),
                 "weight": float(item.weight),
                 "progress": float(item.progress),
                 "planHours": float(item.plan_hours),
@@ -540,8 +563,9 @@ async def milestones(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
 ) -> object:
-    """里程碑列表。"""
+    """里程碑列表（含负责人姓名）。"""
     items = await service.list_milestones(session, project_id)
+    names = await _user_names(session, {item.owner_id for item in items})
     return ok(
         [
             {
@@ -551,6 +575,8 @@ async def milestones(
                 "actualDate": item.actual_date,
                 "status": item.status,
                 "delayDays": item.delay_days,
+                "ownerId": item.owner_id,
+                "ownerName": names.get(item.owner_id, ""),
             }
             for item in items
         ]
@@ -659,8 +685,10 @@ async def members(
                 "roleInProject": item.role_in_project,
                 "allocation": float(item.allocation),
                 "joinDate": item.join_date,
-                "realName": names.get(item.user_id, ("", ""))[0],
+                # 账号可能已被删除（历史数据），不要把雪花 ID 当姓名展示
+                "realName": names.get(item.user_id, ("", ""))[0] or "账号已删除",
                 "username": names.get(item.user_id, ("", ""))[1],
+                "userMissing": item.user_id not in names,
             }
             for item in items
         ]
@@ -750,7 +778,7 @@ async def list_directors(
         [
             {
                 "userId": item.user_id,
-                "realName": names.get(item.user_id, ("", ""))[0],
+                "realName": names.get(item.user_id, ("", ""))[0] or "账号已删除",
                 "username": names.get(item.user_id, ("", ""))[1],
             }
             for item in items

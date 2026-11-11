@@ -76,10 +76,14 @@ const loadUsers = async () => {
   }
 }
 
+/**
+ * 负责人姓名兜底：部门树接口已下发 `leaderName`；
+ * 这里只用于「编辑时不显示别人部门负责人」等场景，查不到就显示占位符，不暴露雪花 ID。
+ */
 const userName = (id: string | null) => {
   if (!id) return '—'
   const hit = users.value.find((item) => String(item.id) === String(id))
-  return hit ? `${hit.realName}（${hit.username}）` : String(id)
+  return hit ? `${hit.realName}（${hit.username}）` : '—'
 }
 
 /* ---------------- 上级部门候选（编辑时排除自身及下级，防止成环） ---------------- */
@@ -257,7 +261,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </el-table-column>
         <el-table-column prop="deptCode" label="编码" width="130" class-name="pms-mobile-hide" />
         <el-table-column label="负责人" min-width="150" class-name="pms-mobile-hide">
-          <template #default="{ row }">{{ userName(row.leaderId) }}</template>
+          <template #default="{ row }">
+            {{ row.leaderName || userName(row.leaderId) }}
+          </template>
         </el-table-column>
         <el-table-column label="人数" width="64" align="right">
           <template #default="{ row }">{{ row.userCount ?? 0 }}</template>

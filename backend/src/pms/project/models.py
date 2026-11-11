@@ -37,6 +37,7 @@ class PrjProject(Base, CommonMixin):
     approval_level: Mapped[int] = mapped_column(Integer, default=1)
     version: Mapped[int] = mapped_column(Integer, default=0)
     remark: Mapped[str] = mapped_column(Text, default="")
+    terminate_reason: Mapped[str] = mapped_column(Text, default="")
 
 
 class PrjMember(Base, CommonMixin):

@@ -759,24 +759,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
 <template>
   <div class="pms-page">
-    <div class="pms-card page-head">
-      <div class="head-copy">
-        <h2>客户与商机</h2>
-        <p>维护客户档案与联系人，按阶段推进商机并记录跟进过程，赢单后可直接转为项目。</p>
-      </div>
-      <div class="head-ops">
-        <el-button :loading="customerLoading || oppLoading || summaryLoading" @click="refreshAll">
-          刷新
-        </el-button>
-        <el-button v-if="tab === 'customers' && canCustomer" type="primary" @click="openCustomer()">
-          新增客户
-        </el-button>
-        <el-button v-if="tab === 'opportunities' && canOpp" type="primary" @click="openOpp()">
-          新增商机
-        </el-button>
-      </div>
-    </div>
-
     <section class="kpi-board" v-loading="summaryLoading">
       <article
         v-for="item in kpis"
@@ -811,9 +793,34 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             商机
           </button>
         </div>
-        <span class="list-total">
-          共 {{ tab === 'customers' ? customerTotal : oppTotal }} 条
-        </span>
+        <div class="list-side">
+          <span class="list-total">
+            共 {{ tab === 'customers' ? customerTotal : oppTotal }} 条
+          </span>
+          <el-button
+            size="small"
+            :loading="customerLoading || oppLoading || summaryLoading"
+            @click="refreshAll"
+          >
+            刷新
+          </el-button>
+          <el-button
+            v-if="tab === 'customers' && canCustomer"
+            size="small"
+            type="primary"
+            @click="openCustomer()"
+          >
+            新增客户
+          </el-button>
+          <el-button
+            v-if="tab === 'opportunities' && canOpp"
+            size="small"
+            type="primary"
+            @click="openOpp()"
+          >
+            新增商机
+          </el-button>
+        </div>
       </div>
 
       <!-- 客户筛选 -->
@@ -1780,45 +1787,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 </template>
 
 <style scoped>
-/* ---------------- 页头 ---------------- */
-.page-head {
-  display: flex;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.head-copy {
-  flex: 1 1 360px;
-  min-width: 0;
-}
-
-.head-copy h2 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  color: var(--pms-text);
-}
-
-.head-copy p {
-  margin: 6px 0 0;
-  font-size: 12.5px;
-  line-height: 1.7;
-  color: var(--pms-text-3);
-}
-
-.head-ops {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-}
-
 /* ---------------- 概览 ---------------- */
 .kpi-board {
   display: grid;
@@ -1885,6 +1853,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 /* ---------------- 列表 ---------------- */
+/* 列表右上角：计数 + 刷新 + 新增（随页签切换） */
+.list-side {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
 .list-head {
   display: flex;
   align-items: center;
@@ -2347,10 +2323,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 @media (max-width: 768px) {
-  .page-head .head-ops {
+  .list-side {
     width: 100%;
     margin-left: 0;
-    justify-content: flex-end;
+    flex-wrap: wrap;
   }
 
   .filter-row > * {

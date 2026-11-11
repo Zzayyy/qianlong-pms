@@ -329,19 +329,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
 <template>
   <div class="pms-page">
-    <div class="pms-card audit-head">
-      <div class="head-main">
-        <h3>审计留痕</h3>
-        <p class="head-desc">
-          写操作全量记录，读操作仅记录失败与权限拒绝；口令与令牌已脱敏，不入库。
-        </p>
-      </div>
-      <div class="head-actions">
-        <el-button v-if="canArchive" @click="openArchive">按月归档</el-button>
-        <el-button @click="refresh">刷新</el-button>
-      </div>
-    </div>
-
     <el-tabs v-model="tab" @tab-change="onTabChange">
       <el-tab-pane label="操作审计" name="operate">
         <div class="pms-card">
@@ -408,6 +395,17 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="pms-card">
           <div class="table-head">
             <span>共 {{ operateTotal }} 条记录</span>
+            <div class="table-actions">
+              <el-button size="small" @click="refresh">刷新</el-button>
+              <el-button
+                v-if="canArchive"
+                size="small"
+                title="按保留期把过期日志搬入月份归档表（t_sys_*_YYYYMM）"
+                @click="openArchive"
+              >
+                按月归档
+              </el-button>
+            </div>
           </div>
           <el-table v-loading="operateLoading" :data="operateRows" size="small">
             <el-table-column label="时间" width="170">
@@ -505,6 +503,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="pms-card">
           <div class="table-head">
             <span>共 {{ loginTotal }} 条记录</span>
+            <div class="table-actions">
+              <el-button size="small" @click="refresh">刷新</el-button>
+            </div>
           </div>
           <el-table v-loading="loginLoading" :data="loginRows" size="small">
             <el-table-column label="时间" width="170">
@@ -657,38 +658,11 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 </template>
 
 <style scoped>
-.audit-head {
-  display: flex;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.head-main {
-  flex: 1 1 360px;
-  min-width: 0;
-}
-
-.head-main h3 {
-  margin: 0 0 6px;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--pms-text);
-}
-
-.head-desc {
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 1.7;
-  color: var(--pms-text-3);
-}
-
-.head-actions {
-  flex: none;
+/* 列表右上角的操作（刷新 / 按月归档），与「共 N 条记录」同一行 */
+.table-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-left: auto;
 }
 
 /* 筛选区用弹性换行布局：控件保持自身宽度，空间不足时整体换行，避免互相挤压重叠 */
@@ -853,12 +827,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   }
 
   .filter-actions {
-    width: 100%;
-    margin-left: 0;
-    justify-content: flex-end;
-  }
-
-  .head-actions {
     width: 100%;
     margin-left: 0;
     justify-content: flex-end;
