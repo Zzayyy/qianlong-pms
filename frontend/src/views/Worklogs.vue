@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
-import { Bell } from 'lucide-vue-next'
+import { ArrowRight, Bell, CalendarClock, Download, Plus, RefreshCw, X } from 'lucide-vue-next'
 import {
   addWorklogComment,
   deleteWorklog,
@@ -392,6 +392,75 @@ const reminderOnlyOpen = ref(true)
 const reminderPage = reactive({ pageNum: 1, pageSize: 10 })
 
 const latestReminder = computed(() => reminderBadge.value[0] || null)
+const latestReminderDate = computed(() =>
+  String(latestReminder.value?.logDate || '').slice(0, 10)
+)
+
+/** 提醒条可在本次会话内收起；出现新的催办（数量或最新一条变化）时自动恢复。 */
+const REMINDER_DISMISS_KEY = 'pms_worklog_reminder_dismissed'
+const dismissedSignature = ref(sessionStorage.getItem(REMINDER_DISMISS_KEY) || '')
+const reminderSignature = computed(
+  () => `${openReminderCount.value}:${latestReminder.value?.id || ''}`
+)
+const showReminderStrip = computed(
+  () => openReminderCount.value > 0 && dismissedSignature.value !== reminderSignature.value
+)
+const dismissReminderStrip = () => {
+  dismissedSignature.value = reminderSignature.value
+  sessionStorage.setItem(REMINDER_DISMISS_KEY, reminderSignature.value)
+}
+
+/** 是否仍在补填窗口内（与填报表单的日期选择器口径一致）。 */
+const canBackfill = (value: string) => {
+  const text = String(value || '').slice(0, 10)
+  if (!text) return true
+  const target = new Date(`${text}T00:00:00`)
+  if (Number.isNaN(target.getTime())) return true
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  start.setDate(start.getDate() - Number(options.value.backfillMaxDays ?? 5))
+  return target >= start
+}
+
+/** 提醒条上的日期快捷入口：按日期倒序，最多展示 3 个。 */
+const reminderDates = computed(() => {
+  const groups = new Map<string, number>()
+  reminderBadge.value.forEach((row) => {
+    const key = String(row.logDate || '').slice(0, 10)
+    if (!key) return
+    groups.set(key, (groups.get(key) || 0) + 1)
+  })
+  return Array.from(groups.entries())
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .slice(0, 3)
+    .map(([date, count]) => ({
+      date,
+      count,
+      label: date.slice(5),
+      expired: !canBackfill(date)
+    }))
+})
+
+const reminderMoreDates = computed(() => {
+  const dates = new Set(
+    reminderBadge.value.map((row) => String(row.logDate || '').slice(0, 10))
+  )
+  dates.delete('')
+  return Math.max(dates.size - 3, 0)
+})
+
+const reminderSummary = computed(() => {
+  const latest = latestReminder.value
+  if (!latest) return '请尽快补填遗漏的工作日志'
+  const content = String(latest.content || '').trim()
+  if (content) return content
+  return `最近一条催办要求补填 ${String(latest.logDate || '').slice(0, 10)} 的工作日志`
+})
+
+/** 最新一条仍在补填窗口内时才展示「立即补填」，避免按钮点了只能报错。 */
+const latestBackfillable = computed(
+  () => !latestReminderDate.value || canBackfill(latestReminderDate.value)
+)
 
 const loadReminderBadge = async () => {
   try {
@@ -683,12 +752,27 @@ const switchLogType = (type: 'PROJECT' | 'PERSONAL') => {
   }
 }
 
-const openCreate = () => {
+/** 从催办日期直接进入补填；超出窗口时提示，不打开表单。 */
+const openCreateForDate = (date: string) => {
+  if (!canCreate.value) {
+    openReminders()
+    return
+  }
+  const target = String(date || '').slice(0, 10)
+  if (target && !canBackfill(target)) {
+    ElMessage.warning(
+      `该日期已超出 ${options.value.backfillMaxDays} 天补填窗口，请联系项目经理处理`
+    )
+    return
+  }
   formMode.value = 'create'
   resetForm()
+  if (target) form.logDate = target
   formVisible.value = true
   loadDaySummary()
 }
+
+const openCreate = () => openCreateForDate('')
 
 const openEdit = async (row: any) => {
   try {
@@ -1148,49 +1232,101 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
 <template>
   <div class="pms-page">
-    <div class="pms-card page-head">
-      <div class="head-copy">
-        <h2>
-          工作日志
-          <el-tag v-if="todayMissing && canCreate" type="warning" effect="plain" size="small">
-            今日未填报
-          </el-tag>
-        </h2>
-        <p>按项目记录每天的工作内容、工时与问题，提交后由项目经理确认并回填项目进度。</p>
-      </div>
-      <div class="head-ops">
-        <el-button :loading="listLoading || summaryLoading" @click="refreshAll">刷新</el-button>
-        <el-button :loading="exporting" @click="exportLogs">导出</el-button>
-        <el-button v-if="canManageWorklog" @click="openReminderDialog">发起催办</el-button>
-        <el-button v-if="canCreate" type="primary" @click="openCreate">写日志</el-button>
-      </div>
-    </div>
+    <transition name="reminder">
+      <section
+        v-if="showReminderStrip"
+        class="reminder-strip"
+        role="status"
+        aria-live="polite"
+      >
+        <span class="reminder-icon">
+          <Bell :size="16" :stroke-width="1.9" />
+        </span>
 
-    <div v-if="openReminderCount" class="pms-card reminder-strip">
-      <div class="reminder-copy">
-        <span class="reminder-icon"><Bell :size="16" :stroke-width="1.9" /></span>
-        <div class="reminder-text">
-          <b>你有 {{ openReminderCount }} 条日志催办待处理</b>
-          <p>{{ latestReminder?.content || '请尽快补填工作日志' }}</p>
+        <div class="reminder-main">
+          <div class="reminder-title">
+            <b>{{ openReminderCount }} 条日志催办待补填</b>
+            <span class="reminder-tag">待处理</span>
+            <span class="reminder-desc" :title="reminderSummary">{{ reminderSummary }}</span>
+          </div>
+          <div v-if="reminderDates.length" class="reminder-dates">
+            <button
+              v-for="item in reminderDates"
+              :key="item.date"
+              type="button"
+              class="date-chip"
+              :class="{ 'is-expired': item.expired }"
+              :title="
+                item.expired ? `${item.date} 已超出补填窗口` : `补填 ${item.date} 的工作日志`
+              "
+              @click="openCreateForDate(item.date)"
+            >
+              <CalendarClock :size="12" :stroke-width="1.9" />
+              {{ item.label }}
+              <span v-if="item.count > 1" class="date-chip-count">{{ item.count }}</span>
+            </button>
+            <button
+              v-if="reminderMoreDates"
+              type="button"
+              class="date-chip is-more"
+              @click="openReminders"
+            >
+              +{{ reminderMoreDates }} 天
+            </button>
+          </div>
         </div>
-      </div>
-      <div class="reminder-actions">
-        <el-button link type="primary" @click="openReminders">查看提醒</el-button>
-        <el-button link type="warning" @click="readAllReminders">全部已读</el-button>
-      </div>
-    </div>
+
+        <div class="reminder-actions">
+          <el-button
+            v-if="canCreate && latestReminderDate && latestBackfillable"
+            type="primary"
+            size="small"
+            @click="openCreateForDate(latestReminderDate)"
+          >
+            立即补填
+            <ArrowRight :size="13" :stroke-width="2" />
+          </el-button>
+          <el-button link type="primary" size="small" @click="openReminders">
+            查看全部
+          </el-button>
+          <button
+            type="button"
+            class="reminder-close"
+            aria-label="本次会话内不再提示"
+            title="本次会话内不再提示"
+            @click="dismissReminderStrip"
+          >
+            <X :size="14" :stroke-width="1.9" />
+          </button>
+        </div>
+      </section>
+    </transition>
 
     <div class="pms-card stats-card" v-loading="summaryLoading">
       <div class="stats-head">
         <div class="stats-title">
           <h3>工时概览</h3>
           <span class="range">{{ summaryRange }}</span>
+          <el-tag v-if="todayMissing && canCreate" type="warning" effect="plain" size="small">
+            今日未填报
+          </el-tag>
         </div>
-        <el-radio-group v-model="period" size="small" @change="loadSummary">
-          <el-radio-button v-for="item in PERIODS" :key="item.value" :value="item.value">
-            {{ item.label }}
-          </el-radio-button>
-        </el-radio-group>
+        <div class="stats-ops">
+          <el-radio-group v-model="period" size="small" @change="loadSummary">
+            <el-radio-button v-for="item in PERIODS" :key="item.value" :value="item.value">
+              {{ item.label }}
+            </el-radio-button>
+          </el-radio-group>
+          <el-button
+            v-if="canCreate"
+            type="primary"
+            :icon="Plus"
+            class="pms-create-btn"
+            @click="openCreate"
+          >
+            写日志
+          </el-button>
+        </div>
       </div>
 
       <div class="stats-body" :class="{ 'is-single': trendDays.length <= 1 }">
@@ -1342,10 +1478,35 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             团队待确认
           </button>
         </div>
-        <span class="list-total">
-          <template v-if="tab === 'team'">仅展示已提交 / 已确认日志 · </template>
-          共 {{ total }} 条
-        </span>
+        <div class="list-ops">
+          <span class="list-total">
+            <template v-if="tab === 'team'">仅展示已提交 / 已确认日志 · </template>
+            共 {{ total }} 条
+          </span>
+          <el-button v-if="canManageWorklog" size="small" @click="openReminderDialog">
+            发起催办
+          </el-button>
+          <el-tooltip content="刷新日志与概览" placement="top">
+            <el-button
+              circle
+              size="small"
+              aria-label="刷新"
+              :icon="RefreshCw"
+              :loading="listLoading || summaryLoading"
+              @click="refreshAll"
+            />
+          </el-tooltip>
+          <el-tooltip content="导出当前筛选结果" placement="top">
+            <el-button
+              circle
+              size="small"
+              aria-label="导出"
+              :icon="Download"
+              :loading="exporting"
+              @click="exportLogs"
+            />
+          </el-tooltip>
+        </div>
       </div>
 
       <div class="filter-row">
@@ -1985,96 +2146,188 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 </template>
 
 <style scoped>
-.page-head {
-  display: flex;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.head-copy {
-  flex: 1 1 360px;
-  min-width: 0;
-}
-
-.head-copy h2 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
-.head-copy p {
-  margin: 6px 0 0;
-  font-size: 12.5px;
-  line-height: 1.7;
-  color: var(--pms-text-3);
-}
-
-.head-ops {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-}
-
-/* ---------------- 催办提醒 ---------------- */
+/* ---------------- 催办提醒条 ---------------- */
 .reminder-strip {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  border-color: #f3e3c6;
-  background: #fffbf2;
-}
-
-.reminder-copy {
-  flex: 1 1 360px;
-  min-width: 0;
+  position: relative;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 12px 14px 12px 16px;
+  border: 1px solid #f2e2c4;
+  border-left: 3px solid var(--pms-warn);
+  border-radius: var(--pms-radius);
+  background: linear-gradient(120deg, #fff9ee 0%, #fffdf8 60%, #fff 100%);
 }
 
 .reminder-icon {
   flex: none;
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
-  border-radius: 8px;
-  background: #fff2d8;
-  color: #b8770f;
+  border-radius: 9px;
+  background: var(--pms-warn-weak);
+  color: var(--pms-warn);
 }
 
-.reminder-text {
+.reminder-main {
+  flex: 1 1 320px;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
 }
 
-.reminder-text b {
+.reminder-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.reminder-title b {
   font-size: 13.5px;
+  font-weight: 600;
   color: var(--pms-text);
 }
 
-.reminder-text p {
-  margin: 3px 0 0;
+.reminder-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--pms-warn-weak);
+  color: var(--pms-warn);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.reminder-desc {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
-  font-size: 12.5px;
-  line-height: 1.6;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.55;
   color: var(--pms-text-3);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.reminder-desc::before {
+  content: '·';
+  margin-right: 6px;
+  color: #c3ccdb;
+}
+
+.reminder-dates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 1px;
+}
+
+.date-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid #f0dfc0;
+  border-radius: 6px;
+  background: #fff;
+  color: #8a6413;
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    color 0.16s ease;
+}
+
+.date-chip:hover {
+  border-color: var(--pms-warn);
+  background: var(--pms-warn-weak);
+  color: var(--pms-warn);
+}
+
+.date-chip.is-expired {
+  border-style: dashed;
+  background: #fafbfe;
+  color: var(--pms-text-3);
+  cursor: not-allowed;
+}
+
+.date-chip.is-expired:hover {
+  border-color: #f0dfc0;
+  background: #fafbfe;
+  color: var(--pms-text-3);
+}
+
+.date-chip.is-more {
+  border-style: dashed;
+  color: var(--pms-text-2);
+}
+
+.date-chip-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: rgba(214, 138, 18, 0.14);
+  font-size: 10.5px;
+}
+
 .reminder-actions {
+  flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   margin-left: auto;
+  padding-top: 1px;
+}
+
+.reminder-actions :deep(.el-button > span) {
+  gap: 4px;
+}
+
+.reminder-close {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--pms-text-3);
+  cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    color 0.16s ease;
+}
+
+.reminder-close:hover {
+  background: rgba(22, 35, 61, 0.06);
+  color: var(--pms-text);
+}
+
+.reminder-enter-active,
+.reminder-leave-active {
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+}
+
+.reminder-enter-from,
+.reminder-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 
 .reminder-panel {
@@ -2159,8 +2412,17 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
 .stats-title {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
+}
+
+.stats-ops {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-left: auto;
 }
 
 .stats-title h3 {
@@ -2567,7 +2829,16 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   box-shadow: 0 1px 2px rgba(16, 35, 70, 0.08);
 }
 
+.list-ops {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
 .list-total {
+  margin-right: 2px;
   font-size: 12.5px;
   color: var(--pms-text-3);
   font-variant-numeric: tabular-nums;
@@ -2964,20 +3235,46 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 @media (max-width: 768px) {
-  .page-head .head-ops {
+  .stats-ops {
     width: 100%;
     margin-left: 0;
-    justify-content: flex-end;
+    justify-content: space-between;
+  }
+
+  .list-head .seg {
+    width: 100%;
+  }
+
+  .list-head .seg button {
+    flex: 1;
+    padding: 0 10px;
+  }
+
+  .list-ops {
+    width: 100%;
+    margin-left: 0;
+    justify-content: space-between;
+  }
+
+  .reminder-strip {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .reminder-main {
+    flex: 1 1 calc(100% - 40px);
+  }
+
+  .reminder-desc {
+    white-space: normal;
   }
 
   .reminder-actions {
     width: 100%;
     margin-left: 0;
-    justify-content: flex-end;
-  }
-
-  .reminder-text p {
-    white-space: normal;
+    padding-left: 40px;
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 
   .reminder-panel {

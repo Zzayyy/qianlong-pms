@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus } from 'lucide-vue-next'
 import {
   assignUserRoles,
   batchDeleteUsers,
@@ -411,7 +412,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-button text @click="resetFilters">重置</el-button>
         </div>
         <div class="toolbar-actions">
-          <el-button type="primary" :disabled="!canManage" @click="openCreate">新增人员</el-button>
+          <el-button
+            type="primary"
+            :icon="Plus"
+            class="pms-create-btn"
+            :disabled="!canManage"
+            @click="openCreate"
+          >
+            新增人员
+          </el-button>
         </div>
       </div>
     </div>

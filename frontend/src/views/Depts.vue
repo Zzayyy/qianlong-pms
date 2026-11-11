@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus } from 'lucide-vue-next'
 import { createDept, deleteDept, deptTree, listUsers, updateDept, type Page } from '@/api'
 import { useUserStore } from '@/stores/user'
 
@@ -230,7 +231,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           />
           <span class="dept-stats">共 {{ deptCount }} 个部门 · {{ userTotal }} 名人员</span>
         </div>
-        <el-button type="primary" :disabled="!canManage" @click="openCreate(0)">
+        <el-button
+          type="primary"
+          :icon="Plus"
+          class="pms-create-btn"
+          :disabled="!canManage"
+          @click="openCreate(0)"
+        >
           新增顶级部门
         </el-button>
       </div>

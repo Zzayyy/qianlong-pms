@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
+import { Plus } from 'lucide-vue-next'
 import {
   approveChange,
   assessChange,
@@ -581,10 +582,22 @@ watch(
             <template v-if="embedded && projectName">{{ projectName }} · </template>共 {{ total }} 条
           </span>
           <el-button size="small" :loading="loading" @click="load">刷新</el-button>
-          <el-button v-if="canCreate && !embedded" size="small" type="primary" @click="openCreate">
+          <el-button
+            v-if="canCreate && !embedded"
+            type="primary"
+            :icon="Plus"
+            class="pms-create-btn"
+            @click="openCreate"
+          >
             新建变更
           </el-button>
-          <el-button v-if="canCreate && embedded" size="small" type="primary" @click="goCreateInChanges">
+          <el-button
+            v-if="canCreate && embedded"
+            type="primary"
+            :icon="Plus"
+            class="pms-create-btn"
+            @click="goCreateInChanges"
+          >
             去变更管理新建
           </el-button>
         </div>
@@ -688,7 +701,13 @@ watch(
             "
             :image-size="76"
           >
-            <el-button v-if="embedded && canCreate" size="small" type="primary" @click="goCreateInChanges">
+            <el-button
+              v-if="embedded && canCreate"
+              type="primary"
+              :icon="Plus"
+              class="pms-create-btn"
+              @click="goCreateInChanges"
+            >
               去变更管理新建
             </el-button>
           </el-empty>

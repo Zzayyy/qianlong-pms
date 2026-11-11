@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus } from 'lucide-vue-next'
 import {
   addMember,
   approveProject,
@@ -1172,7 +1173,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="list-side">
           <span class="list-total">共 {{ total }} 个项目</span>
           <el-button size="small" :loading="loading" @click="refreshAll">刷新</el-button>
-          <el-button v-if="canCreateProject" size="small" type="primary" @click="openCreate">
+          <el-button
+            v-if="canCreateProject"
+            type="primary"
+            :icon="Plus"
+            class="pms-create-btn"
+            @click="openCreate"
+          >
             新建项目
           </el-button>
         </div>

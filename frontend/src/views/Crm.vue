@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, type Component } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Building2, CircleDollarSign, Handshake, TrendingUp } from 'lucide-vue-next'
+import { Building2, CircleDollarSign, Handshake, Plus, TrendingUp } from 'lucide-vue-next'
 import {
   addOppFollow,
   changeCustomerStatus,
@@ -806,16 +806,18 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </el-button>
           <el-button
             v-if="tab === 'customers' && canCustomer"
-            size="small"
             type="primary"
+            :icon="Plus"
+            class="pms-create-btn"
             @click="openCustomer()"
           >
             新增客户
           </el-button>
           <el-button
             v-if="tab === 'opportunities' && canOpp"
-            size="small"
             type="primary"
+            :icon="Plus"
+            class="pms-create-btn"
             @click="openOpp()"
           >
             新增商机
@@ -1356,7 +1358,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
         <div class="list-head">
           <span class="list-total">共 {{ contacts.length }} 位联系人</span>
-          <el-button v-if="canCustomer" type="primary" size="small" @click="openContact()">
+          <el-button
+            v-if="canCustomer"
+            type="primary"
+            :icon="Plus"
+            class="pms-create-btn"
+            @click="openContact()"
+          >
             新增联系人
           </el-button>
         </div>

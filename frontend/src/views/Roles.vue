@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus } from 'lucide-vue-next'
 import {
   createRole,
   deleteRole,
@@ -249,7 +250,15 @@ onMounted(load)
       <aside class="pms-card role-list">
         <header class="list-head">
           <h3>角色</h3>
-          <el-button v-if="canManage" type="primary" size="small" @click="openCreate">新增</el-button>
+          <el-button
+            v-if="canManage"
+            type="primary"
+            :icon="Plus"
+            class="pms-create-btn"
+            @click="openCreate"
+          >
+            新增
+          </el-button>
         </header>
         <div class="role-items">
           <button
