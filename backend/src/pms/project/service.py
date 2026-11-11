@@ -750,7 +750,7 @@ async def set_directors(
     """整体设置项目总监（多人为会签）；被指派者自动入组为 DIRECTOR 角色。"""
     from pms.org.models import SysUser
 
-    await _get_project(session, project_id)
+    project = await _get_project(session, project_id)
     targets = sorted({int(item) for item in user_ids if int(item) > 0})
     if targets:
         rows = await session.execute(
@@ -765,10 +765,12 @@ async def set_directors(
 
     existing = await list_directors(session, project_id)
     existing_by_user = {row.user_id: row for row in existing}
+    removed: list[int] = []
     for user_id, row in existing_by_user.items():
         if user_id not in targets:
             row.deleted = 1
             row.update_by = operator_id
+            removed.append(user_id)
     for user_id in targets:
         if user_id in existing_by_user:
             continue
@@ -781,8 +783,33 @@ async def set_directors(
             )
         )
         await ensure_member(session, project_id, user_id, 0, role_in_project="DIRECTOR")
+    # 取消总监时同步回收「仅因总监身份自动入组」的成员，保持两边一致
+    for user_id in removed:
+        await _detach_director_member(session, project, user_id, operator_id)
     await session.flush()
     return await list_directors(session, project_id)
+
+
+async def _detach_director_member(
+    session: AsyncSession, project: PrjProject, user_id: int, operator_id: int
+) -> None:
+    """总监被取消后移出其自动创建的成员记录。
+
+    只处理组内角色仍为 `DIRECTOR` 的成员：已转为开发/测试等业务角色、
+    或已成为项目负责人的用户继续留在项目组，避免误删实际参与人员。
+    """
+    if user_id == project.pm_id:
+        return
+    stmt = select(PrjMember).where(
+        PrjMember.project_id == project.id,
+        PrjMember.user_id == user_id,
+        PrjMember.deleted == 0,
+    )
+    member = (await session.execute(stmt)).scalar_one_or_none()
+    if member is None or member.role_in_project != "DIRECTOR":
+        return
+    member.deleted = 1
+    member.update_by = operator_id
 
 
 async def count_attachments(

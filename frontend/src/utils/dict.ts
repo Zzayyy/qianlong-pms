@@ -55,6 +55,7 @@ export const PRIORITY: Record<string, DictItem> = {
 /** 项目组内角色（`t_prj_member.role_in_project`）。 */
 export const MEMBER_ROLE: Record<string, DictItem> = {
   PM: { label: '项目经理', type: 'primary' },
+  DIRECTOR: { label: '总监', type: 'warning' },
   MEMBER: { label: '成员', type: 'info' },
   DEV: { label: '开发', type: 'success' },
   TEST: { label: '测试', type: 'warning' },

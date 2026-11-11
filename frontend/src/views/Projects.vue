@@ -579,9 +579,11 @@ const removeMilestone = async (row: any) => {
 const saveDirectors = async () => {
   const next = Array.from(new Set([...directorIds.value, ...directorDraft.value]))
   await setProjectDirectors(detail.value.id, next)
-  ElMessage.success('项目总监已保存，本项目变更将由其会签')
+  ElMessage.success('项目总监已保存，成员已同步，本项目变更将由其会签')
   directorDraft.value = []
   await loadNodeData()
+  // 总监会自动入组/退组，这里同步刷新成员列表，避免停留在旧数据
+  members.value = await listMembers(detail.value.id)
 }
 
 /** el-upload 自定义上传：统一走 `/files`，成功后刷新列表。 */
