@@ -8,7 +8,7 @@ from typing import Final
 from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pms.org.models import SysUser
+from pms.org.models import SysDept, SysUser
 from pms.project import service as project_service
 from pms.project.models import PrjProject, PrjRisk
 from pms.project.progress import HealthThresholds, evaluate_health
@@ -233,34 +233,29 @@ async def dept_dashboard(session: AsyncSession, dept_ids: list[int]) -> dict[str
     }
 
 
-async def dept_trend(
-    session: AsyncSession, dept_ids: list[int], days: int = 30
+async def _trend_points(
+    session: AsyncSession, dept_ids: list[int] | None, days: int = 30
 ) -> dict[str, object]:
-    """部门近 N 天趋势：读日聚合快照（平均进度 / SPI / 红黄数量 / 实际工时）。
+    """近 N 天趋势：读日聚合快照（平均进度 / SPI / 红黄数量 / 实际工时）。
 
-    依赖 `t_st_project_daily`，若定时任务未执行会返回空列表，由前端提示先跑日聚合。
+    `dept_ids` 为 None 时统计全公司，供公司看板复用；否则按部门过滤。
+    依赖 `t_st_project_daily`，若定时任务未执行会返回空列表。
     """
     span = max(int(days), 1)
     date_from = (date.today() - timedelta(days=span - 1)).isoformat()
-    stmt = (
-        select(
-            StProjectDaily.stat_date,
-            func.count(StProjectDaily.id),
-            func.avg(StProjectDaily.progress),
-            func.avg(StProjectDaily.spi),
-            func.sum(case((StProjectDaily.health == "RED", 1), else_=0)),
-            func.sum(case((StProjectDaily.health == "YELLOW", 1), else_=0)),
-            func.avg(StProjectDaily.delay_days),
-            func.sum(StProjectDaily.actual_hours),
-        )
-        .where(
-            StProjectDaily.deleted == 0,
-            StProjectDaily.stat_date >= date_from,
-            StProjectDaily.dept_id.in_(dept_ids or [0]),
-        )
-        .group_by(StProjectDaily.stat_date)
-        .order_by(StProjectDaily.stat_date)
-    )
+    stmt = select(
+        StProjectDaily.stat_date,
+        func.count(StProjectDaily.id),
+        func.avg(StProjectDaily.progress),
+        func.avg(StProjectDaily.spi),
+        func.sum(case((StProjectDaily.health == "RED", 1), else_=0)),
+        func.sum(case((StProjectDaily.health == "YELLOW", 1), else_=0)),
+        func.avg(StProjectDaily.delay_days),
+        func.sum(StProjectDaily.actual_hours),
+    ).where(StProjectDaily.deleted == 0, StProjectDaily.stat_date >= date_from)
+    if dept_ids is not None:
+        stmt = stmt.where(StProjectDaily.dept_id.in_(dept_ids or [0]))
+    stmt = stmt.group_by(StProjectDaily.stat_date).order_by(StProjectDaily.stat_date)
     rows = (await session.execute(stmt)).all()
     return {
         "days": span,
@@ -278,6 +273,13 @@ async def dept_trend(
             for stat_date, count, progress, spi_value, red, yellow, delay, hours in rows
         ],
     }
+
+
+async def dept_trend(
+    session: AsyncSession, dept_ids: list[int], days: int = 30
+) -> dict[str, object]:
+    """部门近 N 天趋势：读日聚合快照（平均进度 / SPI / 红黄数量 / 实际工时）。"""
+    return await _trend_points(session, dept_ids, days)
 
 
 async def dept_member_load(
@@ -345,16 +347,85 @@ async def dept_member_load(
     }
 
 
-async def company_dashboard(session: AsyncSession) -> dict[str, object]:
-    """公司看板：全量项目汇总 + 部门维度分布。"""
+async def _dept_names(session: AsyncSession, dept_ids: list[int]) -> dict[int, str]:
+    """批量读取部门名称（部门被删除时由调用方兜底）。"""
+    if not dept_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(SysDept.id, SysDept.dept_name).where(SysDept.id.in_(dept_ids))
+        )
+    ).all()
+    return {int(dept_id): str(dept_name) for dept_id, dept_name in rows}
+
+
+def _dept_stat_out(
+    dept_id: int, dept_name: str, items: list[ProjectMetric]
+) -> dict[str, object]:
+    """部门维度对比行：项目数、健康分布、进度/工时与风险。"""
+    stats = summarize(items)
+    by_health = stats["byHealth"]
+    red_count = int(by_health.get("RED", 0)) if isinstance(by_health, dict) else 0
+    yellow_count = int(by_health.get("YELLOW", 0)) if isinstance(by_health, dict) else 0
+    return {
+        "deptId": dept_id,
+        "deptName": dept_name,
+        "projectCount": stats["projectCount"],
+        "inProgressCount": stats["inProgressCount"],
+        "delayedCount": stats["delayedCount"],
+        "riskOpen": stats["riskOpen"],
+        "issueOpen": stats["issueOpen"],
+        "changeCount": stats["changeCount"],
+        "avgProgress": stats["avgProgress"],
+        "avgSpi": stats["avgSpi"],
+        "avgCpi": stats["avgCpi"],
+        "plannedHours": stats["plannedHours"],
+        "actualHours": stats["actualHours"],
+        "avgLogFillRate": stats["avgLogFillRate"],
+        "redCount": red_count,
+        "yellowCount": yellow_count,
+    }
+
+
+async def company_dashboard(session: AsyncSession, days: int = 30) -> dict[str, object]:
+    """公司看板：全量项目汇总 + 部门对比 + 近 N 天趋势 + 延期/风险 Top。
+
+    `days` 只影响趋势区间（读日聚合快照），KPI 与表格始终为当前实时指标。
+    """
     metrics = await _metrics_of(session, None)
+    groups: dict[int, list[ProjectMetric]] = {}
     by_dept: dict[int, int] = {}
     for item in metrics:
+        groups.setdefault(item.dept_id, []).append(item)
         by_dept[item.dept_id] = by_dept.get(item.dept_id, 0) + 1
+
+    dept_names = await _dept_names(session, list(groups))
+    dept_stats = [
+        _dept_stat_out(dept_id, dept_names.get(dept_id, "未分配部门"), items)
+        for dept_id, items in groups.items()
+    ]
+    # 项目多、投入工时高的部门排前面，便于横向对比
+    dept_stats.sort(
+        key=lambda row: (int(row["projectCount"]), float(row["actualHours"])), reverse=True
+    )
+
+    delayed = sorted(
+        (item for item in metrics if item.delay_days > 0),
+        key=lambda item: (item.delay_days, item.progress),
+        reverse=True,
+    )[:10]
+    risk = sorted(
+        (item for item in metrics if item.risk_open > 0),
+        key=lambda item: (item.risk_open, item.delay_days),
+        reverse=True,
+    )[:6]
     return {
         "summary": summarize(metrics),
         "byDept": by_dept,
-        "topDelayed": [_metric_out(item) for item in top_delayed(metrics, 10)],
+        "deptStats": dept_stats,
+        "trend": await _trend_points(session, None, days),
+        "topDelayed": [_metric_out(item, dept_names.get(item.dept_id)) for item in delayed],
+        "topRisk": [_metric_out(item, dept_names.get(item.dept_id)) for item in risk],
     }
 
 
@@ -478,9 +549,9 @@ async def _metrics_of(
     return [await project_metric(session, project) for project in result.scalars().all()]
 
 
-def _metric_out(metric: ProjectMetric) -> dict[str, object]:
-    """指标出参。"""
-    return {
+def _metric_out(metric: ProjectMetric, dept_name: str | None = None) -> dict[str, object]:
+    """指标出参；公司看板额外带上部门名称，便于表格直接展示。"""
+    data: dict[str, object] = {
         "projectId": metric.project_id,
         "projectName": metric.project_name,
         "deptId": metric.dept_id,
@@ -497,3 +568,6 @@ def _metric_out(metric: ProjectMetric) -> dict[str, object]:
         "changeCount": metric.change_count,
         "logFillRate": metric.log_fill_rate,
     }
+    if dept_name:
+        data["deptName"] = dept_name
+    return data

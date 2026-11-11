@@ -314,7 +314,9 @@ export const readAllNotices = () => post<{ count: number }>('/notices/read-all')
 
 /* ------------------------------ 看板 ------------------------------ */
 
-export const companyBoard = () => get<Record<string, unknown>>('/reports/company')
+/** 公司看板；`days` 仅影响趋势区间（KPI 与表格为实时指标）。 */
+export const companyBoard = (days = 30) =>
+  get<Record<string, unknown>>('/reports/company', { days })
 
 /** 当前用户数据范围内可查看的部门（部门看板筛选）。 */
 export const reportDepts = () =>

@@ -14,6 +14,14 @@
   --pms-primary-deep: #2a5fd8;
   --pms-primary-weak: #eef3ff;
 
+  /* 状态色：健康 / 预警 / 风险，KPI、图表与标签统一取用 */
+  --pms-ok: #2f9e5f;
+  --pms-ok-weak: #eaf7f0;
+  --pms-warn: #d68a12;
+  --pms-warn-weak: #fff6e8;
+  --pms-danger: #cf3f3f;
+  --pms-danger-weak: #fdeeee;
+
   --pms-radius: 12px;
   --pms-radius-sm: 8px;
 
@@ -91,6 +99,33 @@ body,
 
 .pms-card > h3 + * {
   margin-top: 0;
+}
+
+/* 带右侧操作/说明的卡片标题行，保证各页面卡片标题层级一致 */
+.pms-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--pms-text);
+}
+
+.pms-card-head .title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pms-note {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--pms-text-3);
 }
 
 /* ============================================================
@@ -259,6 +294,11 @@ body,
   }
 
   .pms-card > h3 {
+    margin-bottom: 12px;
+    font-size: 14px;
+  }
+
+  .pms-card-head {
     margin-bottom: 12px;
     font-size: 14px;
   }

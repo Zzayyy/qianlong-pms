@@ -29,9 +29,10 @@ class AggregateIn(BaseModel):
 async def company(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("report:view"))],
+    days: Annotated[int, Query(ge=7, le=180)] = 30,
 ) -> object:
-    """全公司项目汇总、部门分布与延期 Top10。"""
-    return ok(await service.company_dashboard(session))
+    """全公司项目汇总、部门对比、近 N 天趋势与延期/风险 Top。"""
+    return ok(await service.company_dashboard(session, days))
 
 
 @router.get("/depts", summary="看板可选部门")
