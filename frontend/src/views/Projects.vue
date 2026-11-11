@@ -1,4 +1,5 @@
 <script setup lang="ts">
+defineOptions({ name: 'ProjectsPage' })
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from 'lucide-vue-next'
@@ -48,6 +49,7 @@ import {
 } from '@/api'
 import ChangeBoard from '@/components/ChangeBoard.vue'
 import { useUserStore } from '@/stores/user'
+import { useKeepAliveRefresh } from '@/utils/keepAlive'
 import {
   ASSIGNABLE_MEMBER_ROLE,
   BASELINE_TYPE,
@@ -640,10 +642,13 @@ const load = async () => {
     })
     rows.value = data.list || []
     total.value = data.total || 0
+    markLoaded()
   } finally {
     loading.value = false
   }
 }
+
+const { markLoaded } = useKeepAliveRefresh(load)
 
 const search = () => {
   page.value.pageNum = 1

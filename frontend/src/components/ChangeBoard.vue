@@ -22,6 +22,7 @@ import {
   type Page
 } from '@/api'
 import { useUserStore } from '@/stores/user'
+import { useKeepAliveRefresh } from '@/utils/keepAlive'
 
 /**
  * 变更台账组件。
@@ -198,10 +199,13 @@ const load = async () => {
     })
     rows.value = data.list || []
     total.value = data.total || 0
+    markLoaded()
   } finally {
     loading.value = false
   }
 }
+
+const { markLoaded } = useKeepAliveRefresh(load)
 
 const search = () => {
   page.value.pageNum = 1

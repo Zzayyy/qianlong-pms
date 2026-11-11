@@ -1,4 +1,5 @@
 <script setup lang="ts">
+defineOptions({ name: 'CrmPage' })
 import { computed, onMounted, onUnmounted, ref, type Component } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Building2, CircleDollarSign, Handshake, Plus, TrendingUp } from 'lucide-vue-next'
@@ -30,6 +31,7 @@ import {
   updateOpportunity
 } from '@/api'
 import { useUserStore } from '@/stores/user'
+import { useKeepAliveRefresh } from '@/utils/keepAlive'
 
 type TabKey = 'customers' | 'opportunities'
 type TagType = 'primary' | 'success' | 'info' | 'warning' | 'danger'
@@ -732,7 +734,10 @@ const switchTab = (key: TabKey) => {
 
 const refreshAll = async () => {
   await Promise.all([loadSummary(), loadCustomers(), loadOpps(), loadCustomerOptions()])
+  markLoaded()
 }
+
+const { markLoaded } = useKeepAliveRefresh(refreshAll)
 
 const onCustomerCommand = (command: string, row: any) => {
   if (command === 'edit') openCustomer(row)

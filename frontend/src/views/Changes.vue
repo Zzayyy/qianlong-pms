@@ -1,4 +1,5 @@
 <script setup lang="ts">
+defineOptions({ name: 'ChangesPage' })
 import ChangeBoard from '@/components/ChangeBoard.vue'
 </script>
 

@@ -171,6 +171,29 @@ const crumbs = computed(() => {
 const tabs = ref<TabItem[]>([])
 const tabbar = ref<HTMLElement | null>(null)
 
+/**
+ * keep-alive 白名单：只缓存台账型业务页，避免全量缓存造成陈旧数据与内存占用。
+ * 值与页面组件 `defineOptions({ name })` 保持一致。
+ */
+const KEEP_ALIVE_VIEWS: Record<string, string> = {
+  '/projects': 'ProjectsPage',
+  '/changes': 'ChangesPage',
+  '/worklogs': 'WorklogsPage',
+  '/crm': 'CrmPage'
+}
+const cachedViews = ref<string[]>([])
+
+/** 按当前标签页同步缓存白名单（关闭标签时立即释放对应缓存）。 */
+const syncCachedViews = () => {
+  cachedViews.value = Array.from(
+    new Set(
+      tabs.value
+        .map((tab) => KEEP_ALIVE_VIEWS[tab.path])
+        .filter((name): name is string => Boolean(name))
+    )
+  )
+}
+
 const iconOf = (path: string) => {
   if (path === '/403') return ShieldAlert
   return flatNav.value.find((item) => item.path === path)?.icon ?? LayoutDashboard
@@ -179,6 +202,7 @@ const iconOf = (path: string) => {
 if (store.has('report:view')) {
   tabs.value.push({ path: '/dashboard', label: '公司看板', icon: LayoutDashboard })
 }
+syncCachedViews()
 
 const scrollActiveTab = () => {
   const el = tabbar.value?.querySelector<HTMLElement>('.tab.is-active')
@@ -197,6 +221,7 @@ const addTab = () => {
       icon: iconOf(route.path)
     })
   }
+  syncCachedViews()
   nextTick(scrollActiveTab)
 }
 
@@ -207,6 +232,7 @@ const closeTab = (tab: TabItem) => {
   if (index < 0) return
   const isActive = route.path === tab.path
   tabs.value.splice(index, 1)
+  syncCachedViews()
   if (isActive) {
     const next = tabs.value[index] ?? tabs.value[index - 1]
     go(next ? next.path : '/dashboard')
@@ -579,7 +605,9 @@ const markAllNotices = async () => {
       <main class="app-main">
         <RouterView v-slot="{ Component: viewComponent }">
           <transition name="page" mode="out-in">
-            <component :is="viewComponent" :key="route.path" />
+            <keep-alive :include="cachedViews" :max="8">
+              <component :is="viewComponent" :key="route.path" />
+            </keep-alive>
           </transition>
         </RouterView>
       </main>

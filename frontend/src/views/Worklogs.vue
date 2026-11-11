@@ -1,4 +1,5 @@
 <script setup lang="ts">
+defineOptions({ name: 'WorklogsPage' })
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
@@ -25,6 +26,7 @@ import {
   worklogSummary
 } from '@/api'
 import { useUserStore } from '@/stores/user'
+import { useKeepAliveRefresh } from '@/utils/keepAlive'
 
 interface WorklogProject {
   id: string
@@ -632,6 +634,7 @@ const loadLogs = async () => {
     const data = await listWorklogs(params)
     rows.value = (data.list || []) as unknown as WorklogRow[]
     total.value = Number(data.total || 0)
+    markLoaded()
   } catch {
     /* 错误提示由请求拦截器统一弹出 */
   } finally {
@@ -1086,6 +1089,8 @@ const refreshAll = async () => {
   if (formVisible.value) await loadDaySummary()
   if (detailVisible.value && detailWorklog.value) await reloadDetail(detailWorklog.value.id)
 }
+
+const { markLoaded } = useKeepAliveRefresh(refreshAll)
 
 const exportLogs = async () => {
   if (exporting.value) return
