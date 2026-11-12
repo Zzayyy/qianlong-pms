@@ -83,6 +83,18 @@ const canCreateProject = computed(() => store.has('project:create'))
 const canApproveProject = computed(() => store.has('project:approve'))
 const canUploadDoc = computed(() => store.has('project:doc:upload'))
 const canManageDoc = computed(() => store.has('project:doc:manage'))
+const canReportProgress = computed(() => store.has('project:task:progress'))
+
+/**
+ * 任务进度上报权限：项目维护者（project:edit）可改全部；
+ * 其他角色凭 `project:task:progress` 只能改自己负责的任务（后端同样校验）。
+ */
+const canProgressTask = (row: any) => {
+  if (canEdit.value) return true
+  if (!canReportProgress.value) return false
+  const me = String(store.profile?.id || '')
+  return Boolean(me) && String(row?.ownerId || '') === me
+}
 const isNarrow = ref(false)
 const syncWidth = () => {
   isNarrow.value = window.innerWidth <= 768
@@ -1626,7 +1638,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                     :max="100"
                     :step="5"
                     controls-position="right"
-                    :disabled="!canEdit"
+                    :disabled="!canProgressTask(row)"
                     :model-value="Number(row.progress || 0)"
                     @change="(value: any) => setTaskProgress(row, Number(value || 0))"
                   />

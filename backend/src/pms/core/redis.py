@@ -125,6 +125,24 @@ async def cache_delete(key: str) -> None:
         await _degrade(exc)
 
 
+async def cache_delete_prefix(prefix: str, batch: int = 200) -> int:
+    """按前缀批量删除缓存（如角色授权变更后清理权限缓存），返回删除条数。
+
+    Redis 不可用时静默返回 0：缓存失效只影响新鲜度，不影响业务正确性。
+    """
+    client = get_redis()
+    if client is None:
+        return 0
+    removed = 0
+    try:
+        async for key in client.scan_iter(match=f"{prefix}*", count=batch):
+            await client.delete(key)
+            removed += 1
+    except Exception as exc:  # noqa: BLE001 缓存清理失败不影响主流程
+        await _degrade(exc)
+    return removed
+
+
 async def close_redis() -> None:
     """关闭连接（关机钩子调用）。"""
     await _discard_client()

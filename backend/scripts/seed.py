@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pms.core.database import dispose_engine, get_session_factory  # noqa: E402
+from pms.core.redis import close_redis  # noqa: E402
 from pms.system.seed import (  # noqa: E402
     DEFAULT_PASSWORD,
     USERS,
@@ -46,6 +47,8 @@ async def run(password: str) -> int:
         async with factory() as session:
             summary = await seed_all(session, password=password)
     finally:
+        # 权限缓存清理会用到 Redis 连接，退出前显式关闭，避免事件循环关闭时的告警
+        await close_redis()
         await dispose_engine()
     print(
         "新增：字典 {d}（项 {di}）/ 权限 {p} / 角色 {r}（授权 {rp}）/"

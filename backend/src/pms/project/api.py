@@ -17,6 +17,7 @@ from pms.core.deps import (
     get_pagination,
     get_session,
     load_permissions,
+    require_any_permission,
     require_permissions,
 )
 from pms.org.models import SysUser
@@ -536,11 +537,24 @@ async def update_task_progress(
     task_id: int,
     body: ProgressIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+    context: Annotated[
+        AuthContext,
+        Depends(require_any_permission("project:task:progress", "project:edit")),
+    ],
 ) -> object:
-    """更新任务进度并级联重算项目进度。"""
+    """更新任务进度并级联重算项目进度。
+
+    执行人凭 `project:task:progress` 上报本人负责任务的进度；
+    项目维护者（`project:edit`）可改任意任务（服务层校验负责人身份）。
+    """
     del project_id
-    task = await service.update_task_progress(session, task_id, body.progress, context.user_id)
+    task = await service.update_task_progress(
+        session,
+        task_id,
+        body.progress,
+        context.user_id,
+        privileged=context.has_permission("project:edit"),
+    )
     await session.commit()
     return ok({"id": task.id, "progress": float(task.progress)})
 

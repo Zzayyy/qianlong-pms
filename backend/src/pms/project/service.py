@@ -9,7 +9,7 @@ from typing import Final
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pms.common.exceptions import BizRuleError, ConflictError, NotFoundError
+from pms.common.exceptions import BizRuleError, ConflictError, ForbiddenError, NotFoundError
 from pms.common.snowflake import next_id
 from pms.core.context import AuthContext
 from pms.project.models import (
@@ -475,12 +475,24 @@ async def list_tasks(session: AsyncSession, project_id: int) -> list[PrjTask]:
 
 
 async def update_task_progress(
-    session: AsyncSession, task_id: int, progress: float, operator_id: int
+    session: AsyncSession,
+    task_id: int,
+    progress: float,
+    operator_id: int,
+    *,
+    privileged: bool = False,
 ) -> PrjTask:
-    """更新任务进度（0~100），并级联重算项目进度。"""
+    """更新任务进度（0~100），并级联重算项目进度。
+
+    权限口径：`privileged`（`project:edit`，项目维护者）可改任意任务；
+    否则仅任务负责人本人可上报自己的进度，既让执行人能干活，
+    又不放开任务结构/成员/阶段等项目管理能力。
+    """
     task = await session.get(PrjTask, task_id)
     if task is None or task.deleted:
         raise NotFoundError("任务不存在")
+    if not privileged and int(task.owner_id or 0) != operator_id:
+        raise ForbiddenError("仅任务负责人可更新该任务的进度")
     if not 0 <= progress <= 100:
         raise ConflictError("进度取值应在 0~100 之间")
     task.progress = progress

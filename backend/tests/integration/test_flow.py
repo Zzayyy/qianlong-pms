@@ -189,8 +189,13 @@ async def test_crm_to_project_flow() -> None:
             await session.commit()
 
             # 7. 进度：需求 100%、开发 50% → 阶段权重 1:3 → 62.5
-            await project_service.update_task_progress(session, task_a.id, 100, user.id)
-            await project_service.update_task_progress(session, task_b.id, 50, user.id)
+            # 项目维护者（PM）可改任意任务进度
+            await project_service.update_task_progress(
+                session, task_a.id, 100, user.id, privileged=True
+            )
+            await project_service.update_task_progress(
+                session, task_b.id, 50, user.id, privileged=True
+            )
             progress = await project_service.recalc_progress(session, project.id)
             await session.commit()
             assert round(progress, 2) == 62.5

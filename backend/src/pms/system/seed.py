@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pms.common.logging import get_logger
+from pms.core.redis import PERM_CACHE, cache_delete_prefix
 from pms.core.security import hash_password
 from pms.org.models import SysDept, SysPermission, SysRole, SysRolePermission, SysUser, SysUserRole
 from pms.system.config_service import ConfigService
@@ -156,6 +157,7 @@ PERMISSIONS: Final[tuple[tuple[str, str, str], ...]] = (
     ("project:create", "项目立项", "API"),
     ("project:view", "项目查看", "API"),
     ("project:edit", "项目维护", "API"),
+    ("project:task:progress", "任务进度上报", "API"),
     ("project:approve", "立项审批", "API"),
     ("project:baseline", "基线管理", "API"),
     ("project:stage:edit", "阶段与里程碑维护", "API"),
@@ -210,6 +212,7 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
             "project:create",
             "project:view",
             "project:edit",
+            "project:task:progress",
             "project:approve",
             "project:baseline",
             "project:stage:edit",
@@ -331,6 +334,7 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
         "SELF",
         (
             "project:view",
+            "project:task:progress",
             "project:doc:upload",
             "change:view",
             "worklog:create",
@@ -344,6 +348,7 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
         "SELF",
         (
             "project:view",
+            "project:task:progress",
             "project:doc:upload",
             "change:view",
             "worklog:create",
@@ -357,6 +362,7 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
         "SELF",
         (
             "project:view",
+            "project:task:progress",
             "project:doc:upload",
             "change:view",
             "change:execute",
@@ -655,6 +661,11 @@ async def seed_all(session: AsyncSession, password: str = DEFAULT_PASSWORD) -> S
 
     summary.configs += await ConfigService(session).seed_defaults()
     await session.commit()
+    # 角色授权/权限点有变化时清理权限缓存，否则最长 10 分钟内新权限不生效
+    if summary.permissions or summary.role_permissions:
+        cleared = await cache_delete_prefix(PERM_CACHE)
+        if cleared:
+            logger.info("已清理用户权限缓存 %s 条（授权变更即时生效）", cleared)
     logger.info(
         "初始化完成：字典%s项 权限%s 角色%s 部门%s 账号%s 参数%s",
         summary.dict_items,
