@@ -177,16 +177,23 @@ PERMISSIONS: Final[tuple[tuple[str, str, str], ...]] = (
 
 # ---------------- 角色 ----------------
 # (角色编码, 名称, 数据范围, 权限编码集合)
+# 说明：`org:role:view`（角色权限菜单）属系统管理范畴，只给 ADMIN / PMO；
+# 部门领导、公司领导只保留部门与人员查看，避免普通管理岗看到角色授权页。
 _ROLE_VIEW_ALL: Final[tuple[str, ...]] = (
     "org:dept:view",
     "org:user:view",
-    "org:role:view",
     "crm:customer:view",
     "crm:opp:view",
     "project:view",
     "change:view",
     "worklog:view",
     "report:view",
+)
+
+# 需要显式回收的历史授权：幂等种子只增不减，权限收紧靠这张表声明「角色不应拥有」
+ROLE_REVOKES: Final[tuple[tuple[str, str], ...]] = (
+    ("DEPT_HEAD", "org:role:view"),
+    ("EXEC", "org:role:view"),
 )
 
 ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
@@ -257,6 +264,7 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
         + (
             "org:dept:manage",
             "org:user:manage",
+            "org:role:view",
             "org:role:manage",
             "sys:config",
             "sys:dict:manage",
@@ -416,6 +424,7 @@ class SeedSummary:
     permissions: int = 0
     roles: int = 0
     role_permissions: int = 0
+    revoked: int = 0
     depts: int = 0
     users: int = 0
     user_roles: int = 0
@@ -518,6 +527,43 @@ async def _role_permissions(session: AsyncSession, role: SysRole, perm_codes: tu
     if added:
         await session.flush()
     return added
+
+
+async def _revoke_role_permission(
+    session: AsyncSession, role_code: str, perm_code: str
+) -> int:
+    """回收角色的指定权限点（软删关联），返回回收数量。
+
+    幂等种子只增不减，权限收紧必须显式声明，否则存量的越权授权永远清不掉。
+    """
+    role_id = (
+        await session.execute(
+            select(SysRole.id).where(SysRole.role_code == role_code, SysRole.deleted == 0)
+        )
+    ).scalar_one_or_none()
+    perm_id = (
+        await session.execute(
+            select(SysPermission.id).where(
+                SysPermission.perm_code == perm_code, SysPermission.deleted == 0
+            )
+        )
+    ).scalar_one_or_none()
+    if role_id is None or perm_id is None:
+        return 0
+    rows = (
+        await session.execute(
+            select(SysRolePermission).where(
+                SysRolePermission.role_id == role_id,
+                SysRolePermission.perm_id == perm_id,
+                SysRolePermission.deleted == 0,
+            )
+        )
+    ).scalars().all()
+    for row in rows:
+        row.deleted = 1
+    if rows:
+        await session.flush()
+    return len(rows)
 
 
 async def _ensure_role(
@@ -623,6 +669,10 @@ async def seed_all(session: AsyncSession, password: str = DEFAULT_PASSWORD) -> S
         summary.roles += new_role
         summary.role_permissions += new_links
 
+    # 权限收紧：回收声明中「角色不应拥有」的权限点
+    for role_code, perm_code in ROLE_REVOKES:
+        summary.revoked += await _revoke_role_permission(session, role_code, perm_code)
+
     dept_ids: dict[str, SysDept] = {}
     for dept_code, dept_name, parent_code, _dept_type in DEPTS:
         parent = dept_ids.get(parent_code) if parent_code else None
@@ -664,7 +714,7 @@ async def seed_all(session: AsyncSession, password: str = DEFAULT_PASSWORD) -> S
     summary.configs += await ConfigService(session).seed_defaults()
     await session.commit()
     # 角色授权/权限点有变化时清理权限缓存，否则最长 10 分钟内新权限不生效
-    if summary.permissions or summary.role_permissions:
+    if summary.permissions or summary.role_permissions or summary.revoked:
         cleared = await cache_delete_prefix(PERM_CACHE)
         if cleared:
             logger.info("已清理用户权限缓存 %s 条（授权变更即时生效）", cleared)

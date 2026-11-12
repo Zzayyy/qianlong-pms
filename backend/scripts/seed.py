@@ -51,18 +51,10 @@ async def run(password: str) -> int:
         await close_redis()
         await dispose_engine()
     print(
-        "新增：字典 {d}（项 {di}）/ 权限 {p} / 角色 {r}（授权 {rp}）/"
-        " 部门 {dp} / 账号 {u}（授权 {ur}）/ 参数 {c}".format(
-            d=summary.dicts,
-            di=summary.dict_items,
-            p=summary.permissions,
-            r=summary.roles,
-            rp=summary.role_permissions,
-            dp=summary.depts,
-            u=summary.users,
-            ur=summary.user_roles,
-            c=summary.configs,
-        )
+        f"新增：字典 {summary.dicts}（项 {summary.dict_items}）/ 权限 {summary.permissions} /"
+        f" 角色 {summary.roles}（授权 {summary.role_permissions}）/ 部门 {summary.depts} /"
+        f" 账号 {summary.users}（授权 {summary.user_roles}）/ 参数 {summary.configs} /"
+        f" 回收授权 {summary.revoked}"
     )
     print(f"初始密码：{password}（首次登录后请修改）")
     print_accounts()
