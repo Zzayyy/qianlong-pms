@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from 'lucide-vue-next'
-import { createDept, deleteDept, deptTree, listUsers, updateDept, type Page } from '@/api'
+import { createDept, deleteDept, deptTree, updateDept, userOptions } from '@/api'
 import { useUserStore } from '@/stores/user'
 
 const store = useUserStore()
@@ -70,8 +70,7 @@ const load = async () => {
 
 const loadUsers = async () => {
   try {
-    const data: Page<Record<string, unknown>> = await listUsers({ pageNum: 1, pageSize: 200 })
-    users.value = (data.list || []) as any[]
+    users.value = ((await userOptions()) || []) as any[]
   } catch {
     users.value = []
   }

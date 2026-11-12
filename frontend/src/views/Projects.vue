@@ -20,7 +20,7 @@ import {
   deleteRisk,
   deleteStage,
   deleteTask,
-  deptTree,
+  deptOptions,
   downloadProjectFile,
   listBaselines,
   listMembers,
@@ -29,7 +29,6 @@ import {
   listRisks,
   listStages,
   listTasks,
-  listUsers,
   milestoneStatus,
   projectAttachments,
   projectDetail,
@@ -45,7 +44,7 @@ import {
   updateTask,
   updateTaskProgress,
   uploadProjectFile,
-  type Page
+  userOptions
 } from '@/api'
 import ChangeBoard from '@/components/ChangeBoard.vue'
 import { useUserStore } from '@/stores/user'
@@ -685,10 +684,9 @@ const refreshAll = async () => {
 }
 
 const loadBase = async () => {
-  depts.value = (await deptTree()) as any[]
+  depts.value = ((await deptOptions()) || []) as any[]
   try {
-    const data: Page<Record<string, unknown>> = await listUsers({ pageNum: 1, pageSize: 200 })
-    users.value = (data.list || []) as any[]
+    users.value = ((await userOptions()) || []) as any[]
   } catch {
     users.value = []
   }

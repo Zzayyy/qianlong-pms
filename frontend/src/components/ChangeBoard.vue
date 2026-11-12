@@ -12,14 +12,13 @@ import {
   createChange,
   listChanges,
   listProjects,
-  listUsers,
   rejectChange,
   saveChangeSchedules,
   submitChange,
   updateChange,
+  userOptions,
   type ChangeOptions,
-  type ChangeSchedule,
-  type Page
+  type ChangeSchedule
 } from '@/api'
 import { useUserStore } from '@/stores/user'
 import { useKeepAliveRefresh } from '@/utils/keepAlive'
@@ -166,8 +165,7 @@ const loadOptions = async () => {
     }
   }
   try {
-    const data: Page<Record<string, unknown>> = await listUsers({ pageNum: 1, pageSize: 200 })
-    users.value = (data.list || []) as any[]
+    users.value = ((await userOptions()) || []) as any[]
   } catch {
     users.value = []
   }

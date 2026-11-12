@@ -249,6 +249,94 @@ const userSubtitle = computed(() => {
   return parts.length ? parts.join(' · ') : '系统用户'
 })
 
+/* ---------------- 标签右键菜单 ---------------- */
+type TabCtxAction = 'close' | 'others' | 'left' | 'right' | 'all'
+
+const ctxMenu = reactive({ visible: false, x: 0, y: 0, tab: null as TabItem | null })
+const ctxMenuEl = ref<HTMLElement | null>(null)
+const ctxIndex = computed(() =>
+  ctxMenu.tab ? tabs.value.findIndex((item) => item.path === ctxMenu.tab?.path) : -1
+)
+const ctxSingle = computed(() => tabs.value.length <= 1)
+const ctxHasLeft = computed(() => ctxIndex.value > 0)
+const ctxHasRight = computed(
+  () => ctxIndex.value >= 0 && ctxIndex.value < tabs.value.length - 1
+)
+
+const closeContextMenu = () => {
+  ctxMenu.visible = false
+}
+
+/** 在鼠标位置打开右键菜单，并夹紧到视口内避免溢出。 */
+const openContextMenu = async (event: MouseEvent, tab: TabItem) => {
+  ctxMenu.tab = tab
+  ctxMenu.x = event.clientX
+  ctxMenu.y = event.clientY
+  ctxMenu.visible = true
+  await nextTick()
+  const margin = 8
+  const width = ctxMenuEl.value?.offsetWidth ?? 156
+  const height = ctxMenuEl.value?.offsetHeight ?? 190
+  ctxMenu.x = Math.max(margin, Math.min(event.clientX, window.innerWidth - width - margin))
+  ctxMenu.y = Math.max(margin, Math.min(event.clientY, window.innerHeight - height - margin))
+}
+
+/** 关闭其他标签，只保留右键选中的这个（它不是当前页时跳过去）。 */
+const closeOtherTabs = (tab: TabItem) => {
+  tabs.value = [tab]
+  syncCachedViews()
+  if (route.path !== tab.path) go(tab.path)
+}
+
+/** 关闭某一侧（左 / 右）的标签；当前页被关掉时跳到保留的标签。 */
+const closeSideTabs = (tab: TabItem, side: 'left' | 'right') => {
+  const index = tabs.value.findIndex((item) => item.path === tab.path)
+  if (index < 0) return
+  const removed = side === 'left' ? tabs.value.slice(0, index) : tabs.value.slice(index + 1)
+  if (!removed.length) return
+  tabs.value = side === 'left' ? tabs.value.slice(index) : tabs.value.slice(0, index + 1)
+  syncCachedViews()
+  if (removed.some((item) => item.path === route.path)) go(tab.path)
+}
+
+/** 关闭全部标签并回到首页。 */
+const closeAllTabs = () => {
+  if (!tabs.value.length) return
+  tabs.value = []
+  syncCachedViews()
+  const target = homePath.value
+  if (route.path === target) addTab()
+  else go(target)
+}
+
+const runCtxAction = (action: TabCtxAction) => {
+  const tab = ctxMenu.tab
+  ctxMenu.visible = false
+  if (!tab) return
+  if (action === 'close') closeTab(tab)
+  else if (action === 'others') closeOtherTabs(tab)
+  else if (action === 'left') closeSideTabs(tab, 'left')
+  else if (action === 'right') closeSideTabs(tab, 'right')
+  else closeAllTabs()
+}
+
+const onCtxKeydown = (event: KeyboardEvent) => {
+  if (event.key === 'Escape') closeContextMenu()
+}
+
+onMounted(() => {
+  document.addEventListener('click', closeContextMenu)
+  window.addEventListener('resize', closeContextMenu)
+  window.addEventListener('scroll', closeContextMenu, true)
+  window.addEventListener('keydown', onCtxKeydown)
+})
+onUnmounted(() => {
+  document.removeEventListener('click', closeContextMenu)
+  window.removeEventListener('resize', closeContextMenu)
+  window.removeEventListener('scroll', closeContextMenu, true)
+  window.removeEventListener('keydown', onCtxKeydown)
+})
+
 const pwdVisible = ref(false)
 const pwdSaving = ref(false)
 const pwdForm = reactive({ oldPassword: '', newPassword: '', confirmPassword: '' })
@@ -592,6 +680,7 @@ const markAllNotices = async () => {
             tabindex="0"
             @click="go(tab.path)"
             @keydown.enter.prevent="go(tab.path)"
+            @contextmenu.prevent="openContextMenu($event, tab)"
           >
             <component :is="tab.icon" class="tab-icon" :size="14" :stroke-width="1.75" />
             <span class="tab-label">{{ tab.label }}</span>
@@ -601,6 +690,64 @@ const markAllNotices = async () => {
           </div>
         </div>
       </div>
+
+      <Teleport to="body">
+        <div
+          v-if="ctxMenu.visible"
+          ref="ctxMenuEl"
+          class="tab-ctx"
+          role="menu"
+          :style="{ left: `${ctxMenu.x}px`, top: `${ctxMenu.y}px` }"
+          @contextmenu.prevent
+        >
+          <button
+            type="button"
+            class="tab-ctx-item"
+            role="menuitem"
+            :disabled="ctxSingle"
+            @click="runCtxAction('close')"
+          >
+            关闭当前
+          </button>
+          <button
+            type="button"
+            class="tab-ctx-item"
+            role="menuitem"
+            :disabled="ctxSingle"
+            @click="runCtxAction('others')"
+          >
+            关闭其他
+          </button>
+          <div class="tab-ctx-sep" aria-hidden="true"></div>
+          <button
+            type="button"
+            class="tab-ctx-item"
+            role="menuitem"
+            :disabled="!ctxHasLeft"
+            @click="runCtxAction('left')"
+          >
+            关闭左侧
+          </button>
+          <button
+            type="button"
+            class="tab-ctx-item"
+            role="menuitem"
+            :disabled="!ctxHasRight"
+            @click="runCtxAction('right')"
+          >
+            关闭右侧
+          </button>
+          <div class="tab-ctx-sep" aria-hidden="true"></div>
+          <button
+            type="button"
+            class="tab-ctx-item is-danger"
+            role="menuitem"
+            @click="runCtxAction('all')"
+          >
+            关闭全部
+          </button>
+        </div>
+      </Teleport>
 
       <main class="app-main">
         <RouterView v-slot="{ Component: viewComponent }">
@@ -1255,6 +1402,59 @@ const markAllNotices = async () => {
 .tab-close:hover {
   opacity: 1;
   background: rgba(22, 35, 61, 0.08);
+}
+
+/* 标签右键菜单（挂载在 body 下） */
+.tab-ctx {
+  position: fixed;
+  z-index: 3000;
+  min-width: 148px;
+  padding: 6px;
+  border: 1px solid var(--pms-line);
+  border-radius: 10px;
+  background: var(--pms-surface);
+  box-shadow: 0 12px 32px -12px rgba(16, 35, 70, 0.22);
+  user-select: none;
+}
+
+.tab-ctx-item {
+  width: 100%;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--pms-text-2);
+  font-family: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.tab-ctx-item:hover:not(:disabled) {
+  background: #f4f7fd;
+  color: var(--pms-primary-deep);
+}
+
+.tab-ctx-item:disabled {
+  color: #bcc4d2;
+  cursor: not-allowed;
+}
+
+.tab-ctx-item.is-danger:hover:not(:disabled) {
+  background: #fff1ec;
+  color: var(--el-color-danger);
+}
+
+.tab-ctx-sep {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--pms-line-soft);
 }
 
 /* ---------------- 内容区 ---------------- */

@@ -280,6 +280,24 @@ async def list_users(
     return list(result.scalars().all())
 
 
+async def list_user_options(session: AsyncSession, limit: int = 1000) -> list[SysUser]:
+    """人员下拉选项：仅在职账号，按部门与姓名排序。
+
+    说明：仅供立项/成员/负责人/变更排期等表单「选人」使用，调用方只取
+    `id / username / real_name / dept_id`，不含手机号、邮箱等人员管理信息；
+    人员管理列表仍走 `list_users`（受数据范围与 `org:user:view` 约束）。
+    这里不做数据范围过滤：跨部门协作选人是正常需求，且只暴露姓名与账号。
+    """
+    stmt = (
+        select(SysUser)
+        .where(SysUser.deleted == 0, SysUser.status == "ENABLED")
+        .order_by(SysUser.dept_id, SysUser.real_name, SysUser.id)
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 async def list_user_role_names(
     session: AsyncSession, user_ids: list[int]
 ) -> dict[int, list[str]]:

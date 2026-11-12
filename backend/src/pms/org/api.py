@@ -318,6 +318,26 @@ async def dept_tree(
     )
 
 
+@router.get("/depts/options", summary="部门选项")
+async def dept_options(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(get_current_user)],
+) -> object:
+    """部门下拉选项：立项选部门、项目筛选等表单共用。
+
+    与 `/depts/tree` 的区别：只返回 `id / parentId / deptName`，不含负责人、
+    在岗人数、状态等组织管理信息，因此只要求登录、不要求 `org:dept:view`
+    （该权限对应「部门架构」页及其编辑能力）。
+    """
+    depts: list[SysDept] = await service.list_dept_tree(session)
+    return ok(
+        [
+            {"id": dept.id, "parentId": dept.parent_id, "deptName": dept.dept_name}
+            for dept in depts
+        ]
+    )
+
+
 @router.post("/depts", summary="新增部门")
 async def dept_create(
     body: DeptCreateIn,
@@ -412,6 +432,32 @@ async def user_list(
         for user in users
     ]
     return paged(items, total, pagination.page_num, pagination.page_size)
+
+
+@router.get("/users/options", summary="人员选项")
+async def user_options(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(get_current_user)],
+) -> object:
+    """人员下拉选项：立项、项目成员、任务/里程碑负责人、变更排期等表单共用。
+
+    与 `/users` 的区别：只返回 `id / username / realName / deptId` 这类协作必需的
+    标识信息，**不含**手机号、邮箱、锁定状态、角色等人员管理字段，因此只要求登录、
+    不要求 `org:user:view`（该权限会同时解锁「人员管理」页，不应下发给所有角色）。
+    人员管理页仍使用 `/users`。
+    """
+    users: list[SysUser] = await service.list_user_options(session)
+    return ok(
+        [
+            {
+                "id": user.id,
+                "username": user.username,
+                "realName": user.real_name,
+                "deptId": user.dept_id,
+            }
+            for user in users
+        ]
+    )
 
 
 @router.post("/users", summary="创建用户")

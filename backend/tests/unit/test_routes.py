@@ -21,6 +21,9 @@ GUARD_CASES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/v1/audit/operate-logs", "list_operate_logs"),
     ("GET", "/api/v1/audit/login-logs", "list_login_logs"),
     ("POST", "/api/v1/audit/archive", "archive_logs"),
+    ("GET", "/api/v1/users/options", "user_options"),
+    ("GET", "/api/v1/depts/tree", "dept_tree"),
+    ("GET", "/api/v1/depts/options", "dept_options"),
 )
 
 

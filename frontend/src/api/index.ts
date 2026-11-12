@@ -435,6 +435,15 @@ export const deleteOppFollow = (id: string) => del<{ id: string }>(`/crm/follows
 
 export const deptTree = () => get<Record<string, unknown>[]>('/depts/tree')
 
+/** 部门选择项（只含标识信息，登录即可；选部门下拉一律用它，不占用 org:dept:view）。 */
+export interface DeptOption {
+  id: string
+  parentId: string
+  deptName: string
+}
+
+export const deptOptions = () => get<DeptOption[]>('/depts/options')
+
 export const createDept = (data: Record<string, unknown>) =>
   post<{ id: string; deptCode: string }>('/depts', data)
 
@@ -445,6 +454,16 @@ export const deleteDept = (id: string) => del<null>(`/depts/${id}`)
 
 export const listUsers = (params: Record<string, unknown>) =>
   get<Page<Record<string, unknown>>>('/users', params)
+
+/** 人员选择项（只含标识信息，登录即可；选人下拉一律用它，不占用 org:user:view）。 */
+export interface UserOption {
+  id: string
+  username: string
+  realName: string
+  deptId: string
+}
+
+export const userOptions = () => get<UserOption[]>('/users/options')
 
 export const createUser = (data: Record<string, unknown>) => post<{ id: string }>('/users', data)
 
