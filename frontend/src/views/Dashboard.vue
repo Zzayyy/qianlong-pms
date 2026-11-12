@@ -736,20 +736,24 @@ const exportBoard = () => {
         </p>
       </div>
       <div class="head-ops">
-        <div class="seg" role="group" aria-label="趋势时间范围">
-          <button
-            v-for="opt in rangeOptions"
-            :key="opt.value"
-            type="button"
-            :class="{ 'is-active': days === opt.value }"
-            :aria-pressed="days === opt.value"
-            @click="setRange(opt.value)"
-          >
-            {{ opt.label }}
-          </button>
+        <div class="ops-main">
+          <div class="seg" role="group" aria-label="趋势时间范围">
+            <button
+              v-for="opt in rangeOptions"
+              :key="opt.value"
+              type="button"
+              :class="{ 'is-active': days === opt.value }"
+              :aria-pressed="days === opt.value"
+              @click="setRange(opt.value)"
+            >
+              {{ opt.label }}
+            </button>
+          </div>
         </div>
-        <el-button :icon="RefreshCw" :loading="loading" @click="load">刷新</el-button>
-        <el-button type="primary" :icon="Download" @click="exportBoard">导出</el-button>
+        <div class="ops-actions">
+          <el-button :icon="RefreshCw" :loading="loading" @click="load">刷新</el-button>
+          <el-button type="primary" :icon="Download" @click="exportBoard">导出</el-button>
+        </div>
       </div>
     </section>
 
@@ -1141,9 +1145,10 @@ const exportBoard = () => {
 /* ------------------------------ 页头 ------------------------------ */
 .board-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  justify-content: space-between;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 12px 16px;
 }
 
 .head-copy {
@@ -1173,11 +1178,27 @@ const exportBoard = () => {
   color: var(--pms-text-3);
 }
 
+/* 操作区：主控（时间范围）靠左、动作（刷新/导出）靠右，窄屏铺满整行 */
 .head-ops {
-  flex: none;
+  flex: 0 1 auto;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+  gap: 10px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.ops-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ops-actions {
+  display: flex;
+  align-items: center;
   gap: 8px;
   margin-left: auto;
 }
@@ -1955,11 +1976,15 @@ const exportBoard = () => {
     margin-left: 0;
   }
 
-  .head-ops .seg {
+  .ops-main {
     flex: 1 1 auto;
   }
 
-  .head-ops .seg button {
+  .ops-main .seg {
+    flex: 1 1 auto;
+  }
+
+  .ops-main .seg button {
     flex: 1;
   }
 }

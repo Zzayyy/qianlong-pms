@@ -866,6 +866,7 @@ def _project_filters(
     dept_id: int = 0,
     pm_id: int = 0,
     health: str = "",
+    member_id: int = 0,
 ) -> list[object]:
     """项目列表查询条件（列表与计数共用）。"""
     clauses: list[object] = []
@@ -878,6 +879,12 @@ def _project_filters(
         clauses.append(PrjProject.pm_id == pm_id)
     if health:
         clauses.append(PrjProject.health == health)
+    if member_id:
+        # 「我参与」：负责人本人 + 项目组成员（负责人变更后也会入组，这里兜住历史数据）
+        joined = select(PrjMember.project_id).where(
+            PrjMember.user_id == member_id, PrjMember.deleted == 0
+        )
+        clauses.append((PrjProject.pm_id == member_id) | PrjProject.id.in_(joined))
     if status:
         # 支持逗号分组，便于前端用一段式页签表达「进行中 = IN_PROGRESS+SUSPENDED」
         values = [item.strip() for item in status.split(",") if item.strip()]
@@ -896,11 +903,14 @@ async def count_projects(
     dept_id: int = 0,
     pm_id: int = 0,
     health: str = "",
+    member_id: int = 0,
 ) -> int:
-    """项目总数。"""
+    """项目总数（`member_id` 用于「我参与」视角）。"""
     stmt = select(func.count(PrjProject.id)).where(
         PrjProject.deleted == 0,
-        *_project_filters(keyword, status, dept_id, pm_id, health),
+        *_project_filters(
+            keyword, status, dept_id, pm_id, health, member_id=member_id
+        ),
     )
     result = await session.execute(stmt)
     return int(result.scalar_one())
@@ -916,11 +926,14 @@ async def list_projects(
     dept_id: int = 0,
     pm_id: int = 0,
     health: str = "",
+    member_id: int = 0,
 ) -> list[PrjProject]:
     """项目分页列表（可见性过滤在 API 层用 `project_visible` 完成）。"""
     stmt = select(PrjProject).where(
         PrjProject.deleted == 0,
-        *_project_filters(keyword, status, dept_id, pm_id, health),
+        *_project_filters(
+            keyword, status, dept_id, pm_id, health, member_id=member_id
+        ),
     )
     stmt = stmt.order_by(PrjProject.id.desc()).offset(offset).limit(limit)
     result = await session.execute(stmt)

@@ -516,17 +516,21 @@ onMounted(async () => {
         <p>按部门查看项目健康度、进度、成本与日志填写情况，点击项目可下钻阶段与里程碑。</p>
       </div>
       <div class="head-ops">
-        <el-tree-select
-          v-model="deptId"
-          class="dept-select"
-          :data="deptOptions"
-          default-expand-all
-          filterable
-          placeholder="选择部门"
-          @change="loadBoard"
-        />
-        <el-checkbox v-model="includeSub" size="small" @change="loadBoard">含下级部门</el-checkbox>
-        <el-button :loading="loading" @click="loadBoard">刷新</el-button>
+        <div class="ops-main">
+          <el-tree-select
+            v-model="deptId"
+            class="dept-select"
+            :data="deptOptions"
+            default-expand-all
+            filterable
+            placeholder="选择部门"
+            @change="loadBoard"
+          />
+        </div>
+        <div class="ops-actions">
+          <el-checkbox v-model="includeSub" size="small" @change="loadBoard">含下级部门</el-checkbox>
+          <el-button :loading="loading" @click="loadBoard">刷新</el-button>
+        </div>
       </div>
     </div>
 
@@ -889,9 +893,10 @@ onMounted(async () => {
 <style scoped>
 .board-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  justify-content: space-between;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 12px 16px;
 }
 
 .head-copy {
@@ -916,8 +921,25 @@ onMounted(async () => {
   color: var(--pms-text-3);
 }
 
+/* 操作区：主控（部门选择）靠左、动作（含下级/刷新）靠右，窄屏铺满整行 */
 .head-ops {
-  flex: none;
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.ops-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ops-actions {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1425,6 +1447,10 @@ onMounted(async () => {
   .head-ops {
     width: 100%;
     margin-left: 0;
+  }
+
+  .ops-main {
+    flex: 1 1 auto;
   }
 
   .dept-select {

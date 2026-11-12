@@ -207,13 +207,25 @@ async def list_projects(
     deptId: Annotated[int | None, Query()] = None,
     pmId: Annotated[int | None, Query()] = None,
     health: Annotated[str, Query()] = "",
+    scope: Annotated[str, Query(pattern="^(all|pm|member)$")] = "all",
 ) -> object:
     """分页查询项目，**逐条按四维权限过滤**（维度 ③）。
 
     `status` 支持逗号分组；`deptId` / `pmId` / `health` 为可选的精确筛选。
+    `scope` 提供「我的项目」视角：`all` 全部可见（默认）、`pm` 我负责、
+    `member` 我参与（负责人 + 项目组成员）；可见性仍受四维权限约束。
     """
+    current_user = context.user_id
+    effective_pm = pmId or (current_user if scope == "pm" else 0)
+    member_id = current_user if scope == "member" else 0
     total = await service.count_projects(
-        session, keyword, status, dept_id=deptId or 0, pm_id=pmId or 0, health=health
+        session,
+        keyword,
+        status,
+        dept_id=deptId or 0,
+        pm_id=effective_pm or 0,
+        health=health,
+        member_id=member_id,
     )
     items = await service.list_projects(
         session,
@@ -222,8 +234,9 @@ async def list_projects(
         keyword,
         status,
         dept_id=deptId or 0,
-        pm_id=pmId or 0,
+        pm_id=effective_pm or 0,
         health=health,
+        member_id=member_id,
     )
     visible_items = [item for item in items if await _can_view(session, context, item)]
     names = await _user_names(session, {item.pm_id for item in visible_items})

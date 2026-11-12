@@ -75,6 +75,18 @@ const pmFilter = ref('')
 const healthFilter = ref('')
 const loading = ref(false)
 
+/**
+ * 项目范围视角：全部 / 我负责 / 我参与。
+ * 只影响列表筛选，可见性仍由后端四维权限（成员、本部门、公开项目）决定。
+ */
+type ProjectScope = 'all' | 'pm' | 'member'
+const SCOPE_OPTIONS: { key: ProjectScope; label: string }[] = [
+  { key: 'all', label: '全部' },
+  { key: 'pm', label: '我负责' },
+  { key: 'member', label: '我参与' }
+]
+const scopeFilter = ref<ProjectScope>('all')
+
 /* 组织基础数据：部门与人员（用于下拉选择） */
 const depts = ref<any[]>([])
 const users = ref<any[]>([])
@@ -649,7 +661,8 @@ const load = async () => {
       status: activeStatus.value || undefined,
       deptId: deptFilter.value || undefined,
       pmId: pmFilter.value || undefined,
-      health: healthFilter.value || undefined
+      health: healthFilter.value || undefined,
+      scope: scopeFilter.value === 'all' ? undefined : scopeFilter.value
     })
     rows.value = data.list || []
     total.value = data.total || 0
@@ -672,11 +685,18 @@ const switchTab = (key: string) => {
   search()
 }
 
+const switchScope = (key: ProjectScope) => {
+  if (scopeFilter.value === key) return
+  scopeFilter.value = key
+  search()
+}
+
 const resetFilters = () => {
   keyword.value = ''
   deptFilter.value = ''
   pmFilter.value = ''
   healthFilter.value = ''
+  scopeFilter.value = 'all'
   tab.value = 'ALL'
   search()
 }
@@ -1201,6 +1221,18 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       </div>
 
       <div class="filter-row">
+        <div class="seg seg-scope" role="group" aria-label="项目范围">
+          <button
+            v-for="item in SCOPE_OPTIONS"
+            :key="item.key"
+            type="button"
+            :class="{ 'is-active': scopeFilter === item.key }"
+            :aria-pressed="scopeFilter === item.key"
+            @click="switchScope(item.key)"
+          >
+            {{ item.label }}
+          </button>
+        </div>
         <el-input
           v-model="keyword"
           class="f-keyword"
@@ -2395,6 +2427,18 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .filter-row :deep(.f-keyword) {
   flex: 1 1 240px;
   min-width: 180px;
+}
+
+/* 「全部 / 我负责 / 我参与」范围胶囊：固定在筛选行最前，不参与伸缩 */
+.seg-scope {
+  flex: none;
+  white-space: nowrap;
+}
+
+.seg-scope button {
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12.5px;
 }
 
 .filter-row :deep(.f-dept) {
