@@ -178,6 +178,8 @@ export interface ChangeOptions {
   changeTypes: string[]
   dimensions: string[]
   statuses: string[]
+  /** 可发起变更的项目状态（R-CHG-02，后端下发，避免前端硬编码漂移）。 */
+  projectStatuses: string[]
 }
 
 export const listChanges = (params: Record<string, unknown>) =>

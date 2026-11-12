@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
-import { Plus } from 'lucide-vue-next'
+import { Plus, TriangleAlert, Undo2 } from 'lucide-vue-next'
 import {
   approveChange,
   assessChange,
@@ -57,6 +57,12 @@ const projects = ref<any[]>([])
 const users = ref<any[]>([])
 const scheduleRoles = ref<string[]>(['开发', '测试'])
 
+/** 可发起变更的项目状态（后端下发 R-CHG-02 口径，前端只用于过滤下拉）。 */
+const projectStatuses = ref<string[]>(['APPROVED', 'IN_PROGRESS', 'SUSPENDED'])
+const changeableProjects = computed(() =>
+  projects.value.filter((item) => projectStatuses.value.includes(String(item.status || '')))
+)
+
 const filters = ref({
   keyword: '',
   projectId: '',
@@ -108,6 +114,12 @@ const nodeLabels: Record<string, string> = {
   PMO: 'PMO',
   EXEC: '公司领导'
 }
+/** 可发起变更的项目状态显示名（新建变更下拉里标注，避免选到草稿项目）。 */
+const projectStatusLabels: Record<string, string> = {
+  APPROVED: '已立项',
+  IN_PROGRESS: '进行中',
+  SUSPENDED: '已挂起'
+}
 const dimensionLabels: Record<string, string> = {
   SCOPE: '范围',
   SCHEDULE: '工期',
@@ -153,6 +165,7 @@ const loadOptions = async () => {
   try {
     const data: ChangeOptions = await changeOptions()
     scheduleRoles.value = data.scheduleRoles?.length ? data.scheduleRoles : scheduleRoles.value
+    if (data.projectStatuses?.length) projectStatuses.value = data.projectStatuses
   } catch {
     /* 选项失败不阻断主流程，保留默认角色 */
   }
@@ -264,9 +277,18 @@ const createForm = ref<any>({
 })
 const createDrafts = ref<any[]>([])
 
+const creating = ref(false)
+
 const openCreate = () => {
+  // 从项目详情/筛选带入的项目若不可变更，直接不带入，免去填完再报冲突
+  const preset = String(props.projectId || filters.value.projectId || '')
+  const usable =
+    !preset ||
+    changeableProjects.value.some((item) => String(item.id) === preset) ||
+    // 项目列表尚未加载完成时不拦截，交给后端校验
+    !projects.value.length
   createForm.value = {
-    projectId: props.projectId || filters.value.projectId || '',
+    projectId: usable ? preset : '',
     changeType: 'SCHEDULE',
     title: '',
     reason: '',
@@ -274,11 +296,16 @@ const openCreate = () => {
     expectResult: '',
     isEmergency: false
   }
+  if (preset && !usable) {
+    ElMessage.warning('所选项目当前状态不可发起变更（需已立项 / 进行中 / 已挂起）')
+  }
   createDrafts.value = createForm.value.changeType === 'SCHEDULE' ? [blankDraft()] : []
   createVisible.value = true
 }
 
-const doCreate = async () => {
+/** 保存草稿；`andSubmit` 为 true 时保存后立即提交，省掉「保存 → 打开详情 → 提交」两步。 */
+const doCreate = async (andSubmit = false) => {
+  if (creating.value) return
   if (!createForm.value.projectId) {
     ElMessage.warning('请选择所属项目')
     return
@@ -289,11 +316,23 @@ const doCreate = async () => {
   }
   const schedules = collectSchedules(createDrafts.value)
   if (schedules === null) return
-  await createChange({ ...createForm.value, schedules })
-  createVisible.value = false
-  ElMessage.success('变更申请已创建，可继续提交与评估')
-  page.value.pageNum = 1
-  await load()
+  creating.value = true
+  try {
+    const result = await createChange({ ...createForm.value, schedules })
+    if (andSubmit) {
+      await submitChange(result.id)
+      ElMessage.success('变更申请已提交，等待六维评估')
+    } else {
+      ElMessage.success('变更申请已保存为草稿，可继续提交与评估')
+    }
+    createVisible.value = false
+    page.value.pageNum = 1
+    await load()
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
+  } finally {
+    creating.value = false
+  }
 }
 
 /* ------------------------------ 详情 ------------------------------ */
@@ -438,6 +477,15 @@ const doReject = async () => {
     ElMessage.warning('请填写驳回意见')
     return
   }
+  try {
+    await ElMessageBox.confirm(
+      '驳回会直接终结本次变更（状态为「已驳回」），需要重新发起。确认驳回？',
+      '驳回变更',
+      { confirmButtonText: '驳回', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
   await rejectChange(String(request.value.id), opinion.value)
   ElMessage.success('已驳回')
   await refreshDetail()
@@ -447,6 +495,15 @@ const doReject = async () => {
 const doMore = async () => {
   if (!opinion.value.trim()) {
     ElMessage.warning('请填写需要补充的评估内容')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      '退回补充会回到「草稿」，项目经理补充材料后可重新提交并再次评估。确认退回？',
+      '退回补充评估',
+      { confirmButtonText: '退回', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
     return
   }
   await changeAction(String(request.value.id), 'more', { opinion: opinion.value })
@@ -463,6 +520,15 @@ const doAction = async (action: string, label: string) => {
 }
 
 const doWithdraw = async () => {
+  try {
+    await ElMessageBox.confirm(
+      '撤回后本次变更申请终止（状态为「已撤回」），需重新发起。确认撤回？',
+      '撤回变更',
+      { confirmButtonText: '撤回', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
   await changeAction(String(request.value.id), 'withdraw')
   ElMessage.success('已撤回')
   await refreshDetail()
@@ -470,6 +536,15 @@ const doWithdraw = async () => {
 }
 
 const doEmergency = async () => {
+  try {
+    await ElMessageBox.confirm(
+      '标记紧急变更后需按系统期限补办审批，逾期会进入超期提醒。确认标记？',
+      '标记紧急变更',
+      { confirmButtonText: '标记', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
   await changeAction(String(request.value.id), 'emergency')
   ElMessage.success('已标记紧急变更，请在期限内补办审批')
   await refreshDetail()
@@ -489,6 +564,47 @@ const pendingText = computed(() => {
 })
 
 const closed = computed(() => ['CLOSED', 'REJECTED', 'WITHDRAWN'].includes(status.value))
+
+/* 三个「终止/回退类」动作的职责区分（对应后端校验）：
+ * - 撤回：发起人 / 项目经理在流程任意进行中状态终止申请（WITHDRAWN，终态）
+ * - 退回补充：当前节点审批人要求补充评估，ASSESSED → DRAFT，可改完重新提交
+ * - 驳回：当前节点审批人否决，直接终态（REJECTED），只能重新发起
+ */
+const meId = computed(() => String(store.profile?.id || ''))
+
+const canWithdraw = computed(() => {
+  if (!canCreate.value || closed.value) return false
+  if (!['DRAFT', 'SUBMITTED', 'ASSESSED', 'APPROVED', 'EXECUTING'].includes(status.value)) {
+    return false
+  }
+  if (canExecute.value) return true
+  return (
+    meId.value === String(request.value.submitterId || '') ||
+    meId.value === String(request.value.pmId || '')
+  )
+})
+
+/** 当前审批节点是否轮到我（会签节点任一即可）；`change:approve` 角色（PMO/领导）可代审。 */
+const canApproveNow = computed(
+  () =>
+    (currentPending.value || []).some(
+      (item: any) => String(item.approverId || '') === meId.value
+    ) || store.has('change:approve')
+)
+
+const waitApprove = computed(
+  () => ['SUBMITTED', 'ASSESSED'].includes(status.value) && !canApproveNow.value
+)
+
+const canMarkEmergency = computed(
+  () => !closed.value && canExecute.value && !request.value.isEmergency
+)
+
+const emergencyText = computed(() => {
+  if (!request.value.isEmergency) return ''
+  const due = String(request.value.emergencyDue || '')
+  return due ? `已标记紧急 · 补审批期限 ${due}` : '已标记紧急'
+})
 
 /* ------------------------------ 入口与路由参数 ------------------------------ */
 /** 内嵌时不提供新建入口，统一跳回变更管理（避免同一功能两个创建入口）。 */
@@ -736,19 +852,30 @@ watch(
       :close-on-click-modal="false"
     >
       <div class="dialog-body">
-        <p class="form-hint">保存后为草稿：补齐周期排期 → 提交 → 六维评估自动定级 → 项目总监会签 → PMO / 公司领导审批。</p>
+        <p class="form-hint">
+          可选项目仅限「已立项 / 进行中 / 已挂起」；保存草稿可稍后补排期再提交，「保存并提交」直接进入
+          六维评估 → 项目总监会签 → PMO / 公司领导审批。
+        </p>
         <div class="form-grid">
           <div class="field">
             <label>所属项目 <em>*</em></label>
-            <el-select v-model="createForm.projectId" filterable :disabled="Boolean(projectId)" placeholder="选择项目">
+            <el-select
+              v-model="createForm.projectId"
+              filterable
+              :disabled="Boolean(projectId) || !changeableProjects.length"
+              placeholder="选择项目"
+            >
               <el-option
-                v-for="item in projects"
+                v-for="item in changeableProjects"
                 :key="item.id"
-                :label="`${item.projectName}（${item.projectCode}）`"
+                :label="`${item.projectName}（${projectStatusLabels[String(item.status || '')] || item.status}）`"
                 :value="item.id"
               />
               <el-option v-if="projectId" :key="projectId" :label="projectName || projectId" :value="projectId" />
             </el-select>
+            <p v-if="!changeableProjects.length" class="form-hint is-warn">
+              暂无可发起变更的项目：草稿、审批中、已交付/已关闭/已终止的项目均不可发起。
+            </p>
           </div>
           <div class="field">
             <label>变更类型 <em>*</em></label>
@@ -832,7 +959,10 @@ watch(
         <div class="drawer-footer">
           <span class="footer-spacer"></span>
           <el-button @click="createVisible = false">取消</el-button>
-          <el-button type="primary" @click="doCreate">保存</el-button>
+          <el-button :loading="creating" @click="doCreate(false)">保存草稿</el-button>
+          <el-button type="primary" :loading="creating" @click="doCreate(true)">
+            保存并提交
+          </el-button>
         </div>
       </template>
     </el-dialog>
@@ -1143,26 +1273,88 @@ watch(
       </div>
       <template #footer>
         <div class="drawer-footer">
-          <el-button v-if="!closed && canExecute" type="warning" link @click="doEmergency">标记紧急</el-button>
-          <el-button v-if="!closed && canCreate" link @click="doWithdraw">撤回</el-button>
-          <span class="footer-spacer"></span>
-          <el-button v-if="status === 'DRAFT' && canCreate" type="primary" @click="doSubmit">提交变更</el-button>
-          <el-button v-if="status === 'SUBMITTED' && canCreate" type="primary" @click="doAssess">评估定级</el-button>
-          <el-button v-if="['SUBMITTED', 'ASSESSED'].includes(status)" @click="doMore">退回补充</el-button>
-          <el-button v-if="['SUBMITTED', 'ASSESSED'].includes(status)" type="danger" plain @click="doReject">驳回</el-button>
-          <el-button v-if="status === 'ASSESSED'" type="success" @click="doApprove">审批通过</el-button>
-          <el-button v-if="status === 'APPROVED' && canExecute" type="primary" @click="doAction('execute', '开始执行')">
-            开始执行
-          </el-button>
-          <el-button v-if="status === 'EXECUTING' && canExecute" type="primary" @click="doAction('verify', '提交验证')">
-            提交验证
-          </el-button>
-          <el-button v-if="status === 'VERIFIED' && canExecute" @click="doAction('verify-fail', '验证不通过')">
-            验证不通过
-          </el-button>
-          <el-button v-if="status === 'VERIFIED' && canExecute" type="success" @click="doAction('close', '关闭')">
-            关闭变更
-          </el-button>
+          <!-- 左：申请方动作（紧急标记 / 撤回），与审批方动作分区，避免误以为重复 -->
+          <div class="footer-left">
+            <el-tag v-if="request.isEmergency" type="danger" effect="plain" size="small">
+              {{ emergencyText }}
+            </el-tag>
+            <el-button v-else-if="canMarkEmergency" :icon="TriangleAlert" @click="doEmergency">
+              标记紧急
+            </el-button>
+            <el-button
+              v-if="canWithdraw"
+              :icon="Undo2"
+              title="撤回：终止本次申请（仅发起人 / 项目经理可操作）"
+              @click="doWithdraw"
+            >
+              撤回申请
+            </el-button>
+            <span v-if="waitApprove" class="footer-note">
+              {{ pendingText || '等待当前节点审批人处理' }}
+            </span>
+          </div>
+          <!-- 右：状态推进 / 审批动作 -->
+          <div class="footer-right">
+            <el-button v-if="status === 'DRAFT' && canCreate" type="primary" @click="doSubmit">
+              提交变更
+            </el-button>
+            <el-button v-if="status === 'SUBMITTED' && canCreate" type="primary" @click="doAssess">
+              评估定级
+            </el-button>
+            <el-button
+              v-if="status === 'ASSESSED'"
+              :disabled="!canApproveNow"
+              title="退回补充：回到草稿，补充材料后可重新提交评估"
+              @click="doMore"
+            >
+              退回补充
+            </el-button>
+            <el-button
+              v-if="['SUBMITTED', 'ASSESSED'].includes(status)"
+              type="danger"
+              plain
+              :disabled="!canApproveNow"
+              title="驳回：直接否决并终结本次变更（需重新发起）"
+              @click="doReject"
+            >
+              驳回
+            </el-button>
+            <el-button
+              v-if="status === 'ASSESSED'"
+              type="success"
+              :disabled="!canApproveNow"
+              @click="doApprove"
+            >
+              审批通过
+            </el-button>
+            <el-button
+              v-if="status === 'APPROVED' && canExecute"
+              type="primary"
+              @click="doAction('execute', '开始执行')"
+            >
+              开始执行
+            </el-button>
+            <el-button
+              v-if="status === 'EXECUTING' && canExecute"
+              type="primary"
+              @click="doAction('verify', '提交验证')"
+            >
+              提交验证
+            </el-button>
+            <el-button
+              v-if="status === 'VERIFIED' && canExecute"
+              @click="doAction('verify-fail', '验证不通过')"
+            >
+              验证不通过
+            </el-button>
+            <el-button
+              v-if="status === 'VERIFIED' && canExecute"
+              type="success"
+              @click="doAction('close', '关闭')"
+            >
+              关闭变更
+            </el-button>
+          </div>
         </div>
       </template>
     </el-drawer>
@@ -1316,6 +1508,16 @@ watch(
   font-size: 12.5px;
   line-height: 1.6;
   color: var(--pms-text-3);
+}
+
+/* 字段下方的提示（如「暂无可变更项目」）：紧跟字段，弱化间距 */
+.field .form-hint {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+}
+
+.form-hint.is-warn {
+  color: #ad6800;
 }
 
 .form-grid {
@@ -1541,8 +1743,21 @@ watch(
   width: 100%;
 }
 
-.footer-spacer {
-  flex: 1;
+.footer-left,
+.footer-right {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.footer-right {
+  margin-left: auto;
+}
+
+.footer-note {
+  font-size: 12px;
+  color: var(--pms-text-3);
 }
 
 @media (max-width: 900px) {

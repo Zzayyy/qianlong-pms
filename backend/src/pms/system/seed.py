@@ -242,6 +242,8 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
             "project:stage:edit",
             "project:doc:upload",
             "project:doc:manage",
+            # 公司领导可直接发起重大变更（L3 场景），不必让 PM 代提
+            "change:create",
             "change:approve",
             "worklog:create",
             "report:export",

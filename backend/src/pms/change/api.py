@@ -235,7 +235,11 @@ async def change_options(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("change:view"))],
 ) -> object:
-    """周期排期角色与变更类型/状态枚举（角色可在「规则参数」中调整）。"""
+    """周期排期角色、变更类型/状态枚举，以及可发起变更的项目状态。
+
+    角色可在「规则参数」中调整；`projectStatuses` 供前端过滤「新建变更」的
+    项目下拉，避免用户填完表单才发现项目处于草稿等不可变更状态（R-CHG-02）。
+    """
     raw = await ConfigService(session).get_str("change.schedule.roles")
     roles = [item.strip() for item in (raw or "").split(",") if item.strip()]
     return ok(
@@ -244,6 +248,7 @@ async def change_options(
             "changeTypes": [item.value for item in ChangeType],
             "dimensions": [item.value for item in ImpactDimension],
             "statuses": [item.value for item in ChangeStatus],
+            "projectStatuses": service.allowed_project_statuses(),
         }
     )
 
@@ -468,8 +473,13 @@ async def withdraw(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("change:create"))],
 ) -> object:
-    """撤回或中止变更。"""
-    request = await service.withdraw(session, request_id, context.user_id)
+    """撤回或中止变更（仅发起人 / 项目经理 / 特权角色）。"""
+    request = await service.withdraw(
+        session,
+        request_id,
+        context.user_id,
+        is_privileged=context.is_privileged or context.has_any_role("ADMIN"),
+    )
     await session.commit()
     return ok({"id": request.id, "status": request.status})
 

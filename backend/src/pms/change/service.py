@@ -21,6 +21,7 @@ from pms.change.rules import (
 )
 from pms.change.state import ApprovalStatus, ChangeNode, ChangeStatus, assert_transit
 from pms.common.exceptions import BizRuleError, ConflictError, ForbiddenError, NotFoundError
+from pms.common.logging import get_logger
 from pms.core.context import AuthContext
 from pms.org.models import SysRole, SysUser, SysUserRole
 from pms.project import service as project_service
@@ -35,6 +36,8 @@ from pms.project.models import (
 from pms.project.state import ProjectStatus
 from pms.system.config_service import ConfigService
 
+logger = get_logger(__name__)
+
 _CODE_PREFIX: Final[str] = "CR"
 # R-CHG-02：仅以下项目状态可提交变更
 _ALLOWED_PROJECT_STATUS: Final[frozenset[str]] = frozenset(
@@ -44,6 +47,11 @@ _ALLOWED_PROJECT_STATUS: Final[frozenset[str]] = frozenset(
 _SCHEDULE_EDITABLE_STATUS: Final[frozenset[str]] = frozenset(
     {ChangeStatus.DRAFT, ChangeStatus.SUBMITTED}
 )
+
+
+def allowed_project_statuses() -> list[str]:
+    """可发起变更的项目状态（R-CHG-02），供前端过滤「新建变更」的项目下拉。"""
+    return sorted({str(item) for item in _ALLOWED_PROJECT_STATUS})
 
 
 async def _thresholds(config: ConfigService) -> LevelThresholds:
@@ -207,8 +215,37 @@ async def assess(
     directors = await project_service.director_ids(session, request.project_id)
     if not directors:
         raise BizRuleError("请先在项目详情中指派项目总监，再提交评估")
-    resolved_pmo = pmo_id or await _resolve_role_user(session, "PMO")
-    resolved_exec = exec_id or await _resolve_role_user(session, "EXEC")
+
+    # 审批链不得出现「发起人审自己」：优先剔除发起人，取同角色其他在职人员；
+    # 若该角色只有发起人一人（小团队常见），保留原节点并由公司领导代审兜底。
+    initiator = int(request.submitter_id or 0) or int(operator_id or 0)
+    other_directors = [item for item in directors if item != initiator]
+    if not other_directors:
+        logger.warning(
+            "变更 %s 的项目总监仅为发起人本人，将形成自审：%s",
+            request.request_code,
+            directors,
+        )
+    else:
+        directors = other_directors
+
+    resolved_pmo = pmo_id or await _resolve_role_user(
+        session, "PMO", exclude_user_id=initiator
+    )
+    if not resolved_pmo and ChangeLevel(level) is not ChangeLevel.L1:
+        fallback_pmo = await _resolve_role_user(session, "PMO")
+        if fallback_pmo:
+            logger.warning(
+                "PMO 角色仅发起人本人在职，变更 %s 的 PMO 节点需由 PMO/公司领导代审",
+                request.request_code,
+            )
+        resolved_pmo = fallback_pmo
+
+    resolved_exec = exec_id or await _resolve_role_user(
+        session, "EXEC", exclude_user_id=initiator
+    )
+    if not resolved_exec:
+        resolved_exec = await _resolve_role_user(session, "EXEC")
     if ChangeLevel(level) is not ChangeLevel.L1 and not resolved_pmo:
         raise BizRuleError("未找到 PMO 审批人，请为 PMO 角色配置在职用户")
     if ChangeLevel(level) is ChangeLevel.L3 and not resolved_exec:
@@ -299,9 +336,21 @@ async def request_more_assessment(
     return request
 
 
-async def withdraw(session: AsyncSession, request_id: int, operator_id: int) -> ChgRequest:
-    """撤回 / 中止变更。"""
+async def withdraw(
+    session: AsyncSession,
+    request_id: int,
+    operator_id: int,
+    *,
+    is_privileged: bool = False,
+) -> ChgRequest:
+    """撤回 / 中止变更：仅发起人、项目经理或特权角色（PMO/公司领导/管理员）可操作。
+
+    说明：撤回属于「申请人侧」动作（终止自己的申请），与审批人侧的
+    「退回补充 / 驳回」是不同职责，不能靠 `change:create` 一个权限放到所有人身上。
+    """
     request = await _get(session, request_id)
+    if not is_privileged and operator_id not in {request.submitter_id, request.pm_id}:
+        raise ForbiddenError("仅发起人或项目经理可撤回该变更")
     request.status = assert_transit(request.status, ChangeStatus.WITHDRAWN)
     request.update_by = operator_id
     await session.flush()
@@ -907,8 +956,14 @@ async def _can_initiate(
     return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
-async def _resolve_role_user(session: AsyncSession, role_code: str) -> int:
-    """按角色取第一个在职用户（PMO / EXEC 审批人兜底）。"""
+async def _resolve_role_user(
+    session: AsyncSession, role_code: str, *, exclude_user_id: int = 0
+) -> int:
+    """按角色取第一个在职用户（PMO / EXEC 审批人兜底）。
+
+    `exclude_user_id` 用于排除变更发起人，避免「发起人 = 审批人」自审自批；
+    排除后无人可替时返回 0，由调用方决定回退策略。
+    """
     stmt = (
         select(SysUser.id)
         .join(SysUserRole, SysUserRole.user_id == SysUser.id)
@@ -920,9 +975,10 @@ async def _resolve_role_user(session: AsyncSession, role_code: str) -> int:
             SysUser.deleted == 0,
             SysUser.status == "ENABLED",
         )
-        .order_by(SysUser.id)
-        .limit(1)
     )
+    if exclude_user_id:
+        stmt = stmt.where(SysUser.id != exclude_user_id)
+    stmt = stmt.order_by(SysUser.id).limit(1)
     return int((await session.execute(stmt)).scalar_one_or_none() or 0)
 
 
