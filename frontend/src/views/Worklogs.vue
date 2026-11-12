@@ -1085,7 +1085,8 @@ const removeComment = async (comment: WorklogComment) => {
 
 /* ------------------------------ 列表操作 ------------------------------ */
 const refreshAll = async () => {
-  await Promise.all([loadLogs(), loadSummary(), loadToday(), loadReminderBadge()])
+  // 热力图同样依赖日志数据，新增/提交/删除后必须一起刷新
+  await Promise.all([loadLogs(), loadSummary(), loadToday(), loadReminderBadge(), loadHeatmap()])
   if (formVisible.value) await loadDaySummary()
   if (detailVisible.value && detailWorklog.value) await reloadDetail(detailWorklog.value.id)
 }

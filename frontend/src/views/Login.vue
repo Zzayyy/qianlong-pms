@@ -131,7 +131,7 @@ const onSubmit = () => {
           </el-button>
         </el-form>
 
-        <p class="auth-hint">演示账号 admin / Pms@12345，以 seed.py 为准</p>
+        <!--<p class="auth-hint">演示账号 admin / Pms@12345，以 seed.py 为准</p>-->
       </section>
     </main>
 
@@ -187,9 +187,9 @@ const onSubmit = () => {
 
 .page-inner {
   width: 100%;
-  max-width: 1040px;
+  max-width: 1180px;
   margin: 0 auto;
-  padding: 0 clamp(20px, 5vw, 52px);
+  padding: 0 clamp(20px, 4vw, 56px);
 }
 
 /* ============ 页头：字标与使用限制 ============ */
@@ -255,16 +255,16 @@ const onSubmit = () => {
 .page-main {
   flex: 1;
   width: 100%;
-  max-width: 1040px;
+  max-width: 1180px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 344px;
+  grid-template-columns: minmax(0, 1fr) 360px;
   align-items: center;
-  padding: 0 clamp(20px, 5vw, 52px);
+  padding: 0 clamp(20px, 4vw, 56px);
 }
 
 .intro {
-  padding-right: clamp(36px, 6vw, 72px);
+  padding-right: clamp(48px, 6.5vw, 88px);
 }
 
 .intro-title {
@@ -295,7 +295,7 @@ const onSubmit = () => {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 40px 0 40px clamp(32px, 4.5vw, 48px);
+  padding: 40px 0 40px clamp(40px, 4.5vw, 64px);
 }
 
 /* 分隔线：两端渐隐的蓝色细线 */
@@ -533,7 +533,15 @@ const onSubmit = () => {
 /* ============ 平板 ============ */
 @media (max-width: 1024px) {
   .page-main {
-    grid-template-columns: minmax(0, 1fr) 320px;
+    grid-template-columns: minmax(0, 1fr) 340px;
+  }
+
+  .intro {
+    padding-right: clamp(40px, 5vw, 64px);
+  }
+
+  .auth {
+    padding-left: clamp(32px, 4vw, 48px);
   }
 
   .intro-title {

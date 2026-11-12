@@ -9,7 +9,6 @@ import time
 from typing import Final
 
 from redis.asyncio import Redis
-from redis.exceptions import RedisError
 
 from pms.common.logging import get_logger
 from pms.core.config import get_settings
@@ -31,6 +30,9 @@ _CONNECT_TIMEOUT: Final[float] = 0.2
 _SOCKET_TIMEOUT: Final[float] = 0.2
 # 熔断窗口（秒）：失败后这段时间内直接降级，避免每个请求都等连接超时
 _BREAK_SECONDS: Final[float] = 30.0
+# 空闲健康检查（秒）：连接空闲超过该时长先 PING 探活，避免把命令写进已被
+# 服务端/网络关闭的 socket（表现为 AttributeError: 'NoneType' ... '_add_writer'）
+_HEALTH_CHECK_SECONDS: Final[int] = 30
 
 
 def _mark_unavailable(reason: str) -> None:
@@ -40,6 +42,29 @@ def _mark_unavailable(reason: str) -> None:
         logger.warning("Redis 不可用，降级为无缓存（%s 秒后重试）：%s", _BREAK_SECONDS, reason)
     _unavailable = True
     _next_retry_at = time.monotonic() + _BREAK_SECONDS
+
+
+async def _discard_client() -> None:
+    """丢弃当前客户端：连接池可能残留失效 socket，重建比复用更可靠。"""
+    global _client
+    client, _client = _client, None
+    if client is None:
+        return
+    try:
+        await client.aclose()
+    except Exception as exc:  # noqa: BLE001 关闭本身失败无需上报（连接已不可用）
+        logger.debug("关闭 Redis 连接异常：%s", exc)
+
+
+async def _degrade(exc: BaseException) -> None:
+    """Redis 故障统一降级：开熔断窗口 + 丢弃可能已失效的连接池。
+
+    说明：redis-py 在连接被对端关闭后可能抛出 `AttributeError`、`OSError` 等
+    非 `RedisError` 的异常（写空传输层）。按设计稿 02 §3「Redis 不可用时降级」，
+    这里必须兜住**所有**异常，绝不能让缓存故障变成 500。
+    """
+    _mark_unavailable(f"{type(exc).__name__}: {exc}")
+    await _discard_client()
 
 
 def get_redis() -> Redis | None:
@@ -57,6 +82,7 @@ def get_redis() -> Redis | None:
                 decode_responses=True,
                 socket_connect_timeout=_CONNECT_TIMEOUT,
                 socket_timeout=_SOCKET_TIMEOUT,
+                health_check_interval=_HEALTH_CHECK_SECONDS,
             )
         except Exception as exc:  # 连接串错误等：记录后降级
             _mark_unavailable(str(exc))
@@ -71,8 +97,8 @@ async def cache_get(key: str) -> str | None:
         return None
     try:
         value = await client.get(key)
-    except RedisError as exc:
-        _mark_unavailable(str(exc))
+    except Exception as exc:  # noqa: BLE001 缓存故障一律降级，不阻断业务
+        await _degrade(exc)
         return None
     return value
 
@@ -84,8 +110,8 @@ async def cache_set(key: str, value: str, ttl: int = 300) -> None:
         return
     try:
         await client.set(key, value, ex=ttl)
-    except RedisError as exc:
-        _mark_unavailable(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        await _degrade(exc)
 
 
 async def cache_delete(key: str) -> None:
@@ -95,16 +121,13 @@ async def cache_delete(key: str) -> None:
         return
     try:
         await client.delete(key)
-    except RedisError as exc:
-        _mark_unavailable(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        await _degrade(exc)
 
 
 async def close_redis() -> None:
     """关闭连接（关机钩子调用）。"""
-    global _client
-    if _client is not None:
-        await _client.aclose()
-        _client = None
+    await _discard_client()
 
 
 # ---------------- 会话黑名单：Redis + 进程内内存兜底 ----------------

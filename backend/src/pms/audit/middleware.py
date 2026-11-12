@@ -18,6 +18,7 @@ from starlette.responses import Response
 
 from pms.audit.service import module_of, record_operate, result_of
 from pms.common.logging import get_logger
+from pms.common.net import client_ip
 from pms.core.security import decode_access_token
 
 logger = get_logger(__name__)
@@ -28,11 +29,8 @@ _MAX_BODY: Final[int] = 4000
 
 
 def _client_ip(request: Request) -> str:
-    """取客户端 IP（优先反向代理头）。"""
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()[:64]
-    return request.client.host if request.client else ""
+    """取客户端 IP（可信代理后解析 X-Forwarded-For，规则见 `pms.common.net`）。"""
+    return client_ip(request)
 
 
 def _user_id(request: Request) -> int:

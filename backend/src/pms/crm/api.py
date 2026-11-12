@@ -69,9 +69,13 @@ async def _user_names(session: AsyncSession, user_ids: set[int]) -> dict[int, st
     if not ids:
         return {}
     result = await session.execute(
-        select(SysUser.id, SysUser.real_name).where(SysUser.id.in_(ids))
+        select(SysUser.id, SysUser.real_name, SysUser.username).where(SysUser.id.in_(ids))
     )
-    return {int(user_id): str(name or "") for user_id, name in result.all()}
+    # 姓名为空时回退账号，避免列表负责人显示为空或雪花 ID
+    return {
+        int(user_id): str(real_name or username or "")
+        for user_id, real_name, username in result.all()
+    }
 
 
 async def _customer_names(session: AsyncSession, customer_ids: set[int]) -> dict[int, str]:

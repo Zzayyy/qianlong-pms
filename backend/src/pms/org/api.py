@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pms.audit.service import record_login
 from pms.common.exceptions import BizRuleError, ForbiddenError
+from pms.common.net import client_ip
 from pms.common.response import ok, paged
 from pms.core.context import AuthContext
 from pms.core.deps import (
@@ -168,7 +169,7 @@ async def login(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> object:
     """账号密码登录，返回 JWT 与权限点（成功与失败均写登录日志）。"""
-    ip = request.client.host if request.client else ""
+    ip = client_ip(request)
     user_agent = request.headers.get("user-agent", "")[:500]
     try:
         result = await service.authenticate(session, body.username, body.password)
@@ -219,7 +220,7 @@ async def logout(body: LogoutIn, request: Request) -> object:
     await record_login(
         # 留痕记录账号而非用户 ID，便于登录日志按账号检索
         username=str(payload.get("username") or payload.get("sub") or ""),
-        ip=request.client.host if request.client else "",
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent", "")[:500],
         status="LOGOUT",
         message="主动登出",

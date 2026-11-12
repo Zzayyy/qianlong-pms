@@ -1,6 +1,6 @@
 <script setup lang="ts">
 defineOptions({ name: 'CrmPage' })
-import { computed, onMounted, onUnmounted, ref, type Component } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, type Component } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Building2, CircleDollarSign, Handshake, Plus, TrendingUp } from 'lucide-vue-next'
 import {
@@ -155,8 +155,11 @@ const amountText = (value: any) => {
 }
 const timeText = (value: any) => String(value || '').replace('T', ' ').slice(0, 16)
 const userName = (id: any) => {
-  const hit = staff.value.find((item) => String(item.id) === String(id))
-  return hit ? hit.realName : id ? String(id) : '—'
+  const key = idText(id)
+  if (!key || key === '0') return '—'
+  const hit = staff.value.find((item) => String(item.id) === key)
+  // 用户已停用、删除或不在数据范围时不回退雪花 ID，展示可读占位
+  return hit ? hit.realName || hit.username || '未知用户' : '未知用户'
 }
 
 const kpis = computed<KpiItem[]>(() => {
@@ -287,8 +290,24 @@ const loadCustomerOptions = async () => {
   }
 }
 
+/** 虚拟化下拉选项：客户可达 200+、人员可达 500，避免一次性渲染全部 DOM。 */
+const customerSelectOptions = computed(() =>
+  customerOptions.value.map((item: any) => ({
+    value: idText(item.id),
+    label: item.customerName
+  }))
+)
+const staffSelectOptions = computed(() =>
+  staff.value.map((item: any) => ({
+    value: idText(item.id),
+    label: `${item.realName}（${item.username}）`
+  }))
+)
+
 /* ------------------------------ 客户 ------------------------------ */
 const customers = ref<any[]>([])
+const customerTableRef = ref<any>()
+const oppTableRef = ref<any>()
 const customerTotal = ref(0)
 const customerPage = ref({ pageNum: 1, pageSize: 10 })
 const customerFilter = ref({ keyword: '', status: '', level: '' })
@@ -335,6 +354,7 @@ const emptyCustomer = () => ({
   customerLevel: 'B',
   industry: '',
   ownerUserId: idText(store.profile?.id),
+  ownerName: store.profile?.realName || '',
   ownerDeptId: idText(store.profile?.deptId),
   contactName: '',
   contactMobile: '',
@@ -545,6 +565,7 @@ const emptyOpp = () => ({
   status: 'OPEN',
   lostReason: '',
   ownerUserId: idText(store.profile?.id),
+  ownerName: store.profile?.realName || '',
   ownerDeptId: idText(store.profile?.deptId),
   remark: ''
 })
@@ -658,6 +679,43 @@ const openConvert = (row: any) => {
   convertDialog.value = true
 }
 
+/**
+ * 历史数据的负责人/客户可能已停用或不在当前数据范围，补一个回显项，
+ * 避免虚拟下拉找不到选项时直接展示雪花 ID。
+ */
+const withSelectedOption = (
+  options: { value: string; label: string }[],
+  value: unknown,
+  label?: string,
+  fallbackLabel = '未知用户'
+) => {
+  const key = idText(value)
+  if (!key || key === '0' || options.some((item) => item.value === key)) return options
+  return [{ value: key, label: label || fallbackLabel }, ...options]
+}
+
+const customerOwnerOptions = computed(() =>
+  withSelectedOption(
+    staffSelectOptions.value,
+    customerForm.value.ownerUserId,
+    customerForm.value.ownerName
+  )
+)
+const oppOwnerOptions = computed(() =>
+  withSelectedOption(staffSelectOptions.value, oppForm.value.ownerUserId, oppForm.value.ownerName)
+)
+const oppCustomerOptions = computed(() =>
+  withSelectedOption(
+    customerSelectOptions.value,
+    oppForm.value.customerId,
+    oppForm.value.customerName,
+    '未知客户'
+  )
+)
+const convertPmOptions = computed(() =>
+  withSelectedOption(staffSelectOptions.value, convertForm.value.pmId, convertRow.value.ownerName)
+)
+
 const doConvert = async () => {
   const result = await convertOpp(String(convertRow.value.id), {
     projectName: convertForm.value.projectName,
@@ -729,7 +787,13 @@ const removeFollow = async (row: any) => {
 
 /* ------------------------------ 交互 ------------------------------ */
 const switchTab = (key: TabKey) => {
+  if (tab.value === key) return
   tab.value = key
+  // 两个表格常驻后用 v-show 切换，显示时需要重算列宽
+  nextTick(() => {
+    const table = key === 'customers' ? customerTableRef.value : oppTableRef.value
+    table?.doLayout?.()
+  })
 }
 
 const refreshAll = async () => {
@@ -886,21 +950,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           @keyup.enter="searchOpps"
           @clear="searchOpps"
         />
-        <el-select
+        <el-select-v2
           v-model="oppFilter.customerId"
           class="f-customer"
+          :options="customerSelectOptions"
           placeholder="全部客户"
           clearable
           filterable
           @change="searchOpps"
-        >
-          <el-option
-            v-for="item in customerOptions"
-            :key="item.id"
-            :label="item.customerName"
-            :value="item.id"
-          />
-        </el-select>
+        />
         <el-select
           v-model="oppFilter.stage"
           class="f-status"
@@ -937,7 +995,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
       <!-- 客户列表 -->
       <el-table
-        v-if="tab === 'customers'"
+        v-show="tab === 'customers'"
+        ref="customerTableRef"
         v-loading="customerLoading"
         :data="customers"
         size="small"
@@ -1056,7 +1115,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
       <!-- 商机列表 -->
       <el-table
-        v-else
+        v-show="tab !== 'customers'"
+        ref="oppTableRef"
         v-loading="oppLoading"
         :data="opportunities"
         size="small"
@@ -1287,14 +1347,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </el-select>
         </el-form-item>
         <el-form-item label="负责人">
-          <el-select v-model="customerForm.ownerUserId" filterable @change="syncCustomerOwner">
-            <el-option
-              v-for="item in staff"
-              :key="item.id"
-              :label="`${item.realName}（${item.username}）`"
-              :value="item.id"
-            />
-          </el-select>
+          <el-select-v2
+            v-model="customerForm.ownerUserId"
+            :options="customerOwnerOptions"
+            filterable
+            @change="syncCustomerOwner"
+          />
         </el-form-item>
         <el-form-item label="来源">
           <el-input v-model="customerForm.source" placeholder="如 官网 / 转介绍 / 展会" />
@@ -1523,24 +1581,20 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-input v-model="oppForm.oppName" placeholder="如 XX 公司 PMS 实施" />
         </el-form-item>
         <el-form-item label="所属客户">
-          <el-select v-model="oppForm.customerId" filterable placeholder="选择客户">
-            <el-option
-              v-for="item in customerOptions"
-              :key="item.id"
-              :label="item.customerName"
-              :value="item.id"
-            />
-          </el-select>
+          <el-select-v2
+            v-model="oppForm.customerId"
+            :options="oppCustomerOptions"
+            filterable
+            placeholder="选择客户"
+          />
         </el-form-item>
         <el-form-item label="负责人">
-          <el-select v-model="oppForm.ownerUserId" filterable @change="syncOppOwner">
-            <el-option
-              v-for="item in staff"
-              :key="item.id"
-              :label="`${item.realName}（${item.username}）`"
-              :value="item.id"
-            />
-          </el-select>
+          <el-select-v2
+            v-model="oppForm.ownerUserId"
+            :options="oppOwnerOptions"
+            filterable
+            @change="syncOppOwner"
+          />
         </el-form-item>
         <el-form-item label="来源">
           <el-input v-model="oppForm.source" placeholder="如 官网 / 转介绍 / 展会" />
@@ -1635,14 +1689,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-input v-model="convertForm.projectName" />
         </el-form-item>
         <el-form-item label="项目经理" class="span-2">
-          <el-select v-model="convertForm.pmId" filterable placeholder="选择项目经理">
-            <el-option
-              v-for="item in staff"
-              :key="item.id"
-              :label="`${item.realName}（${item.username}）`"
-              :value="item.id"
-            />
-          </el-select>
+          <el-select-v2
+            v-model="convertForm.pmId"
+            :options="convertPmOptions"
+            filterable
+            placeholder="选择项目经理"
+          />
         </el-form-item>
         <el-form-item label="计划开始">
           <el-date-picker

@@ -42,3 +42,29 @@ async def test_cache_ops_never_raise_and_fast(_restore_state) -> None:
     assert await redis_module.cache_delete("pms:test:key") is None
     cost = time.perf_counter() - started
     assert cost < 2.0, f"三次缓存操作耗时 {cost:.2f}s，降级未生效"
+
+
+class _DeadTransportClient:
+    """模拟连接已被对端关闭的 redis 客户端：redis-py 会抛出非 RedisError 异常。"""
+
+    closed = False
+
+    async def get(self, _key: str) -> str:
+        raise AttributeError("'NoneType' object has no attribute '_add_writer'")
+
+    async def aclose(self) -> None:
+        type(self).closed = True
+
+
+async def test_cache_error_degrades_instead_of_raising(_restore_state) -> None:
+    """缓存层任何异常都只降级：不得冒泡成 500，且丢弃失效连接池。"""
+    _DeadTransportClient.closed = False
+    redis_module._client = _DeadTransportClient()  # type: ignore[assignment]
+    redis_module._unavailable = False
+    redis_module._next_retry_at = 0.0
+
+    assert await redis_module.cache_get("pms:test:key") is None
+    assert redis_module._unavailable is True
+    assert redis_module._client is None
+    assert _DeadTransportClient.closed is True
+

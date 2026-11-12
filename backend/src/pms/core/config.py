@@ -51,6 +51,10 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:5173"
 
+    # 可信反向代理地址（逗号分隔，`*` 表示全部）：只有来自这些地址的请求才采信
+    # `X-Forwarded-For` / `X-Real-IP`，用于审计留痕取真实客户端 IP
+    trusted_proxies: str = "127.0.0.1,::1"
+
     @property
     def database_url(self) -> str:
         """异步 MySQL 连接串。"""
