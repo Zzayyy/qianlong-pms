@@ -58,6 +58,18 @@ async def depts(
     return ok(rows)
 
 
+@router.get("/my-todo", summary="我的待办")
+async def my_todo(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("report:view"))],
+) -> object:
+    """工作台「我的待办」：我的任务 / 我负责的项目 / 待确认日志 / 待审批变更等。
+
+    只返回与当前用户直接相关的计数，供首页卡片跳转，替代原来的纯导航快捷入口。
+    """
+    return ok(await service.my_todo(session, context))
+
+
 async def _expand_subtree(session: AsyncSession, dept_ids: list[int]) -> list[int]:
     """把部门 ID 展开为「本部门 + 全部下级部门」，供 `includeSub` 使用。"""
     rows = (

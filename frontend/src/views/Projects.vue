@@ -1,6 +1,7 @@
 <script setup lang="ts">
 defineOptions({ name: 'ProjectsPage' })
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from 'lucide-vue-next'
 import {
@@ -1180,9 +1181,22 @@ const saveMilestone = async () => {
   milestones.value = await listMilestones(detail.value.id)
 }
 
+const route = useRoute()
+
+/** 入口参数：`?scope=pm|member` 落到对应视角，`?create=1` 直接打开立项弹窗。 */
+const applyEntryQuery = () => {
+  const rawScope = route.query.scope
+  const scope = Array.isArray(rawScope) ? rawScope[0] : rawScope
+  if (scope === 'pm' || scope === 'member') scopeFilter.value = scope
+  const rawCreate = route.query.create
+  const create = Array.isArray(rawCreate) ? rawCreate[0] : rawCreate
+  if (create === '1' && canCreateProject.value) openCreate()
+}
+
 onMounted(async () => {
   syncWidth()
   window.addEventListener('resize', syncWidth)
+  applyEntryQuery()
   await loadBase()
   await load()
 })

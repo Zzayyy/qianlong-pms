@@ -20,7 +20,7 @@ import {
   TrendingUp,
   TriangleAlert
 } from 'lucide-vue-next'
-import { companyBoard } from '@/api'
+import { companyBoard, myTodo, type TodoItem } from '@/api'
 import ChartBox from '@/components/ChartBox.vue'
 import { useUserStore } from '@/stores/user'
 
@@ -117,14 +117,6 @@ interface KpiCard {
   filter?: DelayFilter
 }
 
-interface QuickAction {
-  key: string
-  label: string
-  desc: string
-  icon: Component
-  path: string
-  permission: string
-}
 
 /* ------------------------------ 状态 ------------------------------ */
 
@@ -166,12 +158,50 @@ const trendPoints = computed(() => board.value.trend?.points ?? [])
 const topDelayed = computed(() => board.value.topDelayed ?? [])
 const topRisk = computed(() => board.value.topRisk ?? [])
 
+/* ------------------------------ 我的待办 ------------------------------ */
+
+const todos = ref<TodoItem[]>([])
+const todoLoading = ref(false)
+
+/** 待办图标按 key 映射（后端只下发数据，不关心图标）。 */
+const TODO_ICONS: Record<string, Component> = {
+  'my-task': CirclePlay,
+  'my-project': FolderKanban,
+  'log-today': NotebookPen,
+  'log-reminder': NotebookPen,
+  'log-confirm': TriangleAlert,
+  'change-approve': GitPullRequest
+}
+const todoIcon = (key: string) => TODO_ICONS[key] ?? Activity
+
+const loadTodo = async () => {
+  todoLoading.value = true
+  try {
+    todos.value = (await myTodo()) || []
+  } catch {
+    todos.value = []
+  } finally {
+    todoLoading.value = false
+  }
+}
+
+/** 待办跳转：支持 `path?query` 形式（如 `/projects?scope=pm`）。 */
+const go = (target: string) => {
+  const [path, search] = target.split('?')
+  if (!search) {
+    router.push(path)
+    return
+  }
+  router.push({ path, query: Object.fromEntries(new URLSearchParams(search)) })
+}
+
 const load = async () => {
   loading.value = true
   try {
     board.value = (await companyBoard(days.value)) as unknown as CompanyBoard
     const now = new Date()
     loadedAt.value = `${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+    await loadTodo()
   } catch {
     /* 错误提示由请求拦截器统一弹出 */
   } finally {
@@ -361,47 +391,6 @@ const kpis = computed<KpiCard[]>(() => {
     }
   ]
 })
-
-/* ------------------------------ 快捷操作 ------------------------------ */
-
-const allQuickActions: QuickAction[] = [
-  {
-    key: 'project',
-    label: '新建项目',
-    desc: '发起立项与审批',
-    icon: Plus,
-    path: '/projects',
-    permission: 'project:create'
-  },
-  {
-    key: 'worklog',
-    label: '填报日志',
-    desc: '登记今日工作工时',
-    icon: NotebookPen,
-    path: '/worklogs',
-    permission: 'worklog:create'
-  },
-  {
-    key: 'change',
-    label: '发起变更',
-    desc: '提交范围或排期调整',
-    icon: GitPullRequest,
-    path: '/changes',
-    permission: 'change:create'
-  },
-  {
-    key: 'dept',
-    label: '部门看板',
-    desc: '下钻部门成员与趋势',
-    icon: Building2,
-    path: '/dept-board',
-    permission: 'report:view'
-  }
-]
-
-const quickActions = computed(() => allQuickActions.filter((item) => store.has(item.permission)))
-
-const go = (path: string) => router.push(path)
 
 /* ------------------------------ 筛选与联动 ------------------------------ */
 
@@ -751,28 +740,42 @@ const exportBoard = () => {
           </div>
         </div>
         <div class="ops-actions">
+          <el-button
+            v-if="store.has('project:create')"
+            :icon="Plus"
+            @click="go('/projects?create=1')"
+          >
+            新建项目
+          </el-button>
           <el-button :icon="RefreshCw" :loading="loading" @click="load">刷新</el-button>
           <el-button type="primary" :icon="Download" @click="exportBoard">导出</el-button>
         </div>
       </div>
     </section>
 
-    <!-- 快捷操作入口 -->
-    <section v-if="quickActions.length" class="quick-row" aria-label="快捷操作">
+    <!-- 我的待办：数据驱动，替代原来纯导航的快捷入口 -->
+    <section
+      v-if="todos.length"
+      v-loading="todoLoading"
+      class="quick-row"
+      aria-label="我的待办"
+    >
       <button
-        v-for="item in quickActions"
+        v-for="item in todos"
         :key="item.key"
         type="button"
         class="quick-item"
+        :class="`todo-${item.tone}`"
         @click="go(item.path)"
       >
         <span class="quick-icon">
-          <component :is="item.icon" :size="16" :stroke-width="1.8" />
+          <component :is="todoIcon(item.key)" :size="16" :stroke-width="1.8" />
         </span>
         <span class="quick-text">
           <b>{{ item.label }}</b>
           <span>{{ item.desc }}</span>
         </span>
+        <span class="quick-count">{{ item.count }}</span>
         <ArrowRight class="quick-arrow" :size="14" :stroke-width="1.9" />
       </button>
     </section>
@@ -1247,10 +1250,11 @@ const exportBoard = () => {
   outline-offset: 1px;
 }
 
-/* ------------------------------ 快捷操作 ------------------------------ */
+/* ------------------------------ 我的待办 ------------------------------ */
 .quick-row {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* 待办条数不固定（1~6 项），用 auto-fit 让卡片自动铺满一行，避免右侧留空 */
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 10px;
   margin-bottom: 14px;
 }
@@ -1310,9 +1314,44 @@ const exportBoard = () => {
   white-space: nowrap;
 }
 
+/* 待办数量徽标：靠右、与箭头同组 */
+.quick-count {
+  flex: none;
+  min-width: 22px;
+  height: 20px;
+  display: inline-grid;
+  place-items: center;
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--pms-primary-weak);
+  color: var(--pms-primary-deep);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.todo-warning .quick-icon {
+  color: #d48806;
+}
+
+.todo-warning .quick-count {
+  background: #fff5e6;
+  color: #ad6800;
+}
+
+.todo-danger .quick-icon {
+  color: #cf1322;
+}
+
+.todo-danger .quick-count {
+  background: #fdecec;
+  color: #cf1322;
+}
+
 .quick-arrow {
   flex: none;
-  margin-left: auto;
+  margin-left: 4px;
   color: #b9c3d4;
   transition:
     color 0.16s ease,

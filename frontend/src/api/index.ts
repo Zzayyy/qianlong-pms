@@ -314,6 +314,18 @@ export const readAllNotices = () => post<{ count: number }>('/notices/read-all')
 
 /* ------------------------------ 看板 ------------------------------ */
 
+/** 我的待办项（工作台卡片：我的任务 / 我负责的项目 / 待确认日志 / 待审批变更等）。 */
+export interface TodoItem {
+  key: string
+  label: string
+  desc: string
+  count: number
+  path: string
+  tone: 'primary' | 'warning' | 'danger'
+}
+
+export const myTodo = () => get<TodoItem[]>('/reports/my-todo')
+
 /** 公司看板；`days` 仅影响趋势区间（KPI 与表格为实时指标）。 */
 export const companyBoard = (days = 30) =>
   get<Record<string, unknown>>('/reports/company', { days })

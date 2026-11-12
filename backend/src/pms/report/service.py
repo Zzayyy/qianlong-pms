@@ -8,9 +8,10 @@ from typing import Final
 from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pms.core.context import AuthContext
 from pms.org.models import SysDept, SysUser
 from pms.project import service as project_service
-from pms.project.models import PrjProject, PrjRisk
+from pms.project.models import PrjProject, PrjRisk, PrjTask
 from pms.project.progress import HealthThresholds, evaluate_health
 from pms.report.metrics import (
     ProjectMetric,
@@ -36,6 +37,188 @@ _HEALTH_ACTIVE: Final[frozenset[str]] = frozenset(
 _HEALTH_TERMINAL: Final[frozenset[str]] = frozenset(
     {"COMPLETED", "ACCEPTED", "CLOSED", "TERMINATED"}
 )
+
+
+async def my_todo(session: AsyncSession, context: AuthContext) -> list[dict[str, object]]:
+    """工作台「我的待办」：只列菜单里看不到的个人视角事项。
+
+    每项字段：`key` 唯一标识、`label` 标题、`desc` 说明、`count` 数量、
+    `path` 点击跳转、`tone` 语义色（primary / warning / danger）。
+    数量为 0 的项不返回，前端据此隐藏。
+    """
+    from pms.change.models import ChgApproval
+    from pms.change.state import ApprovalStatus
+    from pms.project.state import ProjectStatus, TaskStatus
+    from pms.worklog.models import WlReminder
+    from pms.worklog.rules import WorklogStatus
+
+    me = context.user_id
+    today = date.today()
+    items: list[dict[str, object]] = []
+
+    # ① 我负责且未完成的任务：个人推进视角（项目列表里看不到「我的任务」聚合）
+    task_count = int(
+        (
+            await session.execute(
+                select(func.count(PrjTask.id)).where(
+                    PrjTask.deleted == 0,
+                    PrjTask.owner_id == me,
+                    PrjTask.status != TaskStatus.DONE,
+                )
+            )
+        ).scalar_one()
+    )
+    if task_count:
+        items.append(
+            {
+                "key": "my-task",
+                "label": "我的任务",
+                "desc": "我负责且未完成，进入项目推进进度",
+                "count": task_count,
+                "path": "/projects",
+                "tone": "primary",
+            }
+        )
+
+    # ② 我负责的进行中项目
+    leading = int(
+        (
+            await session.execute(
+                select(func.count(PrjProject.id)).where(
+                    PrjProject.deleted == 0,
+                    PrjProject.pm_id == me,
+                    PrjProject.status.in_(
+                        [ProjectStatus.IN_PROGRESS, ProjectStatus.SUSPENDED]
+                    ),
+                )
+            )
+        ).scalar_one()
+    )
+    if leading:
+        items.append(
+            {
+                "key": "my-project",
+                "label": "我负责的项目",
+                "desc": "进行中 / 已挂起的项目",
+                "count": leading,
+                "path": "/projects?scope=pm",
+                "tone": "primary",
+            }
+        )
+
+    # ③ 今日日志未填（每天只有 1 条提醒，避免天天挂着变成噪音）
+    if context.has_permission("worklog:create"):
+        logged = int(
+            (
+                await session.execute(
+                    select(func.count(WlWorklog.id)).where(
+                        WlWorklog.deleted == 0,
+                        WlWorklog.user_id == me,
+                        WlWorklog.log_date == today,
+                    )
+                )
+            ).scalar_one()
+        )
+        if logged == 0:
+            items.append(
+                {
+                    "key": "log-today",
+                    "label": "今日日志未填",
+                    "desc": f"{today.isoformat()} 还没有填报记录",
+                    "count": 1,
+                    "path": "/worklogs",
+                    "tone": "warning",
+                }
+            )
+
+    # ④ 未处理催办
+    reminder_count = int(
+        (
+            await session.execute(
+                select(func.count(WlReminder.id)).where(
+                    WlReminder.deleted == 0,
+                    WlReminder.user_id == me,
+                    WlReminder.status == "OPEN",
+                )
+            )
+        ).scalar_one()
+    )
+    if reminder_count:
+        items.append(
+            {
+                "key": "log-reminder",
+                "label": "日志催办",
+                "desc": "待补填的日志催办未处理",
+                "count": reminder_count,
+                "path": "/worklogs?reminders=1",
+                "tone": "warning",
+            }
+        )
+
+    # ⑤ 待我确认的日志：我任项目负责人的项目下，别人提交的待确认日志
+    if context.has_permission("worklog:confirm"):
+        pm_projects = select(PrjProject.id).where(
+            PrjProject.deleted == 0, PrjProject.pm_id == me
+        )
+        log_ids = select(WlItem.worklog_id).where(
+            WlItem.deleted == 0, WlItem.project_id.in_(pm_projects)
+        )
+        pending_logs = int(
+            (
+                await session.execute(
+                    select(func.count(WlWorklog.id)).where(
+                        WlWorklog.deleted == 0,
+                        WlWorklog.status == WorklogStatus.SUBMITTED,
+                        WlWorklog.user_id != me,
+                        WlWorklog.id.in_(log_ids),
+                    )
+                )
+            ).scalar_one()
+        )
+        if pending_logs:
+            items.append(
+                {
+                    "key": "log-confirm",
+                    "label": "待我确认日志",
+                    "desc": "项目成员已提交，等待确认",
+                    "count": pending_logs,
+                    "path": "/worklogs?tab=pending",
+                    "tone": "danger",
+                }
+            )
+
+    # ⑥ 待我审批的变更：只算落在「当前待审节点（最小 seq）」上的，避免虚高
+    if context.has_permission("change:approve"):
+        pending = (
+            await session.execute(
+                select(ChgApproval.request_id, ChgApproval.seq, ChgApproval.approver_id).where(
+                    ChgApproval.deleted == 0,
+                    ChgApproval.status == ApprovalStatus.PENDING,
+                )
+            )
+        ).all()
+        current_seq: dict[int, int] = {}
+        for request_id, seq, _approver in pending:
+            key = int(request_id)
+            current_seq[key] = min(current_seq.get(key, seq), seq)
+        mine = {
+            int(request_id)
+            for request_id, seq, approver in pending
+            if approver == me and current_seq[int(request_id)] == seq
+        }
+        if mine:
+            items.append(
+                {
+                    "key": "change-approve",
+                    "label": "待我审批变更",
+                    "desc": "当前节点轮到我处理",
+                    "count": len(mine),
+                    "path": "/changes",
+                    "tone": "danger",
+                }
+            )
+
+    return items
 
 
 async def _health_thresholds(config: ConfigService) -> HealthThresholds:

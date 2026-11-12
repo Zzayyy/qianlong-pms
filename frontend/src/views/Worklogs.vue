@@ -943,8 +943,23 @@ const openDetail = async (row: any) => {
   }
 }
 
-/** 处理站内通知跳转：打开指定日志详情或催办抽屉。 */
+const TAB_KEYS: TabKey[] = ['mine', 'team', 'pending']
+
+/** 读取 URL 上的页签参数（首页「待我确认日志」卡片跳转 `/worklogs?tab=pending`）。 */
+const readTabQuery = (): TabKey | '' => {
+  const raw = route.query.tab
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return TAB_KEYS.includes(value as TabKey) ? (value as TabKey) : ''
+}
+
+/** 处理站内通知/待办跳转：指定页签、日志详情或催办抽屉。 */
 const handleNoticeQuery = async () => {
+  const tabQuery = readTabQuery()
+  if (tabQuery) {
+    switchTab(tabQuery)
+    await router.replace({ path: route.path, query: {} })
+    return
+  }
   const rawWorklogId = route.query.worklogId
   const worklogId = Array.isArray(rawWorklogId) ? rawWorklogId[0] : rawWorklogId
   if (worklogId) {
@@ -961,7 +976,7 @@ const handleNoticeQuery = async () => {
 }
 
 watch(
-  () => [route.query.worklogId, route.query.reminders],
+  () => [route.query.worklogId, route.query.reminders, route.query.tab],
   () => handleNoticeQuery()
 )
 
@@ -1223,6 +1238,8 @@ const rejectDetail = async () => {
 onMounted(() => {
   syncWidth()
   window.addEventListener('resize', syncWidth)
+  const initialTab = readTabQuery()
+  if (initialTab) tab.value = initialTab
   Promise.all([
     loadOptions(),
     loadLogs(),
