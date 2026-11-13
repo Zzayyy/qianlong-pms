@@ -1399,7 +1399,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     <el-drawer
       v-model="contactDrawer"
       :title="`联系人 · ${contactCustomer.customerName || ''}`"
-      size="min(760px, 94vw)"
+      size="min(1080px, 96vw)"
     >
       <div class="detail">
         <div class="detail-head">
@@ -1446,37 +1446,42 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="手机" width="130">
+          <el-table-column label="手机" width="124">
             <template #default="{ row }">
               <span :class="{ 'cell-muted': !row.mobile }">{{ row.mobile || '—' }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="邮箱" min-width="160">
+          <el-table-column label="邮箱" min-width="150">
             <template #default="{ row }">
               <span class="cell-ellipsis" :class="{ 'cell-muted': !row.email }">
                 {{ row.email || '—' }}
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="微信" width="120" class-name="pms-mobile-hide">
+          <el-table-column label="微信" width="110" class-name="pms-mobile-hide">
             <template #default="{ row }">
               <span :class="{ 'cell-muted': !row.wechat }">{{ row.wechat || '—' }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="主联系人" width="92">
+          <el-table-column label="主联系人" width="84">
             <template #default="{ row }">
               <el-tag v-if="row.isPrimary" type="success" size="small" effect="plain">是</el-tag>
               <span v-else class="cell-muted">—</span>
             </template>
           </el-table-column>
-          <el-table-column label="备注" min-width="130" class-name="pms-mobile-hide">
+          <el-table-column label="备注" min-width="120" class-name="pms-mobile-hide">
             <template #default="{ row }">
               <span class="cell-ellipsis" :class="{ 'cell-muted': !row.remark }">
                 {{ row.remark || '—' }}
               </span>
             </template>
           </el-table-column>
-          <el-table-column v-if="canCustomer" label="操作" :width="isNarrow ? 92 : 176">
+          <el-table-column
+            v-if="canCustomer"
+            label="操作"
+            :width="isNarrow ? 92 : 168"
+            fixed="right"
+          >
             <template #default="{ row }">
               <el-dropdown
                 v-if="isNarrow"
