@@ -435,7 +435,7 @@ async def export_worklogs(
         ]
     )
     for row in rows:
-        is_personal = row.log_type == "PERSONAL"
+        meta = service.log_type_meta(row.log_type)
         user_name, real_name = users.get(row.user_id, ("", ""))
         submit_at = (
             row.submit_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -447,8 +447,10 @@ async def export_worklogs(
                 row.log_date.isoformat() if row.log_date else "",
                 row.worklog_no,
                 real_name or user_name,
-                "个人" if is_personal else "项目",
-                "个人" if is_personal else (projects.get(row.project_id, "") or "非项目"),
+                meta.label,
+                (projects.get(row.project_id, "") or "非项目")
+                if meta.requires_project
+                else meta.label,
                 tasks.get(row.task_id, ""),
                 float(row.total_hours),
                 _STATUS_LABELS.get(row.status, row.status),

@@ -3,7 +3,7 @@ defineOptions({ name: 'WorklogsPage' })
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowRight, Bell, CalendarClock, Download, Plus, RefreshCw, X } from 'lucide-vue-next'
+import { ArrowRight, Bell, CalendarClock, Download, RefreshCw, X } from 'lucide-vue-next'
 import {
   addWorklogComment,
   deleteWorklog,
@@ -171,28 +171,20 @@ interface WorklogSummary {
 }
 
 type TagType = 'success' | 'warning' | 'info' | 'danger'
-type PeriodKey = 'day' | 'week' | 'month'
-type TabKey = 'mine' | 'team' | 'pending'
+type TabKey = 'mine' | 'team'
 
 const store = useUserStore()
 const route = useRoute()
 const router = useRouter()
 const canCreate = computed(() => store.has('worklog:create'))
-const canConfirm = computed(() => store.has('worklog:confirm'))
 const canManageWorklog = computed(() => store.has('worklog:manage'))
 const currentUserId = computed(() => String(store.profile?.id || ''))
 
-const PERIODS: { value: PeriodKey; label: string }[] = [
-  { value: 'day', label: '今日' },
-  { value: 'week', label: '本周' },
-  { value: 'month', label: '本月' }
-]
-
 const STATUS_META: Record<string, { label: string; type: TagType }> = {
   DRAFT: { label: '草稿', type: 'info' },
-  SUBMITTED: { label: '待确认', type: 'warning' },
+  SUBMITTED: { label: '已提交', type: 'warning' },
   PENDING_APPROVE: { label: '补填待审批', type: 'warning' },
-  CONFIRMED: { label: '已确认', type: 'success' },
+  CONFIRMED: { label: '已生效', type: 'success' },
   REJECTED: { label: '已驳回', type: 'danger' }
 }
 const statusMeta = (status: string) =>
@@ -212,8 +204,13 @@ const syncWidth = () => {
   isNarrow.value = window.innerWidth <= 768
 }
 
-/* ------------------------------ 工时概览 ------------------------------ */
-const period = ref<PeriodKey>('day')
+const isoOf = (value: Date) => {
+  const month = String(value.getMonth() + 1).padStart(2, '0')
+  const day = String(value.getDate()).padStart(2, '0')
+  return `${value.getFullYear()}-${month}-${day}`
+}
+
+/* ------------------------------ 本周概览 ------------------------------ */
 const summary = ref<WorklogSummary | null>(null)
 const summaryLoading = ref(false)
 
@@ -221,7 +218,7 @@ const loadSummary = async () => {
   summaryLoading.value = true
   try {
     summary.value = (await worklogSummary({
-      period: period.value,
+      period: 'week',
       date: localToday()
     })) as unknown as WorklogSummary
   } catch {
@@ -231,27 +228,11 @@ const loadSummary = async () => {
   }
 }
 
-const summaryRange = computed(() => {
+const weekRange = computed(() => {
   const data = summary.value
   if (!data) return ''
-  return data.dateFrom === data.dateTo ? data.dateFrom : `${data.dateFrom} ~ ${data.dateTo}`
+  return `${data.dateFrom.slice(5)} ~ ${data.dateTo.slice(5)}`
 })
-
-const trendDays = computed(() => summary.value?.days || [])
-const maxTrendHours = computed(() =>
-  Math.max(...trendDays.value.map((item) => Number(item.hours || 0)), 1)
-)
-const barHeight = (day: DayPoint) => {
-  const hours = Number(day.hours || 0)
-  if (hours <= 0) return '2px'
-  return `${Math.max((hours / maxTrendHours.value) * 100, 8)}%`
-}
-const dayLabel = (iso: string) => iso.slice(5).replace('-', '/')
-const showDayLabel = (index: number) => {
-  const size = trendDays.value.length
-  if (size <= 8) return true
-  return index === 0 || index === size - 1 || index % 5 === 0
-}
 
 const maxProjectHours = computed(() =>
   Math.max(...(summary.value?.byProject || []).map((item) => Number(item.hours || 0)), 1)
@@ -259,7 +240,7 @@ const maxProjectHours = computed(() =>
 const projectWidth = (item: ProjectHours) =>
   `${Math.max((Number(item.hours || 0) / maxProjectHours.value) * 100, 3)}%`
 
-/* ------------------------------ 近 12 周热力 ------------------------------ */
+/* ------------------------------ 近半年工作热力 ------------------------------ */
 interface HeatCell {
   date: string
   hours: number
@@ -281,12 +262,6 @@ const shiftDate = (base: Date, days: number) => {
   return next
 }
 
-const isoOf = (value: Date) => {
-  const month = String(value.getMonth() + 1).padStart(2, '0')
-  const day = String(value.getDate()).padStart(2, '0')
-  return `${value.getFullYear()}-${month}-${day}`
-}
-
 const heatmapWeeks = computed<HeatCell[][]>(() => {
   if (!heatmapStart.value) return []
   const [year, month, day] = heatmapStart.value.split('-').map(Number)
@@ -294,7 +269,7 @@ const heatmapWeeks = computed<HeatCell[][]>(() => {
   const today = localToday()
   const byDate = new Map(heatmapDays.value.map((item) => [item.date, item]))
   const weeks: HeatCell[][] = []
-  for (let week = 0; week < 26; week += 1) {
+  for (let week = 0; week < 53; week += 1) {
     const cells: HeatCell[] = []
     for (let weekday = 0; weekday < 7; weekday += 1) {
       const date = isoOf(shiftDate(start, week * 7 + weekday))
@@ -309,6 +284,20 @@ const heatmapWeeks = computed<HeatCell[][]>(() => {
     weeks.push(cells)
   }
   return weeks
+})
+
+/** 月份刻度：按周一所在月切换，间隔不足 3 周时跳过，避免文字重叠。 */
+const heatmapMonths = computed(() => {
+  const marks: { index: number; month: number; label: string }[] = []
+  heatmapWeeks.value.forEach((week, index) => {
+    const month = Number(week[0].date.slice(5, 7))
+    const last = marks[marks.length - 1]
+    if (last && last.month === month) return
+    if (!last || index - last.index >= 3) {
+      marks.push({ index, month, label: `${month}月` })
+    }
+  })
+  return marks
 })
 
 const heatmapTotal = computed(() =>
@@ -351,11 +340,11 @@ const loadHeatmap = async () => {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
   const mondayOffset = (today.getDay() + 6) % 7
-  const start = shiftDate(today, -(25 * 7 + mondayOffset))
+  const start = shiftDate(today, -(52 * 7 + mondayOffset))
   const dateFrom = isoOf(start)
   const dateTo = isoOf(today)
   heatmapStart.value = dateFrom
-  heatmapRange.value = `${dateFrom.slice(5)} ~ ${dateTo.slice(5)}`
+  heatmapRange.value = `${dateFrom} ~ ${dateTo}`
   heatmapLoading.value = true
   try {
     const data = (await worklogSummary({
@@ -368,18 +357,6 @@ const loadHeatmap = async () => {
     heatmapDays.value = []
   } finally {
     heatmapLoading.value = false
-  }
-}
-
-const todaySummary = ref<DaySummary | null>(null)
-const todayMissing = computed(
-  () => !!todaySummary.value && Number(todaySummary.value.logCount || 0) === 0
-)
-const loadToday = async () => {
-  try {
-    todaySummary.value = (await worklogDaySummary(localToday())) as unknown as DaySummary
-  } catch {
-    todaySummary.value = null
   }
 }
 
@@ -601,10 +578,18 @@ const total = ref(0)
 const listLoading = ref(false)
 const exporting = ref(false)
 const page = reactive({ pageNum: 1, pageSize: 10 })
+
+/** 默认筛选最近两周（含今天）。 */
+const defaultRange = () => {
+  const end = new Date()
+  const start = new Date()
+  start.setDate(start.getDate() - 13)
+  return [isoOf(start), isoOf(end)]
+}
+
 const filters = reactive({
-  dateRange: [] as string[] | null,
+  dateRange: defaultRange(),
   projectId: '',
-  status: '',
   keyword: ''
 })
 
@@ -621,15 +606,10 @@ const loadLogs = async () => {
       dateFrom: range[0],
       dateTo: range[1]
     }
-    if (tab.value === 'pending') {
-      params.status = 'SUBMITTED,PENDING_APPROVE'
-      params.excludeUserId = currentUserId.value || undefined
-    } else if (tab.value === 'team') {
-      // 团队日志只看已提交/已确认的日志，草稿和驳回记录仍仅作者可见
+    if (tab.value === 'team') {
+      // 团队日志只看已生效的日志，草稿仍仅作者可见
       params.status = 'SUBMITTED,PENDING_APPROVE,CONFIRMED'
       params.excludeUserId = currentUserId.value || undefined
-    } else if (filters.status) {
-      params.status = filters.status
     }
     const data = await listWorklogs(params)
     rows.value = (data.list || []) as unknown as WorklogRow[]
@@ -648,9 +628,8 @@ const searchLogs = () => {
 }
 
 const resetFilters = () => {
-  filters.dateRange = []
+  filters.dateRange = defaultRange()
   filters.projectId = ''
-  filters.status = ''
   filters.keyword = ''
   searchLogs()
 }
@@ -708,7 +687,28 @@ const disabledDate = (time: Date) => {
 }
 
 /* ------------------------------ 填写 / 编辑 ------------------------------ */
-const formVisible = ref(false)
+const LOG_TYPE_LABELS: Record<string, string> = {
+  PROJECT: '项目',
+  PERSONAL: '个人',
+  STUDY: '学习',
+  OUTING: '外出',
+  MEETING_COMPANY: '公司会议',
+  MEETING_DEPT: '部门会议',
+  MEETING_PROJECT: '项目会议'
+}
+
+const MEETING_TYPES = [
+  { value: 'MEETING_COMPANY', label: '公司会议' },
+  { value: 'MEETING_DEPT', label: '部门会议' },
+  { value: 'MEETING_PROJECT', label: '项目会议' }
+] as const
+
+const logTypeLabel = (value: string | undefined) =>
+  LOG_TYPE_LABELS[String(value || 'PROJECT').toUpperCase()] || '项目'
+const isProjectType = (value: string | undefined) => !value || value === 'PROJECT'
+const isMeetingType = (value: string | undefined) => String(value || '').startsWith('MEETING_')
+
+const editorRef = ref<HTMLElement>()
 const formMode = ref<'create' | 'edit'>('create')
 const formSaving = ref(false)
 const formSubmitting = ref(false)
@@ -718,7 +718,7 @@ const form = reactive({
   logDate: localToday(),
   projectId: '',
   taskId: '',
-  totalHours: 8,
+  totalHours: undefined as number | undefined,
   progressAfter: 0,
   riskFlag: false,
   content: '',
@@ -734,7 +734,7 @@ const resetForm = () => {
     logDate: localToday(),
     projectId: '',
     taskId: '',
-    totalHours: 8,
+    totalHours: undefined,
     progressAfter: 0,
     riskFlag: false,
     content: '',
@@ -744,9 +744,14 @@ const resetForm = () => {
   tasks.value = []
 }
 
-const switchLogType = (type: 'PROJECT' | 'PERSONAL') => {
+/** 内联表单：切到编辑态或补填日期时滚动到编辑区。 */
+const focusEditor = () => {
+  nextTick(() => editorRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+}
+
+const switchLogType = (type: string) => {
   form.logType = type
-  if (type === 'PERSONAL') {
+  if (!isProjectType(type)) {
     form.projectId = ''
     form.taskId = ''
     form.progressAfter = 0
@@ -755,7 +760,12 @@ const switchLogType = (type: 'PROJECT' | 'PERSONAL') => {
   }
 }
 
-/** 从催办日期直接进入补填；超出窗口时提示，不打开表单。 */
+/** 点「会议」时保留已选会议级别，否则默认项目会议。 */
+const pickMeeting = () => {
+  switchLogType(isMeetingType(form.logType) ? form.logType : 'MEETING_PROJECT')
+}
+
+/** 从催办日期直接进入补填；超出窗口时提示。 */
 const openCreateForDate = (date: string) => {
   if (!canCreate.value) {
     openReminders()
@@ -771,11 +781,9 @@ const openCreateForDate = (date: string) => {
   formMode.value = 'create'
   resetForm()
   if (target) form.logDate = target
-  formVisible.value = true
   loadDaySummary()
+  focusEditor()
 }
-
-const openCreate = () => openCreateForDate('')
 
 const openEdit = async (row: any) => {
   try {
@@ -784,10 +792,11 @@ const openEdit = async (row: any) => {
     formMode.value = 'edit'
     Object.assign(form, {
       id: worklog.id,
+      logType: worklog.logType || 'PROJECT',
       logDate: worklog.logDate,
       projectId: String(worklog.projectId || ''),
       taskId: String(worklog.taskId || ''),
-      totalHours: Number(worklog.totalHours || 0),
+      totalHours: Number(worklog.totalHours) || undefined,
       progressAfter: Number(data.items?.[0]?.progressAfter || 0),
       riskFlag: Boolean(worklog.riskFlag),
       content: worklog.content || '',
@@ -796,11 +805,18 @@ const openEdit = async (row: any) => {
     })
     if (form.logType === 'PROJECT') await loadTasks(form.projectId)
     await loadDaySummary()
-    formVisible.value = true
     detailVisible.value = false
+    focusEditor()
   } catch {
     /* 错误提示由请求拦截器统一弹出 */
   }
+}
+
+/** 取消编辑：清空并回到「写日志」状态。 */
+const cancelEdit = () => {
+  formMode.value = 'create'
+  resetForm()
+  loadDaySummary()
 }
 
 const onProjectChange = async () => {
@@ -829,7 +845,7 @@ const dayStrip = computed(() => {
 })
 
 const validateForm = () => {
-  if (form.logType === 'PROJECT' && !form.projectId) {
+  if (isProjectType(form.logType) && !form.projectId) {
     ElMessage.warning('请选择项目')
     return false
   }
@@ -850,7 +866,7 @@ const persistForm = async (submitAfter: boolean) => {
   if (submitAfter) formSubmitting.value = true
   else formSaving.value = true
   try {
-    const isProject = form.logType === 'PROJECT'
+    const isProject = isProjectType(form.logType)
     const payload = {
       logType: form.logType,
       logDate: form.logDate,
@@ -882,7 +898,8 @@ const persistForm = async (submitAfter: boolean) => {
     } else {
       ElMessage.success('草稿已保存')
     }
-    formVisible.value = false
+    formMode.value = 'create'
+    resetForm()
     await refreshAll()
   } catch {
     /* 错误提示由请求拦截器统一弹出 */
@@ -913,15 +930,6 @@ const canSubmitDetail = computed(
   () => isOwner.value && ['DRAFT', 'REJECTED'].includes(String(detailWorklog.value?.status))
 )
 const canDeleteDetail = computed(() => canEditDetail.value)
-const canConfirmDetail = computed(
-  () => canConfirm.value && detailWorklog.value?.status === 'SUBMITTED'
-)
-const canApproveLate = computed(
-  () => canConfirm.value && detailWorklog.value?.status === 'PENDING_APPROVE'
-)
-const canUnconfirmDetail = computed(
-  () => canConfirm.value && detailWorklog.value?.status === 'CONFIRMED'
-)
 
 const openDetail = async (row: any) => {
   detailVisible.value = true
@@ -943,9 +951,9 @@ const openDetail = async (row: any) => {
   }
 }
 
-const TAB_KEYS: TabKey[] = ['mine', 'team', 'pending']
+const TAB_KEYS: TabKey[] = ['mine', 'team']
 
-/** 读取 URL 上的页签参数（首页「待我确认日志」卡片跳转 `/worklogs?tab=pending`）。 */
+/** 读取 URL 上的页签参数（如 `/worklogs?tab=team`）。 */
 const readTabQuery = (): TabKey | '' => {
   const raw = route.query.tab
   const value = Array.isArray(raw) ? raw[0] : raw
@@ -1100,9 +1108,13 @@ const removeComment = async (comment: WorklogComment) => {
 
 /* ------------------------------ 列表操作 ------------------------------ */
 const refreshAll = async () => {
-  // 热力图同样依赖日志数据，新增/提交/删除后必须一起刷新
-  await Promise.all([loadLogs(), loadSummary(), loadToday(), loadReminderBadge(), loadHeatmap()])
-  if (formVisible.value) await loadDaySummary()
+  await Promise.all([
+    loadLogs(),
+    loadSummary(),
+    loadReminderBadge(),
+    loadDaySummary(),
+    loadHeatmap()
+  ])
   if (detailVisible.value && detailWorklog.value) await reloadDetail(detailWorklog.value.id)
 }
 
@@ -1122,12 +1134,8 @@ const exportLogs = async () => {
       excludeUserId:
         tab.value === 'mine' ? undefined : currentUserId.value || undefined
     }
-    if (tab.value === 'pending') {
-      params.status = 'SUBMITTED,PENDING_APPROVE'
-    } else if (tab.value === 'team') {
+    if (tab.value === 'team') {
       params.status = 'SUBMITTED,PENDING_APPROVE,CONFIRMED'
-    } else if (filters.status) {
-      params.status = filters.status
     }
     await exportWorklogs(params)
     ElMessage.success('导出已开始')
@@ -1149,53 +1157,6 @@ const submitRow = async (row: any) => {
   }
 }
 
-const confirmRow = async (row: any) => {
-  try {
-    await worklogAction(row.id, 'confirm')
-    ElMessage.success('已确认')
-    await refreshAll()
-  } catch {
-    /* 错误提示由请求拦截器统一弹出 */
-  }
-}
-
-const approveLateRow = async (row: any) => {
-  try {
-    await worklogAction(row.id, 'approve-late')
-    ElMessage.success('补填已通过')
-    await refreshAll()
-  } catch {
-    /* 错误提示由请求拦截器统一弹出 */
-  }
-}
-
-const askRejectReason = async () => {
-  try {
-    const result = await ElMessageBox.prompt('请填写驳回原因', '驳回日志', {
-      confirmButtonText: '驳回',
-      cancelButtonText: '取消',
-      inputPlaceholder: '驳回原因（必填）',
-      inputValidator: (value: string) =>
-        value && value.trim() ? true : '请填写驳回原因'
-    })
-    return String(result.value || '').trim()
-  } catch {
-    return ''
-  }
-}
-
-const rejectRow = async (row: any) => {
-  const reason = await askRejectReason()
-  if (!reason) return
-  try {
-    await worklogAction(row.id, 'reject', { reason })
-    ElMessage.success('已驳回')
-    await refreshAll()
-  } catch {
-    /* 错误提示由请求拦截器统一弹出 */
-  }
-}
-
 const removeRow = async (row: any) => {
   try {
     await ElMessageBox.confirm(`确认删除 ${row.logDate} 的这条日志？`, '删除日志', {
@@ -1210,6 +1171,10 @@ const removeRow = async (row: any) => {
     await deleteWorklog(row.id)
     ElMessage.success('日志已删除')
     if (detailWorklog.value?.id === row.id) detailVisible.value = false
+    if (form.id && String(form.id) === String(row.id)) {
+      formMode.value = 'create'
+      resetForm()
+    }
     await refreshAll()
   } catch {
     /* 错误提示由请求拦截器统一弹出 */
@@ -1229,12 +1194,6 @@ const runDetailAction = async (action: string, payload: Record<string, unknown> 
   }
 }
 
-const rejectDetail = async () => {
-  const reason = await askRejectReason()
-  if (!reason) return
-  await runDetailAction('reject', { reason })
-}
-
 onMounted(() => {
   syncWidth()
   window.addEventListener('resize', syncWidth)
@@ -1244,8 +1203,8 @@ onMounted(() => {
     loadOptions(),
     loadLogs(),
     loadSummary(),
-    loadToday(),
     loadReminderBadge(),
+    loadDaySummary(),
     loadHeatmap()
   ]).then(() => handleNoticeQuery())
 })
@@ -1325,90 +1284,221 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       </section>
     </transition>
 
-    <div class="pms-card stats-card" v-loading="summaryLoading">
-      <div class="stats-head">
-        <div class="stats-title">
-          <h3>工时概览</h3>
-          <span class="range">{{ summaryRange }}</span>
-          <el-tag v-if="todayMissing && canCreate" type="warning" effect="plain" size="small">
-            今日未填报
-          </el-tag>
+    <div class="worklog-main" :class="{ 'is-single': !canCreate }">
+      <div v-if="canCreate" ref="editorRef" class="pms-card editor-card">
+        <div class="editor-head">
+          <div class="editor-title">
+            <h3>{{ formMode === 'edit' ? '编辑日志' : '写日志' }}</h3>
+            <span>{{
+              formMode === 'edit' ? '修改后保存即生效' : '直接在下方填写，保存草稿或直接提交'
+            }}</span>
+          </div>
+          <div class="seg log-type-seg">
+            <button
+              type="button"
+              :class="{ 'is-active': isProjectType(form.logType) }"
+              @click="switchLogType('PROJECT')"
+            >
+              项目日志
+            </button>
+            <button
+              type="button"
+              :class="{ 'is-active': form.logType === 'PERSONAL' }"
+              @click="switchLogType('PERSONAL')"
+            >
+              个人日志
+            </button>
+            <button
+              type="button"
+              :class="{ 'is-active': form.logType === 'STUDY' }"
+              @click="switchLogType('STUDY')"
+            >
+              学习
+            </button>
+            <button
+              type="button"
+              :class="{ 'is-active': form.logType === 'OUTING' }"
+              @click="switchLogType('OUTING')"
+            >
+              外出
+            </button>
+            <button
+              type="button"
+              :class="{ 'is-active': isMeetingType(form.logType) }"
+              @click="pickMeeting"
+            >
+              会议
+            </button>
+          </div>
         </div>
-        <div class="stats-ops">
-          <el-radio-group v-model="period" size="small" @change="loadSummary">
-            <el-radio-button v-for="item in PERIODS" :key="item.value" :value="item.value">
-              {{ item.label }}
-            </el-radio-button>
-          </el-radio-group>
-          <el-button
-            v-if="canCreate"
-            type="primary"
-            :icon="Plus"
-            class="pms-create-btn"
-            @click="openCreate"
+
+        <div v-if="isMeetingType(form.logType)" class="seg meeting-seg">
+          <button
+            v-for="item in MEETING_TYPES"
+            :key="item.value"
+            type="button"
+            :class="{ 'is-active': form.logType === item.value }"
+            @click="switchLogType(item.value)"
           >
-            写日志
+            {{ item.label }}
+          </button>
+        </div>
+
+        <el-alert
+          v-if="isProjectType(form.logType) && !options.projects.length"
+          type="info"
+          :closable="false"
+          show-icon
+          title="暂无可填报项目"
+          description="请先联系项目经理将你加入项目成员，再填写工作日志。"
+          style="margin-bottom: 12px"
+        />
+
+        <div class="form-grid">
+          <div class="field">
+            <label>日期 <em>*</em></label>
+            <el-date-picker
+              v-model="form.logDate"
+              type="date"
+              value-format="YYYY-MM-DD"
+              :disabled-date="disabledDate"
+              @change="loadDaySummary"
+            />
+          </div>
+          <div v-if="form.logType === 'PROJECT'" class="field">
+            <label>项目 <em>*</em></label>
+            <el-select
+              v-model="form.projectId"
+              filterable
+              placeholder="选择我参与的项目"
+              @change="onProjectChange"
+            >
+              <el-option
+                v-for="item in options.projects"
+                :key="String(item.id)"
+                :label="`${item.projectName}（${item.projectCode}）`"
+                :value="String(item.id)"
+              />
+            </el-select>
+          </div>
+          <div v-if="form.logType === 'PROJECT'" class="field">
+            <label>任务</label>
+            <el-select v-model="form.taskId" filterable clearable placeholder="可选，选择所属任务">
+              <el-option
+                v-for="item in tasks"
+                :key="String(item.id)"
+                :label="item.taskName"
+                :value="String(item.id)"
+              />
+            </el-select>
+          </div>
+          <div class="field">
+            <label>本人工时（h） <em>*</em></label>
+            <el-input-number
+              v-model="form.totalHours"
+              placeholder="请输入工时"
+              :step="Number(options.step || 0.5)"
+              :min="0"
+              :max="Number(options.maxHours || 24)"
+            />
+          </div>
+          <div v-if="form.logType === 'PROJECT'" class="field">
+            <label>任务进度（%）</label>
+            <el-input-number v-model="form.progressAfter" :min="0" :max="100" />
+          </div>
+          <div v-if="form.logType === 'PROJECT'" class="field">
+            <label>风险标记</label>
+            <el-switch v-model="form.riskFlag" active-text="存在风险" />
+          </div>
+          <div class="field span-full">
+            <label>工作内容 <em>*</em></label>
+            <el-input
+              v-model="form.content"
+              type="textarea"
+              :rows="4"
+              maxlength="1000"
+              show-word-limit
+              placeholder="今天完成了什么？建议写清产出与结果"
+            />
+          </div>
+          <div class="field span-3">
+            <label>问题与阻塞</label>
+            <el-input
+              v-model="form.problem"
+              type="textarea"
+              :rows="3"
+              maxlength="500"
+              placeholder="遇到的技术/协作/资源问题（可选）"
+            />
+          </div>
+          <div class="field span-3">
+            <label>明日计划</label>
+            <el-input
+              v-model="form.plan"
+              type="textarea"
+              :rows="3"
+              maxlength="500"
+              placeholder="下一步要做的事（可选）"
+            />
+          </div>
+        </div>
+
+        <div class="editor-foot">
+          <span class="day-text">
+            当天已填
+            <b :class="{ over: dayStrip.over }">{{ dayStrip.hours }}h</b>
+            · 预警线 {{ dayStrip.warn }}h · {{ dayStrip.count }} 条
+            <el-tag v-if="dayStrip.over" type="warning" size="small" effect="plain">
+              已超预警线
+            </el-tag>
+          </span>
+          <span class="footer-spacer"></span>
+          <el-button v-if="formMode === 'edit'" @click="cancelEdit">取消编辑</el-button>
+          <el-button v-else @click="cancelEdit">清空</el-button>
+          <el-button :loading="formSaving" :disabled="formSubmitting" @click="persistForm(false)">
+            保存草稿
+          </el-button>
+          <el-button
+            type="primary"
+            :loading="formSubmitting"
+            :disabled="formSaving"
+            @click="persistForm(true)"
+          >
+            提交
           </el-button>
         </div>
       </div>
 
-      <div class="stats-body" :class="{ 'is-single': trendDays.length <= 1 }">
-        <div class="kpi-grid">
-          <div class="kpi">
-            <span class="kpi-label">工时合计</span>
-            <span class="kpi-value">{{ summary?.totalHours ?? 0 }}<i>h</i></span>
-            <span class="kpi-sub">日均 {{ summary?.avgHoursPerWorkday ?? 0 }}h</span>
+      <div class="pms-card insight-card">
+        <div class="insight-head">
+          <h3>本周工时分布</h3>
+          <span>{{ weekRange }}</span>
+        </div>
+
+        <div class="insight-stats">
+          <div>
+            <b>{{ summary?.totalHours ?? 0 }}</b>
+            <span>合计工时 (h)</span>
           </div>
-          <div class="kpi">
-            <span class="kpi-label">日志条数</span>
-            <span class="kpi-value">{{ summary?.logCount ?? 0 }}<i>条</i></span>
-            <span class="kpi-sub">
-              补填 {{ summary?.lateCount ?? 0 }} 条 · 及时率
-              {{ summary?.onTimeRate ?? 0 }}%
-            </span>
+          <div>
+            <b>{{ summary?.avgHoursPerWorkday ?? 0 }}</b>
+            <span>日均工时 (h)</span>
           </div>
-          <div class="kpi">
-            <span class="kpi-label">填报天数</span>
-            <span class="kpi-value">
-              {{ summary?.filledDays ?? 0 }}<i>/ {{ summary?.requiredDays ?? 0 }} 天</i>
-            </span>
-            <span class="kpi-sub">按工作日计算</span>
-          </div>
-          <div class="kpi">
-            <span class="kpi-label">填写率</span>
-            <span class="kpi-value">{{ summary?.fillRate ?? 0 }}<i>%</i></span>
-            <span class="kpi-sub">已提交即计入</span>
+          <div>
+            <b>{{ summary?.filledDays ?? 0 }}/{{ summary?.requiredDays ?? 0 }}</b>
+            <span>填报天数</span>
           </div>
         </div>
 
-        <div v-if="trendDays.length > 1" class="trend">
-          <span class="trend-title">每日工时</span>
-          <div class="trend-bars">
-            <el-tooltip
-              v-for="(day, index) in trendDays"
-              :key="day.date"
-              :content="`${day.date}：${day.hours}h / ${day.count} 条`"
-              placement="top"
-            >
-              <div class="trend-col">
-                <div class="trend-bar" :style="{ height: barHeight(day) }"></div>
-                <span class="trend-label">{{ showDayLabel(index) ? dayLabel(day.date) : '' }}</span>
-              </div>
-            </el-tooltip>
-          </div>
-        </div>
-      </div>
-
-      <div class="stats-lower">
         <div class="project-bars">
           <div class="project-bars-head">
-            <span>项目 / 类型工时</span>
+            <span>项目工时</span>
             <span v-if="(summary?.byProject?.length ?? 0) > 6">仅显示前 6 项</span>
           </div>
           <template v-if="summary?.byProject?.length">
             <div
               v-for="item in summary.byProject.slice(0, 6)"
-              :key="String(item.projectId)"
+              :key="`${item.projectId}-${item.projectName}`"
               class="project-bar"
             >
               <span class="pb-name">{{ item.projectName }}</span>
@@ -1418,34 +1508,48 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <span class="pb-hours">{{ item.hours }}h</span>
             </div>
           </template>
-          <div v-else class="stats-empty">>当前周期暂无工时</div>
+          <div v-else class="stats-empty">本周暂无工时</div>
         </div>
 
         <div v-loading="heatmapLoading" class="heatmap-panel">
           <div class="heatmap-head">
-            <span>近半年工作热力</span>
+            <span>近一年工作热力</span>
             <span>{{ heatmapRange }}</span>
           </div>
           <div class="heatmap-scroll">
             <div class="heatmap-body">
               <div class="heatmap-weekdays">
-                <span v-for="(label, index) in ['一', '', '三', '', '五', '', '日']" :key="index">
+                <span v-for="(label, index) in ['一', '', '三', '', '五', '', '']" :key="index">
                   {{ label }}
                 </span>
               </div>
-              <div class="heatmap-grid">
-                <div v-for="(week, weekIndex) in heatmapWeeks" :key="weekIndex" class="heatmap-week">
+              <div class="heatmap-main">
+                <div
+                  class="heatmap-months"
+                  :style="{ gridTemplateColumns: `repeat(${heatmapWeeks.length}, minmax(0, 1fr))` }"
+                >
                   <span
-                    v-for="cell in week"
-                    :key="cell.date"
-                    class="heat-cell"
-                    :class="[
-                      heatLevel(cell.hours),
-                      { 'is-future': cell.future, 'is-today': cell.date === localToday() }
-                    ]"
-                    @mouseenter="showHeatTip(cell, $event)"
-                    @mouseleave="hideHeatTip"
-                  ></span>
+                    v-for="mark in heatmapMonths"
+                    :key="`${mark.month}-${mark.index}`"
+                    :style="{ gridColumn: mark.index + 1 }"
+                  >
+                    {{ mark.label }}
+                  </span>
+                </div>
+                <div class="heatmap-grid">
+                  <div v-for="(week, weekIndex) in heatmapWeeks" :key="weekIndex" class="heatmap-week">
+                    <span
+                      v-for="cell in week"
+                      :key="cell.date"
+                      class="heat-cell"
+                      :class="[
+                        heatLevel(cell.hours),
+                        { 'is-future': cell.future, 'is-today': cell.date === localToday() }
+                      ]"
+                      @mouseenter="showHeatTip(cell, $event)"
+                      @mouseleave="hideHeatTip"
+                    ></span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1492,18 +1596,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           >
             团队日志
           </button>
-          <button
-            v-if="canConfirm"
-            type="button"
-            :class="{ 'is-active': tab === 'pending' }"
-            @click="switchTab('pending')"
-          >
-            团队待确认
-          </button>
         </div>
         <div class="list-ops">
           <span class="list-total">
-            <template v-if="tab === 'team'">仅展示已提交 / 已确认日志 · </template>
+            <template v-if="tab === 'team'">仅展示已生效日志 · </template>
             共 {{ total }} 条
           </span>
           <el-button v-if="canManageWorklog" size="small" @click="openReminderDialog">
@@ -1551,13 +1647,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             :value="String(item.id)"
           />
         </el-select>
-        <el-select v-if="tab === 'mine'" v-model="filters.status" class="f-status" placeholder="全部状态" clearable>
-          <el-option label="草稿" value="DRAFT" />
-          <el-option label="待确认" value="SUBMITTED" />
-          <el-option label="补填待审批" value="PENDING_APPROVE" />
-          <el-option label="已确认" value="CONFIRMED" />
-          <el-option label="已驳回" value="REJECTED" />
-        </el-select>
         <el-input
           v-model="filters.keyword"
           class="f-keyword"
@@ -1577,10 +1666,20 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </el-table-column>
         <el-table-column label="项目 / 类型" min-width="170">
           <template #default="{ row }">
-            <el-tag v-if="row.logType === 'PERSONAL'" size="small" type="info" effect="plain">
-              个人
+            <span v-if="isProjectType(row.logType)" class="project-cell">
+              {{ row.projectName || '非项目' }}
+            </span>
+            <el-tag
+              v-else
+              size="small"
+              :type="row.logType === 'PERSONAL' ? 'info' : 'success'"
+              effect="plain"
+            >
+              {{ logTypeLabel(row.logType) }}
             </el-tag>
-            <span v-else class="project-cell">{{ row.projectName || '非项目' }}</span>
+            <el-tag v-if="row.riskFlag" size="small" type="danger" effect="plain" class="risk-tag">
+              风险
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column
@@ -1595,44 +1694,22 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <span class="hours-cell">{{ row.totalHours }}h</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="120">
+        <el-table-column label="状态" width="110">
           <template #default="{ row }">
             <el-tag size="small" :type="statusMeta(row.status).type">
               {{ statusMeta(row.status).label }}
-            </el-tag>
-            <el-tag v-if="row.riskFlag" size="small" type="danger" effect="plain" class="risk-tag">
-              风险
             </el-tag>
           </template>
         </el-table-column>
         <el-table-column v-if="tab !== 'mine'" label="提交人" width="120">
           <template #default="{ row }">{{ authorLabel(row) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="200">
+        <el-table-column label="操作" width="160">
           <template #default="{ row }">
             <el-button link type="primary" @click="openDetail(row)">详情</el-button>
             <template v-if="editable(row)">
               <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
               <el-button link type="primary" @click="submitRow(row)">提交</el-button>
-            </template>
-            <template v-else-if="tab === 'pending'">
-              <el-button
-                v-if="row.status === 'SUBMITTED'"
-                link
-                type="success"
-                @click="confirmRow(row)"
-              >
-                确认
-              </el-button>
-              <el-button
-                v-if="row.status === 'PENDING_APPROVE'"
-                link
-                type="primary"
-                @click="approveLateRow(row)"
-              >
-                通过
-              </el-button>
-              <el-button link type="danger" @click="rejectRow(row)">驳回</el-button>
             </template>
           </template>
         </el-table-column>
@@ -1640,10 +1717,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-empty
             :description="
               tab === 'mine'
-                ? '还没有日志，点右上角「写日志」开始记录'
-                : tab === 'team'
-                  ? '当前没有可查看的团队日志'
-                  : '暂无待确认日志'
+                ? '最近两周还没有日志，在上方直接填写即可'
+                : '当前没有可查看的团队日志'
             "
             :image-size="76"
           />
@@ -1662,154 +1737,18 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       />
     </div>
 
-    <el-dialog
-      v-model="formVisible"
-      :title="formMode === 'edit' ? '编辑日志' : '写工作日志'"
-      width="min(820px, 94vw)"
-      align-center
-      :close-on-click-modal="false"
-      class="worklog-form-dialog"
-    >
-      <div class="dialog-body">
-        <div class="seg log-type-seg">
-          <button
-            type="button"
-            :class="{ 'is-active': form.logType === 'PROJECT' }"
-            @click="switchLogType('PROJECT')"
-          >
-            项目日志
-          </button>
-          <button
-            type="button"
-            :class="{ 'is-active': form.logType === 'PERSONAL' }"
-            @click="switchLogType('PERSONAL')"
-          >
-            个人日志
-          </button>
-        </div>
-        <p class="form-hint">
-          {{
-            form.logType === 'PROJECT'
-              ? '一条项目日志对应一个项目；同一天参与多个项目请分别填写多条。'
-              : '个人日志不绑定项目，仅本人可见，提交后直接生效。'
-          }}
-        </p>
-        <el-alert
-          v-if="form.logType === 'PROJECT' && !options.projects.length"
-          type="info"
-          :closable="false"
-          show-icon
-          title="暂无可填报项目"
-          description="请先联系项目经理将你加入项目成员，再填写工作日志。"
-          style="margin-bottom: 14px"
-        />
-        <div class="form-grid">
-          <div class="field">
-            <label>日期 <em>*</em></label>
-            <el-date-picker
-              v-model="form.logDate"
-              type="date"
-              value-format="YYYY-MM-DD"
-              :disabled-date="disabledDate"
-              @change="loadDaySummary"
-            />
-          </div>
-          <div v-if="form.logType === 'PROJECT'" class="field">
-            <label>项目 <em>*</em></label>
-            <el-select v-model="form.projectId" filterable placeholder="选择我参与的项目" @change="onProjectChange">
-              <el-option
-                v-for="item in options.projects"
-                :key="String(item.id)"
-                :label="`${item.projectName}（${item.projectCode}）`"
-                :value="String(item.id)"
-              />
-            </el-select>
-          </div>
-          <div v-if="form.logType === 'PROJECT'" class="field">
-            <label>任务</label>
-            <el-select v-model="form.taskId" filterable clearable placeholder="可选，选择所属任务">
-              <el-option v-for="item in tasks" :key="String(item.id)" :label="item.taskName" :value="String(item.id)" />
-            </el-select>
-          </div>
-          <div class="field">
-            <label>本人工时 <em>*</em></label>
-            <el-input-number
-              v-model="form.totalHours"
-              :step="Number(options.step || 0.5)"
-              :min="0"
-              :max="Number(options.maxHours || 24)"
-            />
-          </div>
-          <div v-if="form.logType === 'PROJECT'" class="field">
-            <label>任务进度（%）</label>
-            <el-input-number v-model="form.progressAfter" :min="0" :max="100" />
-          </div>
-          <div v-if="form.logType === 'PROJECT'" class="field">
-            <label>风险标记</label>
-            <el-switch v-model="form.riskFlag" active-text="存在风险" />
-          </div>
-          <div class="field span-2">
-            <label>工作内容 <em>*</em></label>
-            <el-input
-              v-model="form.content"
-              type="textarea"
-              :rows="3"
-              maxlength="1000"
-              show-word-limit
-              placeholder="今天完成了什么？建议写清产出与结果"
-            />
-          </div>
-          <div class="field span-2">
-            <label>问题与阻塞</label>
-            <el-input
-              v-model="form.problem"
-              type="textarea"
-              :rows="2"
-              maxlength="500"
-              placeholder="遇到的技术/协作/资源问题（可选）"
-            />
-          </div>
-          <div class="field span-2">
-            <label>明日计划</label>
-            <el-input
-              v-model="form.plan"
-              type="textarea"
-              :rows="2"
-              maxlength="500"
-              placeholder="下一步要做的事（可选）"
-            />
-          </div>
-        </div>
-
-        <div class="day-strip">
-          <span>当天已填 <b :class="{ over: dayStrip.over }">{{ dayStrip.hours }}h</b></span>
-          <span>预警线 <b>{{ dayStrip.warn }}h</b></span>
-          <span>日志 <b>{{ dayStrip.count }} 条</b></span>
-          <el-tag v-if="dayStrip.over" type="warning" size="small" effect="plain">已超预警线，仅提示不阻断</el-tag>
-          <el-tag v-else type="info" size="small" effect="plain">可继续添加</el-tag>
-        </div>
-      </div>
-      <template #footer>
-        <div class="drawer-footer form-footer">
-          <span class="footer-tip">可选日期为最近 {{ options.backfillMaxDays }} 天</span>
-          <span class="footer-spacer"></span>
-          <el-button @click="formVisible = false">取消</el-button>
-          <el-button :loading="formSaving" :disabled="formSubmitting" @click="persistForm(false)">
-            保存草稿
-          </el-button>
-          <el-button type="primary" :loading="formSubmitting" :disabled="formSaving" @click="persistForm(true)">
-            提交
-          </el-button>
-        </div>
-      </template>
-    </el-dialog>
-
     <el-drawer v-model="detailVisible" title="日志详情" size="min(680px, 94vw)">
       <div v-loading="detailLoading" class="detail">
         <template v-if="detail">
           <div class="detail-head">
             <div>
-              <h3>{{ detail.worklog.projectName || '非项目' }}</h3>
+              <h3>
+                {{
+                  isProjectType(detail.worklog.logType)
+                    ? detail.worklog.projectName || '非项目'
+                    : logTypeLabel(detail.worklog.logType)
+                }}
+              </h3>
               <p class="detail-meta">
                 {{ detail.worklog.logDate }} · {{ detail.worklog.worklogNo }}
                 <template v-if="detail.worklog.userId">
@@ -1818,8 +1757,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               </p>
             </div>
             <div class="detail-tags">
-              <el-tag v-if="detail.worklog.logType === 'PERSONAL'" type="info" effect="plain">
-                个人
+              <el-tag
+                v-if="!isProjectType(detail.worklog.logType)"
+                :type="detail.worklog.logType === 'PERSONAL' ? 'info' : 'success'"
+                effect="plain"
+              >
+                {{ logTypeLabel(detail.worklog.logType) }}
               </el-tag>
               <el-tag :type="statusMeta(detail.worklog.status).type">
                 {{ statusMeta(detail.worklog.status).label }}
@@ -1983,18 +1926,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-button v-if="canEditDetail && detail" @click="openEdit(detail.worklog)">编辑</el-button>
           <el-button v-if="canSubmitDetail" type="primary" @click="runDetailAction('submit')">
             提交
-          </el-button>
-          <el-button v-if="canConfirmDetail" type="success" @click="runDetailAction('confirm')">
-            确认
-          </el-button>
-          <el-button v-if="canApproveLate" type="primary" @click="runDetailAction('approve-late')">
-            通过补填
-          </el-button>
-          <el-button v-if="canConfirmDetail || canApproveLate" type="danger" plain @click="rejectDetail">
-            驳回
-          </el-button>
-          <el-button v-if="canUnconfirmDetail" @click="runDetailAction('unconfirm')">
-            撤销确认
           </el-button>
         </div>
       </template>
@@ -2173,6 +2104,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .reminder-strip {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: 12px;
   margin-bottom: 14px;
@@ -2423,154 +2355,76 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--pms-text-3);
 }
 
-/* ---------------- 工时概览 ---------------- */
-.stats-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 10px;
+/* ---------------- 页头与内联填写 ---------------- */
+.worklog-main {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 16px;
   margin-bottom: 14px;
 }
 
-.stats-title {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.stats-ops {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-left: auto;
-}
-
-.stats-title h3 {
-  margin: 0;
-  font-size: 14.5px;
-  font-weight: 600;
-}
-
-.range {
-  font-size: 12px;
-  color: var(--pms-text-3);
-  font-variant-numeric: tabular-nums;
-}
-
-.stats-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(220px, 0.85fr);
-  gap: 20px;
-  align-items: end;
-}
-
-.stats-body.is-single {
+.worklog-main.is-single {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+.editor-card {
+  margin-bottom: 0;
 }
 
-.kpi {
+.insight-card {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.insight-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
   padding: 10px 12px;
-  border: 1px solid var(--pms-line);
-  border-radius: 10px;
-  background: #fafbfe;
+  border-radius: 8px;
+  background: #f7f9fd;
 }
 
-.kpi-label {
-  font-size: 12px;
-  color: var(--pms-text-3);
+.insight-stats div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
-.kpi-value {
-  font-size: 21px;
+.insight-stats b {
+  font-size: 15px;
   font-weight: 600;
-  line-height: 1.25;
+  line-height: 1.2;
   color: var(--pms-text);
   font-variant-numeric: tabular-nums;
 }
 
-.kpi-value i {
-  margin-left: 2px;
-  font-size: 11.5px;
-  font-style: normal;
-  font-weight: 500;
+.insight-stats span {
+  font-size: 11px;
   color: var(--pms-text-3);
 }
 
-.kpi-sub {
-  font-size: 11.5px;
-  color: var(--pms-text-3);
-}
-
-.trend {
+.insight-head {
   display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  gap: 6px;
-  height: 96px;
-  padding-bottom: 2px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
 }
 
-.trend-title {
-  font-size: 11.5px;
+.insight-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.insight-head span {
+  font-size: 12px;
   color: var(--pms-text-3);
-}
-
-.trend-bars {
-  display: flex;
-  align-items: flex-end;
-  gap: 4px;
-  width: 100%;
-  flex: 1;
-  min-height: 0;
-}
-
-.trend-col {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-}
-
-.trend-bar {
-  width: 100%;
-  max-width: 18px;
-  min-height: 2px;
-  border-radius: 4px 4px 0 0;
-  background: linear-gradient(180deg, #7aa2ff, #3370ff);
-  transition: height 0.2s ease;
-}
-
-.trend-label {
-  font-size: 10px;
-  line-height: 1;
-  color: var(--pms-text-3);
-  white-space: nowrap;
-}
-
-.stats-lower {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  align-items: start;
-  gap: 20px;
-  margin-top: 16px;
-  padding-top: 14px;
-  border-top: 1px solid var(--pms-line-soft);
 }
 
 .project-bars {
@@ -2589,7 +2443,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 .stats-empty {
-  padding: 16px 12px;
+  padding: 14px 12px;
   border: 1px dashed var(--pms-line);
   border-radius: 8px;
   background: #fafbfe;
@@ -2599,7 +2453,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
 .project-bar {
   display: grid;
-  grid-template-columns: 130px minmax(0, 1fr) 64px;
+  grid-template-columns: 92px minmax(0, 1fr) 48px;
   align-items: center;
   gap: 10px;
 }
@@ -2633,26 +2487,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   font-variant-numeric: tabular-nums;
 }
 
-.heatmap-panel {
+/* ---------------- 右侧热力图 ---------------- */
+.insight-card .heatmap-panel {
   position: relative;
   min-width: 0;
-  padding-left: 20px;
-  border-left: 1px solid var(--pms-line-soft);
+  padding-top: 14px;
+  border-top: 1px solid var(--pms-line-soft);
 }
 
-.heatmap-scroll {
-  overflow-x: auto;
-  padding: 6px 4px 4px;
-}
-
-@media (min-width: 901px) {
-  .heatmap-scroll {
-    overflow: visible;
-    padding: 6px 0 0;
-  }
-}
-
-.heatmap-head {
+.insight-card .heatmap-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2662,80 +2505,112 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--pms-text-3);
 }
 
-.heatmap-body {
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 8px;
+.insight-card .heatmap-scroll {
+  padding: 6px 0 0;
+  overflow: visible;
 }
 
-.heatmap-weekdays {
+.insight-card .heatmap-body {
   display: grid;
-  grid-template-rows: repeat(7, 14px);
-  gap: 3px;
-  width: 14px;
-  flex: none;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 6px;
+}
+
+.insight-card .heatmap-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.insight-card .heatmap-months {
+  display: grid;
+  gap: 2px;
+  height: 14px;
   font-size: 9.5px;
   line-height: 14px;
   color: var(--pms-text-3);
-  text-align: center;
 }
 
-.heatmap-grid {
-  display: flex;
-  gap: 3px;
+.insight-card .heatmap-months span {
+  white-space: nowrap;
 }
 
-.heatmap-week {
+.insight-card .heatmap-weekdays {
   display: grid;
-  grid-template-rows: repeat(7, 14px);
-  gap: 3px;
+  grid-template-rows: repeat(7, 1fr);
+  gap: 2px;
+  width: 14px;
+  padding-top: 18px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--pms-text-3);
+  text-align: center;
+  align-items: center;
 }
 
-.heat-cell {
+.insight-card .heatmap-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 2px;
+  min-width: 0;
+}
+
+.insight-card .heatmap-week {
+  display: grid;
+  grid-template-rows: repeat(7, auto);
+  gap: 2px;
+}
+
+.insight-card .heat-cell {
   display: block;
-  width: 14px;
-  height: 14px;
-  border-radius: 3px;
+  box-sizing: border-box;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  border-radius: 2px;
   background: #ebedf0;
   transition:
     transform 0.1s ease,
     outline-color 0.1s ease;
 }
 
-.heat-cell.is-l1 {
+.insight-card .heat-cell.is-l1 {
   background: #c6dbff;
 }
 
-.heat-cell.is-l2 {
+.insight-card .heat-cell.is-l2 {
   background: #8ab4ff;
 }
 
-.heat-cell.is-l3 {
+.insight-card .heat-cell.is-l3 {
   background: #4d87ff;
 }
 
-.heat-cell.is-l4 {
+.insight-card .heat-cell.is-l4 {
   background: #1f5fe0;
 }
 
-.heat-cell.is-future {
+.insight-card .heat-cell.is-future {
   background: transparent;
   border: 1px dashed #e7ecf4;
 }
 
-.heat-cell.is-today {
-  outline: 2px solid var(--pms-primary-deep);
-  outline-offset: 1px;
+.insight-card .heat-cell.is-today {
+  outline: none;
+  /* 用内阴影描边，避免描边外扩盖住相邻格子 */
+  box-shadow: inset 0 0 0 1px var(--pms-primary-deep);
 }
 
-.heat-cell:not(.is-future):hover {
+.insight-card .heat-cell:not(.is-future):hover {
   outline: 1px solid rgba(31, 95, 224, 0.45);
   outline-offset: 1px;
-  transform: scale(1.12);
+  transform: scale(1.15);
 }
 
-.heatmap-foot {
+.insight-card .heatmap-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2746,19 +2621,21 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--pms-text-3);
 }
 
-.heatmap-legend {
+.insight-card .heatmap-legend {
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 
-.heatmap-legend .heat-cell {
-  width: 12px;
-  height: 12px;
-  border-radius: 3px;
+.insight-card .heatmap-legend .heat-cell {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  aspect-ratio: auto;
+  border-radius: 2px;
 }
 
-.heatmap-tooltip {
+.insight-card .heatmap-tooltip {
   position: absolute;
   z-index: 5;
   display: flex;
@@ -2776,7 +2653,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   box-shadow: 0 6px 18px rgba(15, 23, 42, 0.18);
 }
 
-.heatmap-tooltip::after {
+.insight-card .heatmap-tooltip::after {
   position: absolute;
   top: 100%;
   left: 50%;
@@ -2788,24 +2665,78 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   transform: translateX(-50%);
 }
 
-.heatmap-tooltip.is-below {
+.insight-card .heatmap-tooltip.is-below {
   transform: translate(-50%, 0);
 }
 
-.heatmap-tooltip.is-below::after {
+.insight-card .heatmap-tooltip.is-below::after {
   top: auto;
   bottom: 100%;
   border-top-color: transparent;
   border-bottom-color: #1f2328;
 }
 
-.heatmap-tooltip b {
+.insight-card .heatmap-tooltip b {
   font-size: 12px;
   font-weight: 600;
 }
 
-.heatmap-tooltip span {
+.insight-card .heatmap-tooltip span {
   color: #c9d1d9;
+}
+
+.editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.editor-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.editor-title h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.editor-title span {
+  font-size: 12.5px;
+  color: var(--pms-text-3);
+}
+
+.editor-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--pms-line-soft);
+}
+
+.day-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--pms-text-3);
+}
+
+.day-text b {
+  font-variant-numeric: tabular-nums;
+  color: var(--pms-text-2);
+}
+
+.day-text b.over {
+  color: #c47f17;
 }
 
 /* ---------------- 列表 ---------------- */
@@ -2884,10 +2815,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   flex: 0 0 200px;
 }
 
-.filter-row :deep(.f-status) {
-  flex: 0 0 140px;
-}
-
 .filter-row :deep(.f-keyword) {
   flex: 1 1 220px;
   min-width: 180px;
@@ -2932,33 +2859,35 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   justify-content: flex-end;
 }
 
-/* ---------------- 填写弹窗 ---------------- */
-.dialog-body {
-  max-height: min(66vh, 620px);
-  overflow-y: auto;
-  padding-right: 4px;
+/* ---------------- 填写表单 ---------------- */
+.log-type-seg {
+  margin-bottom: 0;
 }
 
-.log-type-seg {
+.log-type-seg button {
+  padding: 0 12px;
+}
+
+.meeting-seg {
   margin-bottom: 12px;
 }
 
-.form-hint {
-  margin: 0 0 14px;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--pms-text-3);
+.meeting-seg button {
+  height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
 }
 
 .form-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 14px 16px;
 }
 
 .field {
   display: flex;
   flex-direction: column;
+  grid-column: span 2;
   gap: 6px;
   min-width: 0;
 }
@@ -3001,8 +2930,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--el-color-danger);
 }
 
-.field.span-2 {
-  grid-column: span 2;
+.field.span-full {
+  grid-column: 1 / -1;
+}
+
+.field.span-3 {
+  grid-column: span 3;
 }
 
 .field :deep(.el-date-editor),
@@ -3011,39 +2944,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   width: 100%;
 }
 
-.day-strip {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 16px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: #f7f9fd;
-  font-size: 12.5px;
-  color: var(--pms-text-2);
-}
-
-.day-strip b {
-  font-variant-numeric: tabular-nums;
-  color: var(--pms-text);
-}
-
-.day-strip b.over {
-  color: #c47f17;
-}
-
 .drawer-footer {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
   width: 100%;
-}
-
-.footer-tip {
-  font-size: 12px;
-  color: var(--pms-text-3);
 }
 
 .footer-spacer {
@@ -3236,32 +3142,33 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   flex: 1;
 }
 
-@media (max-width: 900px) {
-  .stats-body {
-    grid-template-columns: 1fr;
-  }
-
-  .stats-lower {
-    grid-template-columns: 1fr;
-  }
-
-  .heatmap-panel {
-    padding-top: 14px;
-    padding-left: 0;
-    border-top: 1px solid var(--pms-line-soft);
-    border-left: 0;
-  }
-
-  .trend {
-    height: 70px;
+@media (max-width: 1280px) {
+  .worklog-main {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
 @media (max-width: 768px) {
-  .stats-ops {
+  .editor-head {
+    align-items: flex-start;
+  }
+
+  .editor-head .seg {
     width: 100%;
+  }
+
+  .editor-head .seg button {
+    flex: 1;
+  }
+
+  .editor-foot > .el-button,
+  .editor-foot > .el-button + .el-button {
+    flex: 1;
     margin-left: 0;
-    justify-content: space-between;
+  }
+
+  .editor-foot .day-text {
+    width: 100%;
   }
 
   .list-head .seg {
@@ -3304,10 +3211,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     padding: 4px 14px 16px;
   }
 
-  .kpi-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .filter-row > * {
     flex: 1 1 100%;
     min-width: 0;
@@ -3315,7 +3218,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
   .filter-row :deep(.f-range),
   .filter-row :deep(.f-project),
-  .filter-row :deep(.f-status),
   .filter-row :deep(.f-keyword) {
     flex: 1 1 100%;
     min-width: 0;
@@ -3331,7 +3233,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     grid-template-columns: 1fr;
   }
 
-  .field.span-2 {
+  .field,
+  .field.span-full,
+  .field.span-3 {
     grid-column: auto;
   }
 
@@ -3343,30 +3247,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     padding: 4px 14px 20px;
   }
 
-  .dialog-body {
-    max-height: 70vh;
-  }
-
-  .form-footer .footer-tip {
-    width: 100%;
-  }
-
-  .form-footer .footer-spacer {
-    display: none;
-  }
-
-  .form-footer > .el-button,
-  .form-footer > .el-button + .el-button {
-    flex: 1;
-    margin-left: 0;
-  }
-
   .pager {
     justify-content: center;
-  }
-
-  .project-bar {
-    grid-template-columns: 96px minmax(0, 1fr) 56px;
   }
 }
 </style>

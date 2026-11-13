@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Final
 
@@ -45,6 +46,33 @@ _STATUS_CONFIRMABLE: Final[frozenset[str]] = frozenset({WorklogStatus.SUBMITTED}
 _STATUS_EDITABLE: Final[frozenset[str]] = frozenset(
     {WorklogStatus.DRAFT, WorklogStatus.REJECTED}
 )
+
+
+@dataclass(frozen=True)
+class LogTypeMeta:
+    """日志类型元数据，收敛各处的类型分支判断。"""
+
+    label: str
+    requires_project: bool = False
+    personal_only: bool = False
+
+
+#: 项目日志绑定项目/任务；个人日志仅本人可见；
+#: 学习/外出/会议属于不绑定项目的日常事务日志，团队可见、提交即生效。
+LOG_TYPE_META: Final[dict[str, LogTypeMeta]] = {
+    "PROJECT": LogTypeMeta("项目", requires_project=True),
+    "PERSONAL": LogTypeMeta("个人", personal_only=True),
+    "STUDY": LogTypeMeta("学习"),
+    "OUTING": LogTypeMeta("外出"),
+    "MEETING_COMPANY": LogTypeMeta("公司会议"),
+    "MEETING_DEPT": LogTypeMeta("部门会议"),
+    "MEETING_PROJECT": LogTypeMeta("项目会议"),
+}
+
+
+def log_type_meta(log_type: str | None) -> LogTypeMeta:
+    """取日志类型元数据，未知类型按项目日志兜底。"""
+    return LOG_TYPE_META.get((log_type or "PROJECT").upper(), LOG_TYPE_META["PROJECT"])
 
 
 async def _limits(config: ConfigService) -> HoursLimits:
@@ -99,7 +127,8 @@ async def save_draft(
 
     worklog: WlWorklog | None = None
     log_type = (log_type or "PROJECT").upper()
-    if log_type not in {"PROJECT", "PERSONAL"}:
+    meta = LOG_TYPE_META.get(log_type)
+    if meta is None:
         raise BizRuleError("日志类型无效")
 
     if worklog_id:
@@ -109,8 +138,8 @@ async def save_draft(
         if worklog.status not in _STATUS_EDITABLE:
             raise ConflictError(f"该日志状态为 {worklog.status}，不允许修改")
 
-    if log_type == "PERSONAL":
-        # 个人日志不绑定项目/任务，不参与项目工时与风险
+    if not meta.requires_project:
+        # 个人/学习/外出/会议日志不绑定项目、任务，不参与项目工时与风险
         project_id = 0
         task_id = 0
         progress_after = 0
@@ -128,7 +157,7 @@ async def save_draft(
         content = str(payload.get("content", content) or content)
         progress_after = float(payload.get("progressAfter", progress_after) or progress_after)
 
-    if log_type == "PROJECT":
+    if meta.requires_project:
         await _ensure_project_target(session, context, project_id, task_id)
 
     hours = float(total_hours)
@@ -224,8 +253,8 @@ async def submit(session: AsyncSession, worklog_id: int, user_id: int = 0) -> Wl
     worklog.submit_at = now
     worklog.update_by = user_id
 
-    if worklog.log_type == "PERSONAL":
-        # 个人日志不进入团队确认队列，提交即生效
+    if not log_type_meta(worklog.log_type).requires_project:
+        # 个人/学习/外出/会议日志不进入确认队列，提交即生效
         worklog.status = WorklogStatus.CONFIRMED
         worklog.confirm_by = user_id or worklog.user_id
         worklog.confirm_time = date.today()
@@ -761,8 +790,8 @@ async def count_worklogs(
 async def can_view(
     session: AsyncSession, context: AuthContext, worklog: WlWorklog
 ) -> bool:
-    """日志可见性：个人日志仅本人；项目日志按本人/下级/部门/项目组规则。"""
-    if worklog.log_type == "PERSONAL":
+    """日志可见性：个人日志仅本人；其他日志按本人/下级/部门/项目组规则。"""
+    if log_type_meta(worklog.log_type).personal_only:
         return worklog.user_id == context.user_id
     config = ConfigService(session)
     items = await list_items(session, worklog.id)
@@ -892,14 +921,28 @@ async def period_summary(
     )
     rows = list(result.scalars().all())
 
-    by_project: dict[int, dict[str, object]] = {}
+    # 项目日志按项目聚合；个人/学习/外出/会议按类型聚合，避免都挤进「个人 / 其他」
+    by_project: dict[str, dict[str, object]] = {}
     by_status: dict[str, int] = {}
     late_count = 0
     for row in rows:
-        project_id = int(row.project_id or 0)
+        meta = log_type_meta(row.log_type)
+        if meta.requires_project:
+            project_id = int(row.project_id or 0)
+            key = f"project:{project_id}"
+            fallback_name = ""
+        else:
+            project_id = 0
+            key = f"type:{(row.log_type or 'PERSONAL').upper()}"
+            fallback_name = meta.label
         bucket = by_project.setdefault(
-            project_id,
-            {"projectId": project_id, "hours": 0.0, "logCount": 0},
+            key,
+            {
+                "projectId": project_id,
+                "projectName": fallback_name,
+                "hours": 0.0,
+                "logCount": 0,
+            },
         )
         bucket["hours"] = float(bucket["hours"]) + float(row.total_hours)
         bucket["logCount"] = int(bucket["logCount"]) + 1
@@ -907,11 +950,15 @@ async def period_summary(
         if row.is_late:
             late_count += 1
 
-    names = await project_names(session, set(by_project))
+    names = await project_names(
+        session,
+        {int(item["projectId"]) for item in by_project.values() if int(item["projectId"])},
+    )
     projects = [
         {
             "projectId": item["projectId"],
-            "projectName": names.get(int(item["projectId"]), "") or "个人 / 其他",
+            "projectName": names.get(int(item["projectId"]), "")
+            or str(item["projectName"] or "个人 / 其他"),
             "hours": round_hours(float(item["hours"]), limits.step),
             "logCount": item["logCount"],
         }
