@@ -16,6 +16,7 @@ import {
   KeyRound,
   LayoutDashboard,
   LogOut,
+  Mail,
   Menu,
   Network,
   NotebookPen,
@@ -108,6 +109,7 @@ const navSections: NavSection[] = [
     items: [
       { path: '/roles', label: '角色权限', icon: ShieldCheck, permission: 'org:role:view' },
       { path: '/configs', label: '规则参数', icon: SlidersHorizontal, permission: 'sys:config' },
+      { path: '/mail', label: '邮件通知', icon: Mail, permission: 'sys:config' },
       { path: '/audit', label: '审计留痕', icon: ScrollText, permission: 'sys:log:view' }
     ]
   }

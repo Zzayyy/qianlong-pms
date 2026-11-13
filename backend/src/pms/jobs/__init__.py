@@ -15,6 +15,7 @@ from pms.audit.archive import DEFAULT_KEEP_MONTHS, archive_audit
 from pms.audit.lock import DEFAULT_TTL_SECONDS, acquire, release
 from pms.common.logging import get_logger
 from pms.core.database import get_session_factory
+from pms.notice import mail as mail_service
 from pms.notice import service as notice_service
 from pms.org.models import SysUser
 from pms.report import service as report_service
@@ -197,6 +198,21 @@ async def job_archive_audit(keep_months: int | None = None) -> dict[str, Any]:
     return report
 
 
+async def job_dispatch_mail() -> dict[str, int]:
+    """邮件待发队列派发：每分钟执行，失败按指数退避重试。"""
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await mail_service.dispatch_pending(session)
+    if any(result.values()):
+        logger.info("邮件派发完成：%s", result)
+    return result
+
+
+async def _mail_exclusive() -> Any:
+    """邮件派发（带分布式锁）。"""
+    return await run_exclusive("mail_dispatch", job_dispatch_mail)
+
+
 async def _remind_exclusive() -> Any:
     """日志催办（带分布式锁，同时推送站内通知）。"""
     return await run_exclusive(
@@ -251,6 +267,13 @@ def build_scheduler() -> AsyncIOScheduler:
         CronTrigger(day=1, hour=3, minute=0),
         id="audit_archive",
         name="审计表按月归档（每月 1 日 03:00）",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _mail_exclusive,
+        CronTrigger(minute="*"),
+        id="mail_dispatch",
+        name="邮件通知派发（每分钟）",
         replace_existing=True,
     )
     return scheduler

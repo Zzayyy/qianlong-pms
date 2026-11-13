@@ -10,8 +10,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pms.common.exceptions import BizRuleError, ConflictError, ForbiddenError, NotFoundError
+from pms.common.logging import get_logger
 from pms.common.snowflake import next_id
 from pms.core.context import AuthContext
+from pms.notice import mail as mail_service
 from pms.project.models import (
     PrjAttachment,
     PrjBaseline,
@@ -35,6 +37,59 @@ from pms.system.config_service import ConfigService
 
 _DEFAULT_PREFIX: Final[str] = "PRJ"
 _BASELINE_VERSION: Final[str] = "V1.0"
+
+logger = get_logger(__name__)
+
+_PROJECT_STATUS_TEXT: Final[dict[str, str]] = {
+    "DRAFT": "草稿",
+    "APPROVING": "审批中",
+    "APPROVED": "已立项",
+    "IN_PROGRESS": "进行中",
+    "SUSPENDED": "已挂起",
+    "COMPLETED": "已完成",
+    "ACCEPTED": "已验收",
+    "TERMINATED": "已终止",
+    "CLOSED": "已关闭",
+}
+
+
+async def _notify_project(
+    session: AsyncSession,
+    event_code: str,
+    project: PrjProject,
+    operator_id: int = 0,
+    reason: str = "",
+) -> None:
+    """发送项目相关邮件（仅入队，失败不影响主流程）。"""
+    try:
+        if event_code == "PROJECT_SUBMITTED":
+            receivers = await mail_service.role_user_ids(session, ("PMO", "ADMIN"))
+            receivers.add(int(project.pm_id or 0))
+        else:
+            receivers = await mail_service.project_recipients(session, project.id)
+        await mail_service.notify_event(
+            session,
+            event_code,
+            biz_type="PROJECT",
+            biz_id=project.id,
+            operator_id=operator_id,
+            user_ids=receivers,
+            context={
+                "project": {
+                    "name": project.project_name,
+                    "code": project.project_code,
+                    "status": _PROJECT_STATUS_TEXT.get(project.status, project.status),
+                    "amount": f"{float(project.contract_amount or 0):,.2f}",
+                    "approvalLevel": f"L{project.approval_level or 1}",
+                },
+                "operator": {"name": await mail_service.user_name(session, operator_id)},
+                "reason": reason,
+                "time": date.today().isoformat(),
+                "link": "/projects",
+            },
+        )
+    except Exception:  # noqa: BLE001 - 邮件失败不影响业务事务
+        logger.exception("项目邮件通知入队失败：%s %s", event_code, project.id)
 
 
 async def next_project_code(session: AsyncSession, when: date | None = None) -> str:
@@ -213,13 +268,17 @@ async def remove_member(
     await session.flush()
 
 
-async def submit_for_approval(session: AsyncSession, project_id: int) -> PrjProject:
+async def submit_for_approval(
+    session: AsyncSession, project_id: int, operator_id: int = 0
+) -> PrjProject:
     """提交立项审批：按金额确定审批层级并进入 APPROVING。"""
     project = await _get_project(session, project_id)
     assert_transit(project.status, ProjectStatus.APPROVING)
     project.approval_level = await resolve_approval_level(session, float(project.contract_amount))
     project.status = ProjectStatus.APPROVING
+    project.update_by = operator_id or project.create_by
     await session.flush()
+    await _notify_project(session, "PROJECT_SUBMITTED", project, operator_id)
     return project
 
 
@@ -231,6 +290,7 @@ async def approve_project(session: AsyncSession, project_id: int, operator_id: i
     project.update_by = operator_id
     await session.flush()
     await freeze_baseline(session, project.id, operator_id)
+    await _notify_project(session, "PROJECT_APPROVED", project, operator_id)
     return project
 
 
@@ -245,6 +305,7 @@ async def reject_project(
     if reason:
         project.remark = reason
     await session.flush()
+    await _notify_project(session, "PROJECT_REJECTED", project, operator_id, reason)
     return project
 
 
@@ -263,6 +324,7 @@ async def change_status(
         # 终止必须留痕：原因写在项目上，前端详情可直接展示
         project.terminate_reason = (reason or "").strip()
     await session.flush()
+    await _notify_project(session, "PROJECT_STATUS_CHANGED", project, operator_id, reason)
     return project
 
 

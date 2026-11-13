@@ -28,7 +28,13 @@ _local_cache: dict[str, tuple[str, float]] = {}
 _BOOL_TRUE: Final[frozenset[str]] = frozenset({"true", "1", "yes", "on"})
 _BOOL_FALSE: Final[frozenset[str]] = frozenset({"false", "0", "no", "off"})
 _OPTIONAL_EMPTY: Final[frozenset[str]] = frozenset(
-    {"notify.mail.smtpHost", "notify.mail.smtpUser", "notify.mail.smtpFrom"}
+    {
+        "notify.mail.smtpHost",
+        "notify.mail.smtpUser",
+        "notify.mail.smtpFrom",
+        "notify.mail.password",
+        "notify.mail.testTo",
+    }
 )
 
 
@@ -49,6 +55,11 @@ def validate_value(key: str, raw: str) -> str:
         if lowered in _BOOL_FALSE:
             return "false"
         raise BizRuleError(f"{key} 只接受 true 或 false")
+    if key == "notify.mail.security":
+        lowered = value.upper()
+        if lowered not in {"SSL", "STARTTLS", "NONE"}:
+            raise BizRuleError("notify.mail.security 只接受 SSL / STARTTLS / NONE")
+        return lowered
     if kind in {"INT", "FLOAT"}:
         if not value:
             raise BizRuleError(f"{key} 不能为空")

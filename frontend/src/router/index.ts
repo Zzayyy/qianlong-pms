@@ -26,6 +26,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'reports', redirect: '/dept-board' },
       { path: 'crm', name: 'crm', component: () => import('@/views/Crm.vue'), meta: { title: '客户与商机', permission: 'crm:customer:view' } },
       { path: 'configs', name: 'configs', component: () => import('@/views/Configs.vue'), meta: { title: '规则参数', permission: 'sys:config' } },
+      { path: 'mail', name: 'mail', component: () => import('@/views/Mail.vue'), meta: { title: '邮件通知', permission: 'sys:config' } },
       { path: 'audit', name: 'audit', component: () => import('@/views/Audit.vue'), meta: { title: '审计留痕', permission: 'sys:log:view' } },
       { path: '403', name: 'forbidden', component: () => import('@/views/Forbidden.vue'), meta: { title: '无权访问' } }
     ]

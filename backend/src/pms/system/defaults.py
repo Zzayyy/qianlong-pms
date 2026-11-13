@@ -68,8 +68,15 @@ DEFAULT_CONFIGS: Final[Mapping[str, ConfigValue]] = {
     "notify.mail.enabled": "true",
     "notify.mail.smtpHost": "",
     "notify.mail.smtpPort": "465",
+    "notify.mail.security": "SSL",
     "notify.mail.smtpUser": "",
     "notify.mail.smtpFrom": "",
+    "notify.mail.fromName": "PMS 项目管理",
+    "notify.mail.password": "",
+    "notify.mail.timeoutSeconds": "15",
+    "notify.mail.keepDays": "180",
+    "notify.mail.excludeOperator": "true",
+    "notify.mail.testTo": "",
     "export.watermark": "true",
 }
 
@@ -129,8 +136,15 @@ CONFIG_REMARKS: Final[Mapping[str, str]] = {
     "notify.mail.enabled": "邮件通知开关；false=只发站内信",
     "notify.mail.smtpHost": "SMTP 服务器地址；为空则跳过邮件发送",
     "notify.mail.smtpPort": "SMTP 端口，SSL 常用 465，STARTTLS 常用 587",
+    "notify.mail.security": "加密方式：SSL（常用 465）/ STARTTLS（常用 587）/ NONE",
     "notify.mail.smtpUser": "SMTP 登录账号（通常与发件人邮箱一致）",
-    "notify.mail.smtpFrom": "发件人邮箱，可写成「项目管理系统 <no-reply@example.com>」",
+    "notify.mail.smtpFrom": "发件人邮箱，留空则使用登录账号",
+    "notify.mail.fromName": "收件人看到的发件人显示名，如「PMS 项目管理」",
+    "notify.mail.password": "SMTP 登录密码/授权码；加密存储，留空表示不修改",
+    "notify.mail.timeoutSeconds": "SMTP 连接与发送超时（秒）",
+    "notify.mail.keepDays": "邮件发送记录保留天数，超期随归档任务清理",
+    "notify.mail.excludeOperator": "是否不给操作人本人发送通知；true=跳过操作人",
+    "notify.mail.testTo": "测试收件人白名单；非空时所有邮件只发到该地址",
     # 导出
     "export.watermark": "导出 Excel/PDF 时是否添加水印（含导出人与时间）",
 }

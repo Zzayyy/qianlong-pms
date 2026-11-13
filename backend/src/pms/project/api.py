@@ -285,7 +285,7 @@ async def submit(
     context: Annotated[AuthContext, Depends(require_permissions("project:create"))],
 ) -> object:
     """提交审批，审批层级按合同金额阈值自动确定。"""
-    project = await service.submit_for_approval(session, project_id)
+    project = await service.submit_for_approval(session, project_id, context.user_id)
     await session.commit()
     return ok({"id": project.id, "status": project.status, "approvalLevel": project.approval_level})
 

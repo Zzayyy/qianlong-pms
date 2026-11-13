@@ -23,6 +23,7 @@ from pms.change.state import ApprovalStatus, ChangeNode, ChangeStatus, assert_tr
 from pms.common.exceptions import BizRuleError, ConflictError, ForbiddenError, NotFoundError
 from pms.common.logging import get_logger
 from pms.core.context import AuthContext
+from pms.notice import mail as mail_service
 from pms.org.models import SysRole, SysUser, SysUserRole
 from pms.project import service as project_service
 from pms.project.models import (
@@ -39,6 +40,47 @@ from pms.system.config_service import ConfigService
 logger = get_logger(__name__)
 
 _CODE_PREFIX: Final[str] = "CR"
+
+
+async def _notify_change(
+    session: AsyncSession,
+    event_code: str,
+    request: ChgRequest,
+    operator_id: int = 0,
+    reason: str = "",
+) -> None:
+    """变更邮件通知（仅入队，异常不影响主流程）。"""
+    try:
+        receivers = {int(request.submitter_id or 0), int(request.pm_id or 0)}
+        if event_code == "CHANGE_SUBMITTED":
+            receivers |= await mail_service.role_user_ids(session, ("PMO", "ADMIN"))
+        project = await session.get(PrjProject, request.project_id)
+        await mail_service.notify_event(
+            session,
+            event_code,
+            biz_type="CHANGE",
+            biz_id=request.id,
+            operator_id=operator_id,
+            user_ids=receivers,
+            context={
+                "change": {
+                    "code": request.request_code,
+                    "title": request.title,
+                    "level": request.level or "",
+                    "type": request.change_type,
+                },
+                "project": {
+                    "name": project.project_name if project else "—",
+                    "code": project.project_code if project else "—",
+                },
+                "operator": {"name": await mail_service.user_name(session, operator_id)},
+                "reason": reason,
+                "time": date.today().isoformat(),
+                "link": "/changes",
+            },
+        )
+    except Exception:  # noqa: BLE001 - 邮件失败不影响业务事务
+        logger.exception("变更邮件通知入队失败：%s %s", event_code, request.id)
 # R-CHG-02：仅以下项目状态可提交变更
 _ALLOWED_PROJECT_STATUS: Final[frozenset[str]] = frozenset(
     {ProjectStatus.APPROVED, ProjectStatus.IN_PROGRESS, ProjectStatus.SUSPENDED}
@@ -158,6 +200,7 @@ async def submit(session: AsyncSession, request_id: int, operator_id: int = 0) -
     request.submit_time = date.today()
     request.update_by = operator_id
     await session.flush()
+    await _notify_change(session, "CHANGE_SUBMITTED", request, operator_id)
     return request
 
 
@@ -292,6 +335,7 @@ async def approve(
         await _apply_items(session, request, operator_id)
         await _apply_schedules(session, request, operator_id)
         await _freeze_change_baseline(session, request, operator_id)
+        await _notify_change(session, "CHANGE_APPROVED", request, operator_id, opinion)
     return request
 
 
@@ -314,6 +358,7 @@ async def reject(
     row.opinion = reason
     row.approve_time = date.today()
     await session.flush()
+    await _notify_change(session, "CHANGE_REJECTED", request, operator_id, reason)
     return request
 
 

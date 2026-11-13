@@ -22,6 +22,11 @@ apscheduler>=3.10
 # --- 认证 / 加密 ---
 python-jose>=3.3
 bcrypt>=4.1
+cryptography>=42
+
+# --- 邮件通知 ---
+aiosmtplib>=3.0
+jinja2>=3.1
 
 # --- 测试 / 开发工具 ---
 pytest>=8.2

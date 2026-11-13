@@ -77,6 +77,40 @@ class SysNotice(Base, CommonMixin):
     channel: Mapped[str] = mapped_column(String(32), default="INBOX")
 
 
+class SysMailTemplate(Base, CommonMixin):
+    """邮件模板 `t_sys_mail_template`（按事件编码保存，内置模板可改不可删）。"""
+
+    __tablename__ = "t_sys_mail_template"
+
+    event_code: Mapped[str] = mapped_column(String(64), default="", index=True)
+    name: Mapped[str] = mapped_column(String(128), default="")
+    subject: Mapped[str] = mapped_column(String(512), default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    receiver_roles: Mapped[str] = mapped_column(String(255), default="")
+    enabled: Mapped[int] = mapped_column(Integer, default=1)
+    builtin: Mapped[int] = mapped_column(Integer, default=0)
+    remark: Mapped[str] = mapped_column(String(255), default="")
+
+
+class SysMailLog(Base, CommonMixin):
+    """邮件发送记录 `t_sys_mail_log`：同时作为待发队列（outbox）。"""
+
+    __tablename__ = "t_sys_mail_log"
+
+    event_code: Mapped[str] = mapped_column(String(64), default="", index=True)
+    biz_type: Mapped[str] = mapped_column(String(64), default="")
+    biz_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    recipient: Mapped[str] = mapped_column(String(128), default="")
+    recipient_name: Mapped[str] = mapped_column(String(128), default="")
+    subject: Mapped[str] = mapped_column(String(512), default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="PENDING", index=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    error: Mapped[str] = mapped_column(String(512), default="")
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+
+
 class SysLoginLog(Base, CommonMixin):
     """登录日志 `t_sys_login_log`。"""
 

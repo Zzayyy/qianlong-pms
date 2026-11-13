@@ -314,6 +314,70 @@ export const readNotice = (id: string) =>
 
 export const readAllNotices = () => post<{ count: number }>('/notices/read-all')
 
+/* ------------------------------ 邮件通知 ------------------------------ */
+
+export interface MailConfig {
+  enabled: boolean
+  smtpHost: string
+  smtpPort: number
+  security: string
+  smtpUser: string
+  passwordSet: boolean
+  smtpFrom: string
+  fromName: string
+  timeoutSeconds: number
+  keepDays: number
+  excludeOperator: boolean
+  testTo: string
+}
+
+export interface MailTemplate {
+  eventCode: string
+  name: string
+  message: string
+  subject: string
+  body: string
+  receiverRoles: string
+  enabled: boolean
+  customized: boolean
+}
+
+export interface MailLog {
+  id: string
+  eventCode: string
+  eventName: string
+  recipient: string
+  recipientName: string
+  subject: string
+  status: string
+  retryCount: number
+  error: string
+  bizType: string
+  bizId: string
+  sentAt: string
+  createTime: string
+}
+
+export const mailConfig = () => get<MailConfig>('/mail/config')
+
+export const saveMailConfig = (data: Record<string, unknown>) =>
+  put<{ saved: number }>('/mail/config', data)
+
+export const testMail = (to: string) => post<{ sent: boolean }>('/mail/test', { to })
+
+export const mailTemplates = () => get<MailTemplate[]>('/mail/templates')
+
+export const saveMailTemplate = (eventCode: string, data: Record<string, unknown>) =>
+  put<{ eventCode: string }>(`/mail/templates/${eventCode}`, data)
+
+export const resetMailTemplate = (eventCode: string) =>
+  post<{ eventCode: string }>(`/mail/templates/${eventCode}/reset`)
+
+export const mailLogs = (params: Record<string, unknown>) =>
+  get<Page<MailLog>>('/mail/logs', params)
+
+export const resendMail = (id: string) => post<{ resent: boolean }>(`/mail/logs/${id}/resend`)
+
 /* ------------------------------ 看板 ------------------------------ */
 
 /** 我的待办项（工作台卡片：我的任务 / 我负责的项目 / 待确认日志 / 待审批变更等）。 */
