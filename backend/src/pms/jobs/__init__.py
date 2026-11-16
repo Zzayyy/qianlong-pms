@@ -198,7 +198,7 @@ async def job_archive_audit(keep_months: int | None = None) -> dict[str, Any]:
     return report
 
 
-async def job_dispatch_mail() -> dict[str, int]:
+async def job_dispatch_mail() -> dict[str, object]:
     """邮件待发队列派发：每分钟执行，失败按指数退避重试。"""
     factory = get_session_factory()
     async with factory() as session:

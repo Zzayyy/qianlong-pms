@@ -46,7 +46,8 @@ interface NavLeaf {
   path: string
   label: string
   icon: Component
-  permission: string
+  /** 为空表示登录即可访问（如个人收件箱） */
+  permission?: string
 }
 
 interface NavSection {
@@ -92,7 +93,8 @@ const navSections: NavSection[] = [
     key: 'collab',
     label: '协同',
     items: [
-      { path: '/worklogs', label: '工作日志', icon: NotebookPen, permission: 'worklog:view' }
+      { path: '/worklogs', label: '工作日志', icon: NotebookPen, permission: 'worklog:view' },
+      { path: '/messages', label: '我的消息', icon: Bell }
     ]
   },
   {
@@ -104,12 +106,18 @@ const navSections: NavSection[] = [
     ]
   },
   {
+    key: 'mail',
+    label: '邮件',
+    items: [
+      { path: '/mail', label: '邮件中心', icon: Mail, permission: 'sys:config' }
+    ]
+  },
+  {
     key: 'system',
     label: '系统',
     items: [
       { path: '/roles', label: '角色权限', icon: ShieldCheck, permission: 'org:role:view' },
       { path: '/configs', label: '规则参数', icon: SlidersHorizontal, permission: 'sys:config' },
-      { path: '/mail', label: '邮件通知', icon: Mail, permission: 'sys:config' },
       { path: '/audit', label: '审计留痕', icon: ScrollText, permission: 'sys:log:view' }
     ]
   }
@@ -119,7 +127,7 @@ const visibleSections = computed(() =>
   navSections
     .map((section) => ({
       ...section,
-      items: section.items.filter((item) => store.has(item.permission))
+      items: section.items.filter((item) => !item.permission || store.has(item.permission))
     }))
     .filter((section) => section.items.length > 0)
 )

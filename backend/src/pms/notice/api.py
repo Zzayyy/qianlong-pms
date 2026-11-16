@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pms.common.response import ok, paged
@@ -15,21 +16,35 @@ from pms.notice import service
 router = APIRouter(prefix="/api/v1/notices", tags=["消息通知"])
 
 
+class ReadIdsIn(BaseModel):
+    """批量已读入参。"""
+
+    ids: list[int] = Field(default_factory=list)
+
+
 @router.get("", summary="通知列表")
 async def list_notices(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(get_current_user)],
     pagination: Annotated[Pagination, Depends(get_pagination)],
     unreadOnly: Annotated[bool, Query()] = False,
+    keyword: Annotated[str, Query(max_length=128)] = "",
+    noticeType: Annotated[str, Query(max_length=32)] = "",
 ) -> object:
     """当前用户的通知，按时间倒序。"""
     total = await service.count_notices(
-        session, context.user_id, unread_only=unreadOnly
+        session,
+        context.user_id,
+        unread_only=unreadOnly,
+        keyword=keyword,
+        notice_type=noticeType,
     )
     rows = await service.list_notices(
         session,
         context.user_id,
         unread_only=unreadOnly,
+        keyword=keyword,
+        notice_type=noticeType,
         offset=pagination.offset,
         limit=pagination.page_size,
     )
@@ -60,6 +75,30 @@ async def get_unread_count(
 ) -> object:
     """当前用户未读通知数。"""
     return ok({"count": await service.unread_count(session, context.user_id)})
+
+
+@router.post("/read", summary="批量标记通知已读")
+async def read_notices(
+    body: ReadIdsIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(get_current_user)],
+) -> object:
+    """批量标记本人通知已读。"""
+    count = await service.mark_read_ids(session, context.user_id, body.ids)
+    await session.commit()
+    return ok({"count": count})
+
+
+@router.delete("/{notice_id}", summary="删除通知")
+async def delete_notice(
+    notice_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(get_current_user)],
+) -> object:
+    """删除本人一条通知。"""
+    await service.delete_notice(session, notice_id, context.user_id)
+    await session.commit()
+    return ok({"id": notice_id})
 
 
 @router.post("/read-all", summary="全部通知已读")

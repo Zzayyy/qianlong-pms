@@ -314,6 +314,10 @@ export const readNotice = (id: string) =>
 
 export const readAllNotices = () => post<{ count: number }>('/notices/read-all')
 
+export const readNotices = (ids: string[]) => post<{ count: number }>('/notices/read', { ids })
+
+export const deleteNotice = (id: string) => del<{ id: string }>(`/notices/${id}`)
+
 /* ------------------------------ 邮件通知 ------------------------------ */
 
 export interface MailConfig {
@@ -358,12 +362,85 @@ export interface MailLog {
   createTime: string
 }
 
+/** 写邮件收件人选项：人员（含是否维护邮箱）、部门、角色。 */
+export interface MailUserOption {
+  id: string
+  username: string
+  realName: string
+  deptId: string
+  hasEmail: boolean
+}
+
+export interface MailDeptOption {
+  id: string
+  parentId: string
+  deptName: string
+  userCount: number
+}
+
+export interface MailRoleOption {
+  roleCode: string
+  roleName: string
+  userCount: number
+}
+
+export interface MailOptions {
+  ready: boolean
+  sender: string
+  fromName: string
+  testTo: string
+  users: MailUserOption[]
+  depts: MailDeptOption[]
+  roles: MailRoleOption[]
+}
+
+/** 发送前收件人预统计。 */
+export interface MailEstimate {
+  recipients: number
+  noEmail: number
+  total: number
+  names: string[]
+  testTo: string
+  ready: boolean
+}
+
+export interface MailFailure {
+  recipient: string
+  name: string
+  error: string
+}
+
+export interface MailSendResult {
+  recipients: number
+  queued: number
+  skipped: number
+  sent: number
+  failed: number
+  retry: number
+  failures: MailFailure[]
+}
+
+/** 发送记录详情（含正文 HTML）。 */
+export interface MailLogDetail extends MailLog {
+  body: string
+}
+
 export const mailConfig = () => get<MailConfig>('/mail/config')
 
 export const saveMailConfig = (data: Record<string, unknown>) =>
   put<{ saved: number }>('/mail/config', data)
 
 export const testMail = (to: string) => post<{ sent: boolean }>('/mail/test', { to })
+
+/** 写邮件页面选项（人员 / 部门 / 角色 + 邮件通道状态）。 */
+export const mailOptions = () => get<MailOptions>('/mail/options')
+
+/** 发送前预统计收件人（实际可投递人数与无邮箱跳过人数）。 */
+export const mailRecipients = (data: Record<string, unknown>) =>
+  post<MailEstimate>('/mail/recipients', data)
+
+/** 手动发信：收件人按人员 / 角色 / 部门取并集。 */
+export const sendMail = (data: Record<string, unknown>) => post<MailSendResult>('/mail/send', data)
 
 export const mailTemplates = () => get<MailTemplate[]>('/mail/templates')
 
@@ -375,6 +452,8 @@ export const resetMailTemplate = (eventCode: string) =>
 
 export const mailLogs = (params: Record<string, unknown>) =>
   get<Page<MailLog>>('/mail/logs', params)
+
+export const mailLogDetail = (id: string) => get<MailLogDetail>(`/mail/logs/${id}`)
 
 export const resendMail = (id: string) => post<{ resent: boolean }>(`/mail/logs/${id}/resend`)
 

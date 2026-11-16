@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,21 +39,41 @@ async def create_notice(
     return notice
 
 
+def _notice_conditions(
+    user_id: int, *, unread_only: bool = False, keyword: str = "", notice_type: str = ""
+) -> list[object]:
+    """通知列表与计数共用的查询条件。"""
+    conditions: list[object] = [
+        SysNotice.deleted == 0,
+        SysNotice.receiver_id == user_id,
+    ]
+    if unread_only:
+        conditions.append(SysNotice.read_status == 0)
+    if notice_type:
+        conditions.append(SysNotice.notice_type == notice_type.upper())
+    text = (keyword or "").strip()
+    if text:
+        like = f"%{text}%"
+        conditions.append(SysNotice.title.like(like) | SysNotice.content.like(like))
+    return conditions
+
+
 async def list_notices(
     session: AsyncSession,
     user_id: int,
     *,
     unread_only: bool = False,
+    keyword: str = "",
+    notice_type: str = "",
     offset: int = 0,
     limit: int = 20,
 ) -> list[SysNotice]:
     """当前用户的通知列表。"""
-    stmt = select(SysNotice).where(
-        SysNotice.deleted == 0, SysNotice.receiver_id == user_id
+    stmt = (
+        select(SysNotice)
+        .where(*_notice_conditions(user_id, unread_only=unread_only, keyword=keyword, notice_type=notice_type))
+        .order_by(SysNotice.id.desc())
     )
-    if unread_only:
-        stmt = stmt.where(SysNotice.read_status == 0)
-    stmt = stmt.order_by(SysNotice.id.desc())
     if limit > 0:
         stmt = stmt.offset(offset).limit(limit)
     result = await session.execute(stmt)
@@ -59,16 +81,48 @@ async def list_notices(
 
 
 async def count_notices(
-    session: AsyncSession, user_id: int, *, unread_only: bool = False
+    session: AsyncSession,
+    user_id: int,
+    *,
+    unread_only: bool = False,
+    keyword: str = "",
+    notice_type: str = "",
 ) -> int:
     """当前用户通知数量。"""
     stmt = select(func.count(SysNotice.id)).where(
-        SysNotice.deleted == 0, SysNotice.receiver_id == user_id
+        *_notice_conditions(user_id, unread_only=unread_only, keyword=keyword, notice_type=notice_type)
     )
-    if unread_only:
-        stmt = stmt.where(SysNotice.read_status == 0)
     result = await session.execute(stmt)
     return int(result.scalar_one() or 0)
+
+
+async def mark_read_ids(session: AsyncSession, user_id: int, ids: Iterable[int]) -> int:
+    """批量标记本人通知已读。"""
+    targets = {int(item) for item in ids if item}
+    if not targets:
+        return 0
+    result = await session.execute(
+        update(SysNotice)
+        .where(
+            SysNotice.receiver_id == user_id,
+            SysNotice.read_status == 0,
+            SysNotice.deleted == 0,
+            SysNotice.id.in_(targets),
+        )
+        .values(read_status=1, update_by=user_id)
+    )
+    await session.flush()
+    return int(result.rowcount or 0)
+
+
+async def delete_notice(session: AsyncSession, notice_id: int, user_id: int) -> None:
+    """删除本人一条通知（软删除）。"""
+    notice = await session.get(SysNotice, notice_id)
+    if notice is None or notice.deleted or notice.receiver_id != user_id:
+        raise NotFoundError("通知不存在")
+    notice.deleted = 1
+    notice.update_by = user_id
+    await session.flush()
 
 
 async def unread_count(session: AsyncSession, user_id: int) -> int:

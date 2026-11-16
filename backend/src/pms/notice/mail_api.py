@@ -14,12 +14,15 @@ from pms.common.response import ok, paged
 from pms.core.context import AuthContext
 from pms.core.deps import Pagination, get_pagination, get_session, require_permissions
 from pms.notice import mail
+from pms.org.models import SysDept, SysRole, SysUser, SysUserRole
 from pms.system.config_service import ConfigService, validate_value
 from pms.system.models import SysMailLog, SysMailTemplate
 
 router = APIRouter(prefix="/api/v1/mail", tags=["邮件通知"])
 
 _TAG = "sys:config"
+#: 富文本正文上限：与数据库 TEXT 列的容量匹配，避免超长正文被截断或写库失败
+_MAX_BODY_CHARS = 15000
 _CONFIG_KEYS = (
     "notify.mail.enabled",
     "notify.mail.smtpHost",
@@ -57,6 +60,26 @@ class MailTestIn(BaseModel):
     """测试发信入参。"""
 
     to: str = Field(min_length=3, max_length=255)
+
+
+class MailSendIn(BaseModel):
+    """手动发信入参：按人员 / 角色 / 部门取并集。"""
+
+    subject: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=_MAX_BODY_CHARS)
+    #: 正文是否为富文本 HTML（写邮件页面固定传 true，兼容旧的纯文本调用方）
+    html: bool = False
+    userIds: list[int] = Field(default_factory=list)
+    roleCodes: list[str] = Field(default_factory=list)
+    deptIds: list[int] = Field(default_factory=list)
+
+
+class MailRecipientsIn(BaseModel):
+    """收件人预统计入参（与发信一致的三种选择方式）。"""
+
+    userIds: list[int] = Field(default_factory=list)
+    roleCodes: list[str] = Field(default_factory=list)
+    deptIds: list[int] = Field(default_factory=list)
 
 
 class TemplateIn(BaseModel):
@@ -127,6 +150,159 @@ async def save_config(
     return ok({"saved": len(values)})
 
 
+@router.get("/options", summary="写邮件收件人选项")
+async def recipient_options(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions(_TAG))],
+) -> object:
+    """写邮件页面用的人员 / 角色 / 部门选项与邮件通道状态。
+
+    只下发姓名、账号、所属部门与「是否维护了邮箱」，不下发邮箱地址本身。
+    """
+    del context
+    account = await mail.load_account(session)
+    users = (
+        await session.execute(
+            select(
+                SysUser.id,
+                SysUser.username,
+                SysUser.real_name,
+                SysUser.dept_id,
+                SysUser.email,
+            )
+            .where(SysUser.deleted == 0, SysUser.status == "ENABLED")
+            .order_by(SysUser.dept_id, SysUser.real_name, SysUser.id)
+        )
+    ).all()
+    depts = (
+        await session.execute(
+            select(SysDept.id, SysDept.parent_id, SysDept.dept_name)
+            .where(SysDept.deleted == 0)
+            .order_by(SysDept.level, SysDept.sort, SysDept.id)
+        )
+    ).all()
+    roles = (
+        await session.execute(
+            select(SysRole.id, SysRole.role_code, SysRole.role_name)
+            .where(SysRole.deleted == 0, SysRole.status == "ENABLED")
+            .order_by(SysRole.sort, SysRole.id)
+        )
+    ).all()
+    role_members = (
+        await session.execute(
+            select(SysUserRole.role_id, SysUserRole.user_id)
+            .join(SysUser, SysUser.id == SysUserRole.user_id)
+            .where(
+                SysUserRole.deleted == 0,
+                SysUser.deleted == 0,
+                SysUser.status == "ENABLED",
+            )
+        )
+    ).all()
+
+    active_ids = {int(user_row.id) for user_row in users}
+    role_counts: dict[int, int] = {}
+    for link in role_members:
+        if int(link.user_id) in active_ids:
+            role_counts[int(link.role_id)] = role_counts.get(int(link.role_id), 0) + 1
+    dept_counts: dict[int, int] = {}
+    for user_row in users:
+        dept_key = int(user_row.dept_id or 0)
+        dept_counts[dept_key] = dept_counts.get(dept_key, 0) + 1
+
+    return ok(
+        {
+            "ready": bool(account.enabled and account.host and account.sender),
+            "sender": account.sender,
+            "fromName": account.from_name,
+            "testTo": account.test_to,
+            "users": [
+                {
+                    "id": row.id,
+                    "username": row.username,
+                    "realName": row.real_name,
+                    "deptId": row.dept_id,
+                    "hasEmail": bool((row.email or "").strip()),
+                }
+                for row in users
+            ],
+            "depts": [
+                {
+                    "id": row.id,
+                    "parentId": row.parent_id,
+                    "deptName": row.dept_name,
+                    "userCount": dept_counts.get(int(row.id), 0),
+                }
+                for row in depts
+            ],
+            "roles": [
+                {
+                    "roleCode": row.role_code,
+                    "roleName": row.role_name,
+                    "userCount": role_counts.get(int(row.id), 0),
+                }
+                for row in roles
+            ],
+        }
+    )
+
+
+async def _resolve_recipient_ids(
+    session: AsyncSession,
+    *,
+    user_ids: list[int],
+    role_codes: list[str],
+    dept_ids: list[int],
+) -> set[int]:
+    """人员 / 角色 / 部门三种方式取并集。"""
+    ids = {int(uid) for uid in user_ids if uid}
+    ids |= await mail.role_user_ids(session, role_codes)
+    dept_set = {int(did) for did in dept_ids if did}
+    if dept_set:
+        result = await session.execute(
+            select(SysUser.id).where(
+                SysUser.deleted == 0,
+                SysUser.status == "ENABLED",
+                SysUser.dept_id.in_(dept_set),
+            )
+        )
+        ids |= {int(uid) for uid in result.scalars().all()}
+    return ids
+
+
+@router.post("/recipients", summary="预估收件人")
+async def estimate_recipients(
+    body: MailRecipientsIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions(_TAG))],
+) -> object:
+    """发送前预统计：实际收件人数、无邮箱跳过人数、前几位收件人姓名。"""
+    del context
+    ids = await _resolve_recipient_ids(
+        session,
+        user_ids=body.userIds,
+        role_codes=body.roleCodes,
+        dept_ids=body.deptIds,
+    )
+    users = await mail.load_users(session, ids)
+    account = await mail.load_account(session)
+    no_email = [user for user in users if not (user.email or "").strip()]
+    # 配置了测试收件人时，无邮箱人员也会发到测试邮箱，不算跳过
+    skipped = 0 if account.test_to else len(no_email)
+    names = [user.real_name or user.username for user in users[:8]]
+    return ok(
+        {
+            "recipients": len(users) - skipped,
+            "noEmail": skipped,
+            "total": len(users),
+            "names": names,
+            "testTo": account.test_to,
+            "ready": bool(account.enabled and account.host and account.sender),
+        }
+    )
+
+
+
 @router.post("/test", summary="发送测试邮件")
 async def test_send(
     body: MailTestIn,
@@ -140,6 +316,48 @@ async def test_send(
     except Exception as exc:  # noqa: BLE001 - 原样回显 SMTP 错误，便于排查
         raise BizRuleError(f"发送失败：{exc}") from exc
     return ok({"sent": True})
+
+
+@router.post("/send", summary="手动发送邮件")
+async def send_mail(
+    body: MailSendIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions(_TAG))],
+) -> object:
+    """按人员 / 角色 / 部门选择收件人，立即发送一封自定义邮件。"""
+    ids = await _resolve_recipient_ids(
+        session,
+        user_ids=body.userIds,
+        role_codes=body.roleCodes,
+        dept_ids=body.deptIds,
+    )
+    # 手动发信不排除操作人本人：允许给自己发测试邮件
+    if not ids:
+        raise ParamError("请至少选择一名收件人")
+    users = await mail.load_users(session, ids)
+    if not users:
+        raise ParamError("收件人不存在或已停用")
+    try:
+        rows, skipped = await mail.enqueue_manual(
+            session,
+            subject=body.subject,
+            content=body.content,
+            users=users,
+            operator_id=context.user_id,
+            as_html=body.html,
+        )
+    except ValueError as exc:
+        raise BizRuleError(str(exc)) from exc
+    await session.commit()
+    result = await mail.dispatch_rows(session, rows)
+    return ok(
+        {
+            "recipients": len(users),
+            "queued": len(rows),
+            "skipped": skipped,
+            **result,
+        }
+    )
 
 
 @router.get("/templates", summary="邮件模板列表")
@@ -270,7 +488,9 @@ async def list_logs(
             {
                 "id": row.id,
                 "eventCode": row.event_code,
-                "eventName": mail.DEFAULT_TEMPLATES.get(row.event_code, {}).get(
+                "eventName": "手动发送"
+                if row.event_code == "MANUAL"
+                else mail.DEFAULT_TEMPLATES.get(row.event_code, {}).get(
                     "name", row.event_code
                 ),
                 "recipient": row.recipient,
@@ -289,6 +509,37 @@ async def list_logs(
         total,
         pagination.page_num,
         pagination.page_size,
+    )
+
+
+@router.get("/logs/{log_id}", summary="邮件发送记录详情")
+async def log_detail(
+    log_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions(_TAG))],
+) -> object:
+    """查看单条发送记录（含正文 HTML，用于发送记录里的内容预览）。"""
+    del context
+    row = await session.get(SysMailLog, log_id)
+    if row is None or row.deleted != 0:
+        raise NotFoundError("发送记录不存在")
+    return ok(
+        {
+            "id": row.id,
+            "eventCode": row.event_code,
+            "eventName": "手动发送"
+            if row.event_code == "MANUAL"
+            else mail.DEFAULT_TEMPLATES.get(row.event_code, {}).get("name", row.event_code),
+            "recipient": row.recipient,
+            "recipientName": row.recipient_name,
+            "subject": row.subject,
+            "body": row.body,
+            "status": row.status,
+            "retryCount": row.retry_count,
+            "error": row.error,
+            "sentAt": row.sent_at.isoformat(sep=" ") if row.sent_at else "",
+            "createTime": row.create_time.isoformat(sep=" ") if row.create_time else "",
+        }
     )
 
 

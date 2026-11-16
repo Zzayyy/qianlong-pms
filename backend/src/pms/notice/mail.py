@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr
+from html import escape as html_escape
 from typing import Final
 
 import aiosmtplib
@@ -277,13 +279,46 @@ def render_mail(subject_tpl: str, body_tpl: str, context: dict[str, object]) -> 
 
 
 def _plain_text(html: str) -> str:
-    """从 HTML 粗略提取纯文本，作为不支持 HTML 的邮件客户端兜底。"""
-    import re
+    """从 HTML 粗略提取纯文本，作为不支持 HTML 的邮件客户端兜底。
 
+    富文本编辑器产出的换行多为 `<div>` / `<li>`，这里一并转成换行，
+    保证纯文本客户端看到的段落层次与网页版一致。
+    """
     text = re.sub(r"<br\s*/?>", "\n", html)
-    text = re.sub(r"</p>", "\n\n", text)
+    text = re.sub(r"</(p|div|li|tr|h[1-6]|blockquote|pre)>", "\n", text)
     text = re.sub(r"<[^>]+>", "", text)
+    text = text.replace("&nbsp;", " ")
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+_DANGEROUS_TAGS: Final[re.Pattern[str]] = re.compile(
+    r"<(script|style|iframe|object|embed|link|meta|form)\b[^>]*>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+_SELF_CLOSING_DANGEROUS: Final[re.Pattern[str]] = re.compile(
+    r"<(script|style|iframe|object|embed|link|meta|input|button)\b[^>]*/?>",
+    re.IGNORECASE,
+)
+_INLINE_EVENT_ATTR: Final[re.Pattern[str]] = re.compile(
+    r"\son[a-z]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE
+)
+_JS_URL: Final[re.Pattern[str]] = re.compile(
+    r"(href|src)\s*=\s*(\"|')\s*javascript:", re.IGNORECASE
+)
+
+
+def clean_html(raw: str) -> str:
+    """清理手动发信用富文本：去掉脚本、内联事件与 javascript: 链接。
+
+    正文会被原样存库并投递给邮件客户端，因此这里做最小限度的安全过滤，
+    同时保留编辑器产生的行内样式（字体、颜色、缩进等）。
+    """
+    text = raw or ""
+    text = _DANGEROUS_TAGS.sub("", text)
+    text = _SELF_CLOSING_DANGEROUS.sub("", text)
+    text = _INLINE_EVENT_ATTR.sub("", text)
+    text = _JS_URL.sub(r"\1=\2#", text)
+    return text.strip()
 
 
 async def _send(account: MailAccount, to: str, subject: str, html: str) -> None:
@@ -327,7 +362,7 @@ async def send_test(session: AsyncSession, to: str) -> None:
     await _send(account, to, subject, html)
 
 
-async def _load_users(session: AsyncSession, user_ids: Iterable[int]) -> list[SysUser]:
+async def load_users(session: AsyncSession, user_ids: Iterable[int]) -> list[SysUser]:
     ids = {int(uid) for uid in user_ids if uid}
     if not ids:
         return []
@@ -338,7 +373,8 @@ async def _load_users(session: AsyncSession, user_ids: Iterable[int]) -> list[Sy
             SysUser.id.in_(ids),
         )
     )
-    return [user for user in result.scalars().all() if (user.email or "").strip()]
+    # 邮箱为空时保留用户：配置了测试收件人（testTo）仍可投递，便于上线前联调
+    return list(result.scalars().all())
 
 
 async def role_user_ids(session: AsyncSession, role_codes: Iterable[str]) -> set[int]:
@@ -417,7 +453,7 @@ async def notify_event(
     ids = {int(uid) for uid in user_ids if uid}
     if operator_id and account.exclude_operator:
         ids.discard(int(operator_id))
-    users = await _load_users(session, ids)
+    users = await load_users(session, ids)
     if not users:
         return 0
     default = DEFAULT_TEMPLATES.get(event_code, {})
@@ -448,31 +484,31 @@ async def notify_event(
     return count
 
 
-async def dispatch_pending(session: AsyncSession, limit: int = DISPATCH_BATCH) -> dict[str, int]:
-    """发送待发邮件：成功置 SENT，失败按指数退避重试。"""
-    account = await mail_ready(session)
-    if account is None:
-        return {"sent": 0, "failed": 0, "retry": 0}
+async def _deliver(
+    session: AsyncSession, account: MailAccount, rows: list[SysMailLog]
+) -> dict[str, object]:
+    """逐条投递并更新状态（内部方法）。
+
+    返回 sent / failed / retry 计数，并附带 `failures`（最近失败明细），
+    便于手动发信后直接告知用户失败原因，而不是只让用户去翻发送记录。
+    """
     now = datetime.now()
-    result = await session.execute(
-        select(SysMailLog)
-        .where(
-            SysMailLog.deleted == 0,
-            SysMailLog.status == MAIL_PENDING,
-            SysMailLog.next_retry_at <= now,
-        )
-        .order_by(SysMailLog.id)
-        .limit(limit)
-        .with_for_update(skip_locked=True)
-    )
-    rows = list(result.scalars().all())
     sent = failed = retry = 0
+    failures: list[dict[str, str]] = []
     for row in rows:
         try:
             await _send(account, row.recipient, row.subject, row.body)
         except Exception as exc:  # noqa: BLE001 - 记录任意发送异常
             row.retry_count += 1
             row.error = str(exc)[:500]
+            if len(failures) < 5:
+                failures.append(
+                    {
+                        "recipient": row.recipient,
+                        "name": row.recipient_name or "",
+                        "error": str(exc)[:200],
+                    }
+                )
             if row.retry_count > len(RETRY_DELAYS):
                 row.status = MAIL_FAILED
                 failed += 1
@@ -489,7 +525,89 @@ async def dispatch_pending(session: AsyncSession, limit: int = DISPATCH_BATCH) -
             sent += 1
     if rows:
         await session.commit()
-    return {"sent": sent, "failed": failed, "retry": retry}
+    return {"sent": sent, "failed": failed, "retry": retry, "failures": failures}
+
+
+async def dispatch_pending(session: AsyncSession, limit: int = DISPATCH_BATCH) -> dict[str, object]:
+    """发送待发邮件：成功置 SENT，失败按指数退避重试。"""
+    account = await mail_ready(session)
+    if account is None:
+        return {"sent": 0, "failed": 0, "retry": 0, "failures": []}
+    result = await session.execute(
+        select(SysMailLog)
+        .where(
+            SysMailLog.deleted == 0,
+            SysMailLog.status == MAIL_PENDING,
+            SysMailLog.next_retry_at <= datetime.now(),
+        )
+        .order_by(SysMailLog.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    return await _deliver(session, account, list(result.scalars().all()))
+
+
+async def enqueue_manual(
+    session: AsyncSession,
+    *,
+    subject: str,
+    content: str,
+    users: Iterable[SysUser],
+    operator_id: int = 0,
+    as_html: bool = False,
+) -> tuple[list[SysMailLog], int]:
+    """手动发信入队：返回待发记录与「无邮箱跳过」人数。
+
+    `as_html=True` 表示正文来自富文本编辑器，按 HTML 直接投递；
+    否则按纯文本处理（转义后保留换行），避免录入的尖括号被当成标签。
+    """
+    account = await mail_ready(session)
+    if account is None:
+        raise ValueError("邮件通道未启用或发件配置不完整")
+    title = (subject or "").strip() or "PMS 通知"
+    raw = content or ""
+    if as_html:
+        body_html = clean_html(raw)
+    else:
+        # 纯文本输入：转义 HTML 并保留换行，避免整段挤成一行
+        body_html = html_escape(raw).replace("\n", "<br>")
+    if not body_html.strip():
+        raise ValueError("邮件正文不能为空")
+    html = _BASE_HTML.replace("{title}", html_escape(title)).replace("{body}", body_html)
+    rows: list[SysMailLog] = []
+    skipped = 0
+    for user in users:
+        target = account.test_to or (user.email or "").strip()
+        if not target:
+            skipped += 1
+            continue
+        rows.append(
+            SysMailLog(
+                event_code="MANUAL",
+                biz_type="MANUAL",
+                biz_id=0,
+                recipient=target,
+                recipient_name=user.real_name or user.username,
+                subject=title[:500],
+                body=html,
+                status=MAIL_PENDING,
+                retry_count=0,
+                next_retry_at=datetime.now(),
+                create_by=operator_id or None,
+            )
+        )
+    if rows:
+        session.add_all(rows)
+        await session.flush()
+    return rows, skipped
+
+
+async def dispatch_rows(session: AsyncSession, rows: list[SysMailLog]) -> dict[str, object]:
+    """立即投递指定记录（手动发信用）。"""
+    account = await mail_ready(session)
+    if account is None or not rows:
+        return {"sent": 0, "failed": 0, "retry": 0, "failures": []}
+    return await _deliver(session, account, rows)
 
 
 async def resend(session: AsyncSession, log_id: int) -> None:
