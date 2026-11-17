@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     # `X-Forwarded-For` / `X-Real-IP`，用于审计留痕取真实客户端 IP
     trusted_proxies: str = "127.0.0.1,::1"
 
+    # AI 周报（DeepSeek，OpenAI 兼容协议）：密钥只从环境变量读取
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-chat"
+
     @property
     def database_url(self) -> str:
         """异步 MySQL 连接串。"""

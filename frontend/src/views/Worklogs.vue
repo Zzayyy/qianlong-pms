@@ -3,7 +3,7 @@ defineOptions({ name: 'WorklogsPage' })
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowRight, Bell, CalendarClock, Download, RefreshCw, X } from 'lucide-vue-next'
+import { ArrowRight, Bell, CalendarClock, Download, FileText, RefreshCw, X } from 'lucide-vue-next'
 import {
   addWorklogComment,
   deleteWorklog,
@@ -1415,7 +1415,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <el-input
               v-model="form.content"
               type="textarea"
-              :rows="4"
+              :rows="6"
               maxlength="1000"
               show-word-limit
               placeholder="今天完成了什么？建议写清产出与结果"
@@ -1602,6 +1602,11 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <template v-if="tab === 'team'">仅展示已生效日志 · </template>
             共 {{ total }} 条
           </span>
+          <el-tooltip content="按周汇总日志，AI 生成周报 / 个人周总结" placement="top">
+            <el-button size="small" :icon="FileText" @click="router.push('/weeklies')">
+              周报总结
+            </el-button>
+          </el-tooltip>
           <el-button v-if="canManageWorklog" size="small" @click="openReminderDialog">
             发起催办
           </el-button>

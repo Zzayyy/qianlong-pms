@@ -64,6 +64,9 @@ DEFAULT_CONFIGS: Final[Mapping[str, ConfigValue]] = {
     # ---- 客户与商机 ----
     "crm.convert.autoCooperating": "true",
     "crm.opp.winStage": "WON",
+    # ---- 周报总结（AI）----
+    "weekly.auto.enabled": "true",
+    "weekly.ai.maxLogs": "150",
     # ---- 通知与导出 ----
     "notify.mail.enabled": "true",
     "notify.mail.smtpHost": "",
@@ -132,6 +135,9 @@ CONFIG_REMARKS: Final[Mapping[str, str]] = {
     # 客户与商机
     "crm.convert.autoCooperating": "商机转项目后是否自动将客户标记为「合作中」",
     "crm.opp.winStage": "视为赢单的商机阶段编码，转项目前必须处于该阶段",
+    # 周报总结
+    "weekly.auto.enabled": "每周五 12:00 自动生成项目周报的开关；false=只能手动生成",
+    "weekly.ai.maxLogs": "送进 AI 的日志条数上限（超出按最近优先截断），控制 token 成本",
     # 通知
     "notify.mail.enabled": "邮件通知开关；false=只发站内信",
     "notify.mail.smtpHost": "SMTP 服务器地址；为空则跳过邮件发送",
@@ -201,6 +207,7 @@ CONFIG_GROUPS: Final[Mapping[str, str]] = {
     "health.": "健康度",
     "org.": "组织",
     "crm.": "客户与商机",
+    "weekly.": "周报总结",
     "notify.": "通知",
     "export.": "导出",
 }

@@ -24,6 +24,7 @@ from pms.org import models as org_models  # noqa: F401  注册组织域模型
 from pms.project import models as project_models  # noqa: F401  注册项目域模型
 from pms.report import models as report_models  # noqa: F401  注册统计域模型
 from pms.worklog import models as worklog_models  # noqa: F401  注册日志域模型
+from pms.weekly import models as weekly_models  # noqa: F401  注册周报域模型
 from pms.system import models as system_models  # noqa: F401  注册系统域模型
 
 config = context.config

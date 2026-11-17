@@ -39,6 +39,7 @@ from pms.org import api as org_api
 from pms.project import api as project_api
 from pms.report import api as report_api
 from pms.system import api as system_api
+from pms.weekly import api as weekly_api
 from pms.worklog import api as worklog_api
 
 logger = get_logger(__name__)
@@ -144,6 +145,7 @@ def create_app() -> FastAPI:
     app.include_router(project_api.router)
     app.include_router(change_api.router)
     app.include_router(worklog_api.router)
+    app.include_router(weekly_api.router)
     app.include_router(report_api.router)
     app.include_router(file_api.router)
 

@@ -20,6 +20,7 @@ from pms.notice import service as notice_service
 from pms.org.models import SysUser
 from pms.report import service as report_service
 from pms.system.config_service import ConfigService
+from pms.weekly import service as weekly_service
 from pms.worklog import service as worklog_service
 from pms.worklog.models import WlReminder, WlWorklog
 from pms.worklog.rules import WorklogStatus, is_weekend
@@ -208,6 +209,22 @@ async def job_dispatch_mail() -> dict[str, object]:
     return result
 
 
+async def job_generate_weeklies() -> dict[str, int]:
+    """项目周报自动生成：每周五 12:00 为在建项目生成本周周报。
+
+    开关 `weekly.auto.enabled`；已确认的周报不会被覆盖（返回 `skipped`）。
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        config = ConfigService(session)
+        if not await config.get_bool("weekly.auto.enabled"):
+            logger.info("项目周报自动生成已关闭（weekly.auto.enabled=false）")
+            return {"generated": 0, "skipped": 0}
+        result = await weekly_service.auto_generate_weeklies(session)
+        await session.commit()
+    return result
+
+
 async def _mail_exclusive() -> Any:
     """邮件派发（带分布式锁）。"""
     return await run_exclusive("mail_dispatch", job_dispatch_mail)
@@ -233,6 +250,11 @@ async def _sla_exclusive() -> Any:
 async def _archive_exclusive() -> Any:
     """审计表按月归档（带分布式锁）。"""
     return await run_exclusive("audit_archive", job_archive_audit)
+
+
+async def _weekly_exclusive() -> Any:
+    """项目周报自动生成（带分布式锁）。"""
+    return await run_exclusive("weekly_generate", job_generate_weeklies)
 
 
 def build_scheduler() -> AsyncIOScheduler:
@@ -267,6 +289,13 @@ def build_scheduler() -> AsyncIOScheduler:
         CronTrigger(day=1, hour=3, minute=0),
         id="audit_archive",
         name="审计表按月归档（每月 1 日 03:00）",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _weekly_exclusive,
+        CronTrigger(day_of_week="fri", hour=12, minute=0),
+        id="weekly_generate",
+        name="项目周报自动生成（每周五 12:00）",
         replace_existing=True,
     )
     scheduler.add_job(

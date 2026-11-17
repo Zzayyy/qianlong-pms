@@ -291,6 +291,72 @@ export const worklogRemind = (data: {
   content?: string
 }) => post<{ id: string }>('/worklogs/reminders', data)
 
+/* ------------------------------ 周报总结 ------------------------------ */
+
+/** 周报（项目周报 / 个人周总结）。 */
+export interface WeeklyItem {
+  id: string
+  reportNo: string
+  scope: 'PROJECT' | 'PERSONAL'
+  projectId: string
+  projectName: string
+  userId: string
+  userName: string
+  weekStart: string
+  weekEnd: string
+  weekLabel: string
+  title: string
+  /** GENERATED=待确认（可编辑）；CONFIRMED=已确认 */
+  status: 'GENERATED' | 'CONFIRMED'
+  source: 'AUTO' | 'MANUAL'
+  revision: number
+  aiUsed: number
+  aiModel: string
+  aiMessage: string
+  confirmBy: string
+  confirmName: string
+  confirmTime: string
+  createTime: string
+  /** 详情接口返回 */
+  content?: string
+  stats?: Record<string, unknown>
+}
+
+export interface WeeklyOptions {
+  weekStart: string
+  weekEnd: string
+  weekLabel: string
+  prevWeekStart: string
+  today: string
+  projects: { id: string; projectCode: string; projectName: string; status: string }[]
+  /** 每周五 12:00 自动生成开关 */
+  autoEnabled: boolean
+  aiConfigured: boolean
+}
+
+/** 周报页面初始化数据：默认周、可生成项目、自动任务与 AI 配置状态。 */
+export const weeklyOptions = () => get<WeeklyOptions>('/weeklies/options')
+
+/** 周报列表：scope=PROJECT 看项目周报，scope=PERSONAL 看本人周总结。 */
+export const listWeeklies = (params: Record<string, unknown>) =>
+  get<Page<WeeklyItem>>('/weeklies', params)
+
+export const weeklyDetail = (id: string) => get<WeeklyItem>(`/weeklies/${id}`)
+
+/** 生成（或重新生成）周报：项目周报需项目经理，个人周总结限本人。 */
+export const generateWeekly = (data: {
+  scope: 'PROJECT' | 'PERSONAL'
+  projectId?: string
+  weekStart?: string
+}) => post<WeeklyItem>('/weeklies/generate', data)
+
+/** 确认前编辑标题 / 正文。 */
+export const updateWeekly = (id: string, data: { title?: string; content: string }) =>
+  put<WeeklyItem>(`/weeklies/${id}`, data)
+
+/** 确认归档，之后不再随日志变化。 */
+export const confirmWeekly = (id: string) => post<WeeklyItem>(`/weeklies/${id}/confirm`)
+
 /* ------------------------------ 消息通知 ------------------------------ */
 
 export interface NoticeItem {

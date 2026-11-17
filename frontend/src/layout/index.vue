@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ChevronRight,
   ClipboardList,
+  FileText,
   FolderKanban,
   GitPullRequest,
   House,
@@ -94,6 +95,7 @@ const navSections: NavSection[] = [
     label: '协同',
     items: [
       { path: '/worklogs', label: '工作日志', icon: NotebookPen, permission: 'worklog:view' },
+      { path: '/weeklies', label: '周报总结', icon: FileText, permission: 'worklog:view' },
       { path: '/messages', label: '我的消息', icon: Bell }
     ]
   },

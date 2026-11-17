@@ -22,6 +22,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'projects', name: 'projects', component: () => import('@/views/Projects.vue'), meta: { title: '项目周期', permission: 'project:view' } },
       { path: 'changes', name: 'changes', component: () => import('@/views/Changes.vue'), meta: { title: '变更管理', permission: 'change:view' } },
       { path: 'worklogs', name: 'worklogs', component: () => import('@/views/Worklogs.vue'), meta: { title: '工作日志', permission: 'worklog:view' } },
+      { path: 'weeklies', name: 'weeklies', component: () => import('@/views/Weeklies.vue'), meta: { title: '周报总结', permission: 'worklog:view' } },
       { path: 'dept-board', name: 'dept-board', component: () => import('@/views/Reports.vue'), meta: { title: '部门看板', permission: 'report:view' } },
       { path: 'reports', redirect: '/dept-board' },
       { path: 'crm', name: 'crm', component: () => import('@/views/Crm.vue'), meta: { title: '客户与商机', permission: 'crm:customer:view' } },
