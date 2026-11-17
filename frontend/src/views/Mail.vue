@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { EditPen, Promotion, Search } from '@element-plus/icons-vue'
+import { EditPen, Files, Promotion, Search, Tickets } from '@element-plus/icons-vue'
 import MailEditor from '@/components/MailEditor.vue'
 import {
   listChanges,
@@ -17,7 +17,6 @@ import {
   saveMailConfig,
   saveMailTemplate,
   sendMail,
-  testMail,
   type MailDeptOption,
   type MailEstimate,
   type MailLog,
@@ -28,6 +27,7 @@ import {
   type MailUserOption
 } from '@/api'
 import { useUserStore } from '@/stores/user'
+import { dictOf, PROJECT_STATUS } from '@/utils/dict'
 
 const store = useUserStore()
 const canManage = computed(() => store.has('sys:config'))
@@ -51,6 +51,9 @@ const recipients = reactive({
   roleCodes: [] as string[],
   deptIds: [] as string[]
 })
+/** 抄送 / 密送：按人员选择，投递时并入收件人集合（每人独立一封，互相不可见）。 */
+const ccRecipients = reactive({ userIds: [] as string[] })
+const bccRecipients = reactive({ userIds: [] as string[] })
 const compose = reactive({ subject: '', content: '' })
 const sendSelf = ref(false)
 
@@ -125,6 +128,22 @@ const recipientChips = computed(() => {
   return chips
 })
 
+/** 抄送 / 密送同样按人去重，标签只展示人员。 */
+const copyChips = (list: string[], prefix: string) =>
+  list.map((id) => ({
+    key: `${prefix}-${id}`,
+    label: userMap.value.get(String(id)) || id,
+    value: id
+  }))
+
+const ccChips = computed(() => copyChips(ccRecipients.userIds, 'cc'))
+const bccChips = computed(() => copyChips(bccRecipients.userIds, 'bcc'))
+
+const removeCopy = (list: string[], id: string) => {
+  const index = list.indexOf(id)
+  if (index >= 0) list.splice(index, 1)
+}
+
 const removeChip = (chip: { kind: 'user' | 'role' | 'dept'; value: string }) => {
   const list =
     chip.kind === 'user'
@@ -151,6 +170,8 @@ const rawLength = computed(() => compose.content.length)
 
 const recipientVisible = ref(false)
 const recipientTab = ref<'user' | 'role' | 'dept'>('user')
+/** 当前弹窗在编辑哪一组：收件人 / 抄送 / 密送。 */
+const recipientTarget = ref<'to' | 'cc' | 'bcc'>('to')
 const draftSel = reactive({
   userIds: [] as string[],
   roleCodes: [] as string[],
@@ -159,10 +180,18 @@ const draftSel = reactive({
 const userKeyword = ref('')
 const userDeptFilter = ref('')
 
-const openRecipient = () => {
-  draftSel.userIds = [...recipients.userIds]
-  draftSel.roleCodes = [...recipients.roleCodes]
-  draftSel.deptIds = [...recipients.deptIds]
+const openRecipient = (target: 'to' | 'cc' | 'bcc' = 'to') => {
+  recipientTarget.value = target
+  if (target === 'to') {
+    draftSel.userIds = [...recipients.userIds]
+    draftSel.roleCodes = [...recipients.roleCodes]
+    draftSel.deptIds = [...recipients.deptIds]
+    recipientTab.value = 'user'
+  } else {
+    draftSel.userIds = [...(target === 'cc' ? ccRecipients.userIds : bccRecipients.userIds)]
+    draftSel.roleCodes = []
+    draftSel.deptIds = []
+  }
   recipientVisible.value = true
 }
 
@@ -189,24 +218,44 @@ const selectedCount = computed(
 )
 
 const confirmRecipient = () => {
-  recipients.userIds = [...draftSel.userIds]
-  recipients.roleCodes = [...draftSel.roleCodes]
-  recipients.deptIds = [...draftSel.deptIds]
+  if (recipientTarget.value === 'to') {
+    recipients.userIds = [...draftSel.userIds]
+    recipients.roleCodes = [...draftSel.roleCodes]
+    recipients.deptIds = [...draftSel.deptIds]
+  } else if (recipientTarget.value === 'cc') {
+    ccRecipients.userIds = [...draftSel.userIds]
+  } else {
+    bccRecipients.userIds = [...draftSel.userIds]
+  }
   // 选过的人进入「最近联系人」，下次可以一键添加
   draftSel.userIds.forEach(rememberUser)
   recipientVisible.value = false
 }
 
+/** 收件人 + 抄送 + 密送去重后的用户集合（后端按同一口径取并集）。 */
+const collectRecipientIds = () => [
+  ...new Set([...recipients.userIds, ...ccRecipients.userIds, ...bccRecipients.userIds])
+]
+
+const hasAnyRecipient = () =>
+  Boolean(
+    recipients.userIds.length ||
+      recipients.roleCodes.length ||
+      recipients.deptIds.length ||
+      ccRecipients.userIds.length ||
+      bccRecipients.userIds.length
+  )
+
 const estimateTimer = ref<number>()
 const runEstimate = async () => {
-  if (!recipients.userIds.length && !recipients.roleCodes.length && !recipients.deptIds.length) {
+  if (!hasAnyRecipient()) {
     estimate.value = null
     return
   }
   estimating.value = true
   try {
     estimate.value = await mailRecipients({
-      userIds: recipients.userIds,
+      userIds: collectRecipientIds(),
       roleCodes: recipients.roleCodes,
       deptIds: recipients.deptIds
     })
@@ -222,7 +271,10 @@ const scheduleEstimate = () => {
   estimateTimer.value = window.setTimeout(runEstimate, 260)
 }
 
-watch(() => JSON.stringify(recipients), scheduleEstimate)
+watch(
+  () => JSON.stringify([recipients, ccRecipients, bccRecipients]),
+  scheduleEstimate
+)
 
 /* ------------------------------ 右侧联系人面板 ------------------------------ */
 
@@ -295,6 +347,8 @@ interface MailDraft {
   userIds: string[]
   roleCodes: string[]
   deptIds: string[]
+  ccUserIds?: string[]
+  bccUserIds?: string[]
   sendSelf: boolean
   savedAt: string
 }
@@ -321,6 +375,8 @@ const persistDraft = () => {
     userIds: recipients.userIds,
     roleCodes: recipients.roleCodes,
     deptIds: recipients.deptIds,
+    ccUserIds: ccRecipients.userIds,
+    bccUserIds: bccRecipients.userIds,
     sendSelf: sendSelf.value,
     savedAt: new Date().toISOString()
   }
@@ -350,6 +406,8 @@ const restoreDraft = () => {
   recipients.userIds = draft.userIds || []
   recipients.roleCodes = draft.roleCodes || []
   recipients.deptIds = draft.deptIds || []
+  ccRecipients.userIds = draft.ccUserIds || []
+  bccRecipients.userIds = draft.bccUserIds || []
   sendSelf.value = Boolean(draft.sendSelf)
   draftTip.value = false
   ElMessage.success('草稿已恢复')
@@ -375,13 +433,23 @@ const resetCompose = async () => {
   recipients.userIds = []
   recipients.roleCodes = []
   recipients.deptIds = []
+  ccRecipients.userIds = []
+  bccRecipients.userIds = []
   estimate.value = null
   sendSelf.value = false
   discardDraft()
 }
 
 watch(
-  () => JSON.stringify({ s: compose.subject, c: compose.content, r: recipients, m: sendSelf.value }),
+  () =>
+    JSON.stringify({
+      s: compose.subject,
+      c: compose.content,
+      r: recipients,
+      cc: ccRecipients.userIds,
+      bcc: bccRecipients.userIds,
+      m: sendSelf.value
+    }),
   scheduleDraft
 )
 
@@ -392,9 +460,13 @@ const insertKind = ref<'project' | 'change'>('project')
 const insertKeyword = ref('')
 const insertLoading = ref(false)
 const insertRows = ref<Record<string, unknown>[]>([])
+const insertSelected = ref<Record<string, unknown> | null>(null)
+/** 摘要卡片（推荐）或仅插入一条带链接的文字。 */
+const insertMode = ref<'summary' | 'link'>('summary')
 
 const loadInsertRows = async () => {
   insertLoading.value = true
+  insertSelected.value = null
   try {
     if (insertKind.value === 'project') {
       const data = await listProjects({
@@ -421,29 +493,89 @@ const loadInsertRows = async () => {
 const openInsert = async (kind: 'project' | 'change') => {
   insertKind.value = kind
   insertKeyword.value = ''
+  insertMode.value = 'summary'
   insertVisible.value = true
   await loadInsertRows()
 }
 
 const baseUrl = () => `${location.origin}${location.pathname}`
 
-const insertRecord = (row: Record<string, unknown>) => {
-  const link = (path: string, text: string) =>
-    `<a href="${baseUrl()}#${path}" target="_blank" rel="noopener">${text}</a>`
-  let html = ''
+const esc = (value: unknown) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+
+const moneyText = (value: unknown) => {
+  const amount = Number(value || 0)
+  if (!amount) return '—'
+  return amount >= 10000 ? `${Math.round(amount / 1000) / 10} 万` : `${amount.toLocaleString()} 元`
+}
+
+const insertRowName = (row: Record<string, unknown>) =>
+  insertKind.value === 'project' ? String(row.projectName || '') : String(row.title || '')
+
+const insertRowCode = (row: Record<string, unknown>) =>
+  insertKind.value === 'project' ? String(row.projectCode || '') : String(row.requestCode || '')
+
+const insertRowMeta = (row: Record<string, unknown>) =>
+  insertKind.value === 'project'
+    ? `${String(row.pmName || '未指定负责人')} · ${dictOf(PROJECT_STATUS, row.status).label}`
+    : `${String(row.projectName || '未关联项目')} · ${row.submitTime ? String(row.submitTime).slice(0, 10) : '未提交'}`
+
+/** 生成插入正文的 HTML：摘要卡片用行内样式，保证邮件客户端能正常渲染。 */
+const buildInsertHtml = (row: Record<string, unknown>, mode: 'summary' | 'link') => {
   if (insertKind.value === 'project') {
-    html =
-      `<p><b>项目：</b>${link('/projects', `${String(row.projectName || '')}（${String(row.projectCode || '')}）`)}<br>` +
-      `<b>负责人：</b>${String(row.pmName || '—')}<br>` +
-      `<b>计划周期：</b>${String(row.planStart || '—')} ~ ${String(row.planEnd || '—')}</p>`
-  } else {
-    const projectId = String(row.projectId || '')
-    const path = projectId ? `/changes?projectId=${projectId}` : '/changes'
-    html =
-      `<p><b>变更：</b>${link(path, `${String(row.title || '')}（${String(row.requestCode || '')}）`)}<br>` +
-      `<b>所属项目：</b>${String(row.projectName || '—')}</p>`
+    const href = `${baseUrl()}#/projects`
+    const title = `${String(row.projectName || '')}（${String(row.projectCode || '')}）`
+    const anchor = (text: string) =>
+      `<a href="${href}" target="_blank" rel="noopener" style="color:#3370ff;text-decoration:none;">${text}</a>`
+    const link = anchor('在系统中查看项目 →')
+    if (mode === 'link') {
+      return `<p><b>项目：</b>${anchor(esc(title))}</p>`
+    }
+    return (
+      `<div style="margin:10px 0;padding:12px 14px;background:#f7faff;border:1px solid #e2eaf8;border-left:3px solid #3370ff;border-radius:8px;">` +
+      `<div style="font-size:12px;letter-spacing:.04em;color:#8b95a8;">PMS 项目</div>` +
+      `<div style="margin-top:2px;font-size:15px;font-weight:600;color:#16233d;">${esc(title)}</div>` +
+      `<div style="margin-top:6px;font-size:13px;line-height:1.85;color:#5b6779;">` +
+      `负责人：${esc(row.pmName || '—')}<br>` +
+      `项目状态：${esc(dictOf(PROJECT_STATUS, row.status).label)}<br>` +
+      `计划周期：${esc(row.planStart || '—')} ~ ${esc(row.planEnd || '—')}<br>` +
+      `合同金额：${esc(moneyText(row.contractAmount))}</div>` +
+      `<div style="margin-top:8px;font-size:13px;">${link}</div>` +
+      `</div>`
+    )
   }
-  editorRef.value?.insertHtml(html)
+  const projectId = String(row.projectId || '')
+  const href = `${baseUrl()}#${projectId ? `/changes?projectId=${projectId}` : '/changes'}`
+  const title = `${String(row.title || '')}（${String(row.requestCode || '')}）`
+  const anchor = (text: string) =>
+    `<a href="${href}" target="_blank" rel="noopener" style="color:#3370ff;text-decoration:none;">${text}</a>`
+  const link = anchor('在系统中查看变更 →')
+  if (mode === 'link') {
+    return `<p><b>变更：</b>${anchor(esc(title))}</p>`
+  }
+  return (
+    `<div style="margin:10px 0;padding:12px 14px;background:#f7faff;border:1px solid #e2eaf8;border-left:3px solid #d68a12;border-radius:8px;">` +
+    `<div style="font-size:12px;letter-spacing:.04em;color:#8b95a8;">PMS 变更</div>` +
+    `<div style="margin-top:2px;font-size:15px;font-weight:600;color:#16233d;">${esc(title)}</div>` +
+    `<div style="margin-top:6px;font-size:13px;line-height:1.85;color:#5b6779;">` +
+    `所属项目：${esc(row.projectName || '—')}<br>` +
+    `提交时间：${esc(row.submitTime ? String(row.submitTime).slice(0, 16) : '—')}</div>` +
+    `<div style="margin-top:8px;font-size:13px;">${link}</div>` +
+    `</div>`
+  )
+}
+
+const insertPreviewHtml = computed(() =>
+  insertSelected.value ? buildInsertHtml(insertSelected.value, insertMode.value) : ''
+)
+
+const confirmInsert = () => {
+  if (!insertSelected.value) return
+  editorRef.value?.insertHtml(buildInsertHtml(insertSelected.value, insertMode.value))
   insertVisible.value = false
 }
 
@@ -467,9 +599,10 @@ const handleInsertCommand = (command: string | number | object) => {
 
 const previewVisible = ref(false)
 
-const previewDoc = computed(() => {
-  const title = compose.subject.trim() || '邮件预览'
-  const body = compose.content || '<p style="color:#8b95a8;">（正文为空）</p>'
+/** 统一生成邮件预览 HTML（写邮件预览、模板预览共用）。 */
+const buildPreviewDoc = (subject: string, body: string) => {
+  const title = esc(subject.trim() || '邮件预览')
+  const content = body || '<p style="color:#8b95a8;">（正文为空）</p>'
   const from = options.value
     ? `${options.value.fromName} &lt;${options.value.sender || '未配置发件人'}&gt;`
     : '未配置发件人'
@@ -483,12 +616,14 @@ const previewDoc = computed(() => {
       <span style="font-size:16px;font-weight:600;color:#1f4fd8;">${title}</span>
     </div>
     <div style="padding:20px;background:#fff;border:1px solid #e2eaf8;border-radius:0 0 10px 10px;font-size:14px;line-height:1.75;color:#1f2328;">
-      ${body}
+      ${content}
     </div>
     <p style="margin:14px 0 0;text-align:center;font-size:12px;color:#93a0b5;">本邮件由 PMS 项目全生命周期管理系统发送</p>
   </div>
 </body></html>`
-})
+}
+
+const previewDoc = computed(() => buildPreviewDoc(compose.subject, compose.content))
 
 const openPreview = () => {
   if (!compose.subject.trim() || !contentLength.value) {
@@ -520,11 +655,12 @@ const submitCompose = async () => {
     ElMessage.warning(`正文（含排版）超出 ${MAX_BODY} 字符限制，请精简后发送`)
     return
   }
-  if (!recipients.userIds.length && !recipients.roleCodes.length && !recipients.deptIds.length) {
-    ElMessage.warning('请至少选择一名收件人')
+  if (!hasAnyRecipient()) {
+    ElMessage.warning('请至少选择一名收件人（抄送 / 密送也可以）')
     return
   }
-  const userIds = [...recipients.userIds]
+  // 抄送、密送与收件人一起并入投递列表，重复人员只发一封
+  const userIds = collectRecipientIds()
   if (sendSelf.value && store.profile?.id && !userIds.includes(store.profile.id)) {
     userIds.push(store.profile.id)
   }
@@ -563,13 +699,11 @@ const goLogs = () => {
 /* ------------------------------ 发件配置 ------------------------------ */
 const configLoading = ref(false)
 const saving = ref(false)
-const testing = ref(false)
-const testTo = ref('')
 const form = reactive({
   enabled: true,
-  smtpHost: '',
-  smtpPort: 465,
-  security: 'SSL',
+  smtpHost: 'office.qianlong.com.cn',
+  smtpPort: 25,
+  security: 'NONE',
   smtpUser: '',
   password: '',
   passwordSet: false,
@@ -577,9 +711,10 @@ const form = reactive({
   fromName: 'PMS 项目管理',
   timeoutSeconds: 15,
   keepDays: 180,
-  excludeOperator: true,
-  testTo: ''
+  excludeOperator: true
 })
+
+
 
 const loadConfig = async () => {
   configLoading.value = true
@@ -587,20 +722,18 @@ const loadConfig = async () => {
     const data = await mailConfig()
     Object.assign(form, {
       enabled: data.enabled,
-      smtpHost: data.smtpHost,
-      smtpPort: data.smtpPort || 465,
-      security: data.security || 'SSL',
+      smtpHost: data.smtpHost || 'office.qianlong.com.cn',
+      smtpPort: data.smtpPort || 25,
+      security: data.security || 'NONE',
       smtpUser: data.smtpUser,
-      password: '',
+      password: data.password || '',
       passwordSet: data.passwordSet,
       smtpFrom: data.smtpFrom,
       fromName: data.fromName || 'PMS 项目管理',
       timeoutSeconds: data.timeoutSeconds || 15,
       keepDays: data.keepDays || 180,
-      excludeOperator: data.excludeOperator,
-      testTo: data.testTo
+      excludeOperator: data.excludeOperator
     })
-    if (!testTo.value) testTo.value = data.smtpFrom || data.smtpUser
   } finally {
     configLoading.value = false
   }
@@ -622,28 +755,14 @@ const saveConfig = async () => {
       timeoutSeconds: Number(form.timeoutSeconds),
       keepDays: Number(form.keepDays),
       excludeOperator: form.excludeOperator,
-      testTo: form.testTo
+      // 测试模式已下线：保存时显式清空，避免历史测试收件人继续拦截所有通知
+      testTo: ''
     })
     ElMessage.success('发件配置已保存')
-    form.password = ''
     await loadConfig()
     await loadOptions()
   } finally {
     saving.value = false
-  }
-}
-
-const sendTest = async () => {
-  if (!testTo.value) {
-    ElMessage.warning('请填写测试收件人')
-    return
-  }
-  testing.value = true
-  try {
-    await testMail(testTo.value.trim())
-    ElMessage.success('测试邮件已发送，请查收')
-  } finally {
-    testing.value = false
   }
 }
 
@@ -656,16 +775,37 @@ const templateSaving = ref(false)
 const templateEditorRef = ref<InstanceType<typeof MailEditor> | null>(null)
 const editForm = reactive({ subject: '', body: '', receiverRoles: '', enabled: true })
 
-const TEMPLATE_VARS = [
-  'project.name',
-  'project.code',
-  'change.code',
-  'change.title',
-  'operator.name',
-  'reason',
-  'time',
-  'link'
-]
+const TEMPLATE_VAR_LABELS: Record<string, string> = {
+  'project.name': '项目名称',
+  'project.code': '项目编号',
+  'project.amount': '合同金额',
+  'project.approvalLevel': '审批层级',
+  'project.status': '项目状态',
+  'change.code': '变更编号',
+  'change.title': '变更标题',
+  'task.name': '任务名称',
+  'task.endDate': '计划完成',
+  'operator.name': '操作人',
+  reason: '原因',
+  time: '时间',
+  link: '系统链接'
+}
+const TEMPLATE_VARS = Object.keys(TEMPLATE_VAR_LABELS)
+
+/** 把模板变量替换成可读占位（如【项目名称】），避免手动发信时把 {{ }} 原样发出去。 */
+const fillTemplateVars = (text: string, opts: { stripLinks?: boolean } = {}) => {
+  let html = (text || '').replace(
+    /\{\{\s*([a-zA-Z0-9_.]+)[^{}]*\}\}/g,
+    (_match, name: string) => `【${TEMPLATE_VAR_LABELS[name] || name}】`
+  )
+  if (opts.stripLinks) {
+    // 手动发信没有具体单据上下文，链接去掉标签只留文字，避免发出无效地址
+    html = html.replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, '$1')
+  } else {
+    html = html.replace(/href="[^"]*"/gi, 'href="#"')
+  }
+  return html
+}
 
 const loadTemplates = async () => {
   templateLoading.value = true
@@ -674,6 +814,98 @@ const loadTemplates = async () => {
   } finally {
     templateLoading.value = false
   }
+}
+
+/* 模板列表筛选 */
+const templateKeyword = ref('')
+const templateStatus = ref('')
+const filteredTemplates = computed(() => {
+  const keyword = templateKeyword.value.trim().toLowerCase()
+  return templates.value.filter((item) => {
+    if (templateStatus.value === 'enabled' && !item.enabled) return false
+    if (templateStatus.value === 'disabled' && item.enabled) return false
+    if (!keyword) return true
+    return (
+      item.name.toLowerCase().includes(keyword) ||
+      item.subject.toLowerCase().includes(keyword) ||
+      item.message.toLowerCase().includes(keyword)
+    )
+  })
+})
+
+/** 收件角色编码转中文，避免模板列表出现裸编码。 */
+const receiverRoleNames = (roles: string) =>
+  (roles || '')
+    .split(',')
+    .map((code) => code.trim())
+    .filter(Boolean)
+    .map((code) => roleName(code))
+    .join('、') || '—'
+
+/* 写邮件时选择模板 */
+const templatePickVisible = ref(false)
+const templatePickKeyword = ref('')
+const pickedTemplate = ref<MailTemplate | null>(null)
+
+const pickerTemplates = computed(() => {
+  const keyword = templatePickKeyword.value.trim().toLowerCase()
+  return templates.value
+    .filter((item) => item.enabled)
+    .filter(
+      (item) =>
+        !keyword ||
+        item.name.toLowerCase().includes(keyword) ||
+        item.subject.toLowerCase().includes(keyword) ||
+        item.message.toLowerCase().includes(keyword)
+    )
+})
+
+const templatePreviewDoc = computed(() =>
+  pickedTemplate.value
+    ? buildPreviewDoc(
+        fillTemplateVars(pickedTemplate.value.subject),
+        fillTemplateVars(pickedTemplate.value.body)
+      )
+    : ''
+)
+
+const openTemplatePicker = () => {
+  templatePickKeyword.value = ''
+  pickedTemplate.value = pickerTemplates.value[0] || null
+  templatePickVisible.value = true
+}
+
+/** 把模板套用到写邮件：变量换成【中文占位】，去掉单据链接，带入收件角色。 */
+const applyTemplate = async (row: any) => {
+  const item = row as MailTemplate
+  if (compose.subject.trim() || contentLength.value) {
+    try {
+      await ElMessageBox.confirm('当前主题或正文已有内容，套用模板会整体覆盖，继续？', '套用模板', {
+        type: 'warning',
+        confirmButtonText: '覆盖',
+        cancelButtonText: '取消'
+      })
+    } catch {
+      return
+    }
+  }
+  compose.subject = fillTemplateVars(item.subject)
+  compose.content = fillTemplateVars(item.body, { stripLinks: true })
+  const codes = (item.receiverRoles || '')
+    .split(',')
+    .map((code) => code.trim())
+    .filter(Boolean)
+    .filter((code) => (options.value?.roles || []).some((role) => role.roleCode === code))
+  if (codes.length) {
+    recipients.roleCodes = [...new Set([...recipients.roleCodes, ...codes])]
+  }
+  templatePickVisible.value = false
+  tab.value = 'compose'
+  ElMessage.success('已套用模板，请把【方括号】占位替换为实际内容')
+}
+
+const applyPickedTemplate = () => {
+  if (pickedTemplate.value) applyTemplate(pickedTemplate.value)
 }
 
 const openTemplate = (row: any) => {
@@ -830,9 +1062,13 @@ onBeforeUnmount(() => {
                 发送
               </el-button>
               <el-button :icon="EditPen" :disabled="!canManage" @click="saveDraft">存草稿</el-button>
-              <el-button :disabled="!canManage" @click="openPreview">预览</el-button>
+              <el-button :icon="Files" :disabled="!canManage" @click="openTemplatePicker">
+                选择模板
+              </el-button>
               <el-dropdown :disabled="!canManage" @command="handleInsertCommand">
-                <el-button :disabled="!canManage">插入系统内容</el-button>
+                <el-button type="primary" plain :icon="Tickets" :disabled="!canManage">
+                  插入系统内容
+                </el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item command="project">项目信息</el-dropdown-item>
@@ -841,6 +1077,7 @@ onBeforeUnmount(() => {
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
+              <el-button :disabled="!canManage" @click="openPreview">预览</el-button>
               <el-button text :disabled="!canManage" @click="resetCompose">清空</el-button>
               <div class="spacer" />
               <el-tag v-if="options && !options.ready" type="warning" effect="light" size="small">
@@ -882,7 +1119,47 @@ onBeforeUnmount(() => {
                 <span v-if="!recipientChips.length" class="field-placeholder">
                   支持按角色、部门或人员选择，勾选后自动合并去重
                 </span>
-                <button type="button" class="field-action" @click="openRecipient">选择收件人</button>
+                <button type="button" class="field-action" @click="openRecipient('to')">选择收件人</button>
+              </div>
+            </div>
+
+            <div class="compose-field">
+              <span class="field-label">抄送</span>
+              <div class="chip-area">
+                <el-tag
+                  v-for="chip in ccChips"
+                  :key="chip.key"
+                  size="small"
+                  closable
+                  effect="plain"
+                  @close="removeCopy(ccRecipients.userIds, chip.value)"
+                >
+                  {{ chip.label }}
+                </el-tag>
+                <span v-if="!ccChips.length" class="field-placeholder">
+                  可选，抄送人会收到同一封邮件
+                </span>
+                <button type="button" class="field-action" @click="openRecipient('cc')">添加抄送</button>
+              </div>
+            </div>
+
+            <div class="compose-field">
+              <span class="field-label">密送</span>
+              <div class="chip-area">
+                <el-tag
+                  v-for="chip in bccChips"
+                  :key="chip.key"
+                  size="small"
+                  closable
+                  effect="plain"
+                  @close="removeCopy(bccRecipients.userIds, chip.value)"
+                >
+                  {{ chip.label }}
+                </el-tag>
+                <span v-if="!bccChips.length" class="field-placeholder">
+                  可选，密送人彼此不可见
+                </span>
+                <button type="button" class="field-action" @click="openRecipient('bcc')">添加密送</button>
               </div>
             </div>
 
@@ -891,7 +1168,6 @@ onBeforeUnmount(() => {
               <span v-if="estimate.noEmail" class="warn">
                 {{ estimate.noEmail }} 人未维护邮箱，将被跳过
               </span>
-              <span v-if="estimate.testTo" class="warn">测试模式：所有通知只发往 {{ estimate.testTo }}</span>
               <span v-if="estimate.names.length" class="sub-text">
                 含 {{ estimate.names.join('、') }}{{ estimate.total > estimate.names.length ? ' 等' : '' }}
               </span>
@@ -916,7 +1192,7 @@ onBeforeUnmount(() => {
             />
 
             <div class="compose-foot">
-              <el-checkbox v-model="sendSelf" :disabled="!canManage">抄送给我自己</el-checkbox>
+              <el-checkbox v-model="sendSelf" :disabled="!canManage">给我自己发一份</el-checkbox>
               <span class="sub-text">正文 {{ contentLength }} 字（含排版 {{ rawLength }} / {{ MAX_BODY }}）</span>
               <span class="spacer" />
               <span class="sub-text">发送后可在「发送记录」查看投递状态与失败原因</span>
@@ -1094,36 +1370,54 @@ onBeforeUnmount(() => {
 
         <el-tab-pane label="通知模板" name="templates">
           <div v-loading="templateLoading" class="tab-body">
-            <el-alert
-              type="info"
-              :closable="false"
-              show-icon
-              title="系统事件（立项审批、变更、任务指派等）触发时按这里配置的模板发信"
-              description="主题与正文支持变量，正文可用富文本排版；修改后可通过「恢复默认」回到内置版本。"
-              style="margin-bottom: 14px"
-            />
-            <el-table :data="templates" size="small">
-              <el-table-column prop="name" label="触发事件" min-width="150" />
-              <el-table-column prop="subject" label="主题" min-width="260" show-overflow-tooltip />
-              <el-table-column label="收件角色" width="180" show-overflow-tooltip>
-                <template #default="{ row }">{{ row.receiverRoles || '—' }}</template>
+            <div class="log-filters">
+              <el-input
+                v-model="templateKeyword"
+                placeholder="搜索事件 / 主题 / 触发说明"
+                clearable
+                style="width: 240px"
+              />
+              <el-select v-model="templateStatus" placeholder="全部状态" clearable style="width: 130px">
+                <el-option label="启用" value="enabled" />
+                <el-option label="停用" value="disabled" />
+              </el-select>
+              <span class="sub-text">共 {{ filteredTemplates.length }} 个模板</span>
+            </div>
+            <el-table :data="filteredTemplates" size="small">
+              <el-table-column label="触发事件" min-width="210">
+                <template #default="{ row }">
+                  <div class="tpl-name">{{ row.name }}</div>
+                  <div class="sub-text">{{ row.message }}</div>
+                </template>
               </el-table-column>
-              <el-table-column label="状态" width="90">
+              <el-table-column prop="subject" label="主题" min-width="230" show-overflow-tooltip />
+              <el-table-column label="收件角色" width="170" show-overflow-tooltip>
+                <template #default="{ row }">{{ receiverRoleNames(row.receiverRoles) }}</template>
+              </el-table-column>
+              <el-table-column label="状态" width="82">
                 <template #default="{ row }">
                   <el-tag size="small" :type="row.enabled ? 'success' : 'info'">
                     {{ row.enabled ? '启用' : '停用' }}
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="来源" width="90">
+              <el-table-column label="来源" width="82">
                 <template #default="{ row }">
                   <el-tag size="small" effect="plain" :type="row.customized ? 'warning' : 'info'">
                     {{ row.customized ? '自定义' : '内置' }}
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="150">
+              <el-table-column label="操作" width="196">
                 <template #default="{ row }">
+                  <el-button
+                    link
+                    type="primary"
+                    :disabled="!canManage || !row.enabled"
+                    @click="applyTemplate(row)"
+                  >
+                    写邮件
+                  </el-button>
                   <el-button link type="primary" :disabled="!canManage" @click="openTemplate(row)">
                     编辑
                   </el-button>
@@ -1143,86 +1437,85 @@ onBeforeUnmount(() => {
         </el-tab-pane>
 
         <el-tab-pane label="发件配置" name="config">
-          <div v-loading="configLoading" class="tab-body">
-            <el-alert
-              type="warning"
-              :closable="false"
-              show-icon
-              title="发件人邮箱建议与登录账号保持一致"
-              description="QQ / 163 / 腾讯企业邮等公共邮箱会拒绝与登录账号域名不同的发件人，报错常见为「所属域名不存在」；公司内网 Exchange 则按 IT 提供的地址填写。"
-              style="margin-bottom: 14px"
-            />
-            <el-form :model="form" label-width="120px" :disabled="!canManage">
-              <div class="form-cols">
-                <el-form-item label="启用邮件通知">
+          <div v-loading="configLoading" class="tab-body config-pane">
+            <el-form :model="form" label-width="96px" :disabled="!canManage" class="config-form">
+              <div class="config-grid">
+                <el-form-item label="启用通知">
                   <el-switch v-model="form.enabled" />
                 </el-form-item>
-                <el-form-item label="加密方式">
-                  <el-select v-model="form.security" style="width: 100%">
-                    <el-option label="SSL（常用 465）" value="SSL" />
-                    <el-option label="STARTTLS（常用 587）" value="STARTTLS" />
-                    <el-option label="不加密（常用 25）" value="NONE" />
-                  </el-select>
+                <el-form-item label="发件人名称">
+                  <el-input v-model="form.fromName" placeholder="收件人看到的发件人名称" />
                 </el-form-item>
-                <el-form-item label="SMTP 服务器">
-                  <el-input v-model="form.smtpHost" placeholder="如 smtp.qq.com" />
+                <el-form-item label="服务器地址">
+                  <el-input v-model="form.smtpHost" placeholder="SMTP 服务器地址" />
                 </el-form-item>
                 <el-form-item label="端口">
-                  <el-input-number v-model="form.smtpPort" :min="1" :max="65535" style="width: 100%" />
-                </el-form-item>
-                <el-form-item label="登录账号">
-                  <el-input v-model="form.smtpUser" placeholder="通常为完整邮箱地址" />
-                </el-form-item>
-                <el-form-item label="密码 / 授权码">
-                  <el-input
-                    v-model="form.password"
-                    type="password"
-                    show-password
-                    :placeholder="form.passwordSet ? '已配置，留空表示不修改' : '请输入 SMTP 密码或授权码'"
+                  <el-input-number
+                    v-model="form.smtpPort"
+                    :min="1"
+                    :max="65535"
+                    controls-position="right"
+                    class="config-number"
                   />
                 </el-form-item>
-                <el-form-item label="发件人邮箱">
-                  <el-input v-model="form.smtpFrom" placeholder="留空则使用登录账号（推荐）" />
-                </el-form-item>
-                <el-form-item label="发件人名称">
-                  <el-input v-model="form.fromName" placeholder="如 PMS 项目管理" />
+                <el-form-item label="加密方式">
+                  <el-select v-model="form.security" class="config-select">
+                    <el-option label="不加密" value="NONE" />
+                    <el-option label="SSL" value="SSL" />
+                    <el-option label="STARTTLS" value="STARTTLS" />
+                  </el-select>
                 </el-form-item>
                 <el-form-item label="超时（秒）">
-                  <el-input-number v-model="form.timeoutSeconds" :min="3" :max="120" style="width: 100%" />
+                  <el-input-number
+                    v-model="form.timeoutSeconds"
+                    :min="3"
+                    :max="120"
+                    controls-position="right"
+                    class="config-number"
+                  />
                 </el-form-item>
-                <el-form-item label="记录保留（天）">
-                  <el-input-number v-model="form.keepDays" :min="7" :max="3650" style="width: 100%" />
+                <el-form-item label="登录账号">
+                  <el-input v-model="form.smtpUser" placeholder="完整邮箱地址" />
+                </el-form-item>
+                <el-form-item label="密码">
+                  <el-input v-model="form.password" type="text" placeholder="邮箱密码或客户端授权码" />
+                </el-form-item>
+                <el-form-item label="发件人邮箱">
+                  <el-input v-model="form.smtpFrom" placeholder="留空则使用登录账号" />
+                </el-form-item>
+                <el-form-item label="保留天数">
+                  <el-input-number
+                    v-model="form.keepDays"
+                    :min="7"
+                    :max="3650"
+                    controls-position="right"
+                    class="config-number"
+                  />
                 </el-form-item>
                 <el-form-item label="跳过操作人">
-                  <el-switch v-model="form.excludeOperator" active-text="操作人本人不收邮件" />
-                </el-form-item>
-                <el-form-item label="测试模式收件人">
-                  <el-input v-model="form.testTo" placeholder="非空时所有通知只发到该地址" />
+                  <el-switch v-model="form.excludeOperator" />
                 </el-form-item>
               </div>
 
-              <div class="form-actions">
+              <div class="config-actions">
                 <el-button v-if="canManage" type="primary" :loading="saving" @click="saveConfig">
                   保存配置
                 </el-button>
-                <el-input v-model="testTo" placeholder="测试收件邮箱" class="test-input" />
-                <el-button v-if="canManage" :loading="testing" @click="sendTest">发送测试邮件</el-button>
               </div>
             </el-form>
-            <el-alert
-              type="info"
-              :closable="false"
-              show-icon
-              title="关于加密方式"
-              description="公司邮箱若使用 25 端口且支持 STARTTLS，请选择 STARTTLS；465 一般是 SSL。密码使用应用密钥加密后保存，接口不会回显。"
-            />
           </div>
         </el-tab-pane>
       </el-tabs>
     </div>
 
-    <!-- 选择收件人 -->
-    <el-dialog v-model="recipientVisible" title="选择收件人" width="min(760px, 94vw)">
+    <!-- 选择收件人 / 抄送 / 密送 -->
+    <el-dialog
+      v-model="recipientVisible"
+      :title="
+        recipientTarget === 'to' ? '选择收件人' : recipientTarget === 'cc' ? '选择抄送人' : '选择密送人'
+      "
+      width="min(760px, 94vw)"
+    >
       <el-tabs v-model="recipientTab" class="recipient-tabs">
         <el-tab-pane label="按人员" name="user">
           <div class="rec-filter">
@@ -1241,7 +1534,7 @@ onBeforeUnmount(() => {
             <div
               v-for="item in filteredUsers"
               :key="String(item.id)"
-              class="rec-row"
+              class="rec-row rec-row-cols"
               @click="toggleValue(draftSel.userIds, String(item.id))"
             >
               <el-checkbox
@@ -1249,16 +1542,21 @@ onBeforeUnmount(() => {
                 @click.stop
                 @change="toggleValue(draftSel.userIds, String(item.id))"
               />
-              <span class="rec-name">{{ item.realName || item.username }}</span>
-              <span class="rec-account">{{ item.username }}</span>
+              <span class="rec-name" :title="item.realName || item.username">
+                {{ item.realName || item.username }}
+              </span>
+              <span class="rec-account" :title="item.username">{{ item.username }}</span>
+              <span class="rec-mail">
+                <template v-if="item.email">{{ item.email }}</template>
+                <el-tag v-else size="small" type="warning" effect="plain">未维护邮箱</el-tag>
+              </span>
               <span class="rec-dept">{{ deptName(item.deptId) }}</span>
-              <el-tag v-if="!item.hasEmail" size="small" type="warning" effect="plain">未维护邮箱</el-tag>
             </div>
             <el-empty v-if="!filteredUsers.length" description="没有匹配的人员" :image-size="70" />
           </div>
         </el-tab-pane>
 
-        <el-tab-pane label="按角色" name="role">
+        <el-tab-pane v-if="recipientTarget === 'to'" label="按角色" name="role">
           <div class="rec-list">
             <div v-for="item in options?.roles || []" :key="item.roleCode" class="rec-row">
               <el-checkbox
@@ -1274,7 +1572,7 @@ onBeforeUnmount(() => {
           </div>
         </el-tab-pane>
 
-        <el-tab-pane label="按部门" name="dept">
+        <el-tab-pane v-if="recipientTarget === 'to'" label="按部门" name="dept">
           <div class="rec-list">
             <div v-for="item in deptView" :key="String(item.id)" class="rec-row">
               <el-checkbox
@@ -1290,9 +1588,12 @@ onBeforeUnmount(() => {
       </el-tabs>
       <template #footer>
         <div class="rec-footer">
-          <span class="sub-text">
+          <span v-if="recipientTarget === 'to'" class="sub-text">
             已选 {{ selectedCount }} 项（人员 {{ draftSel.userIds.length }} / 角色
             {{ draftSel.roleCodes.length }} / 部门 {{ draftSel.deptIds.length }}），确认后自动合并去重
+          </span>
+          <span v-else class="sub-text">
+            已选 {{ draftSel.userIds.length }} 人（{{ recipientTarget === 'cc' ? '抄送' : '密送' }}按人员选择）
           </span>
           <div>
             <el-button @click="recipientVisible = false">取消</el-button>
@@ -1303,40 +1604,101 @@ onBeforeUnmount(() => {
     </el-dialog>
 
     <!-- 插入系统内容 -->
-    <el-dialog
-      v-model="insertVisible"
-      :title="insertKind === 'project' ? '插入项目信息' : '插入变更信息'"
-      width="min(640px, 94vw)"
-    >
-      <div class="rec-filter">
+    <el-dialog v-model="insertVisible" title="插入系统内容" width="min(880px, 94vw)">
+      <div class="insert-bar">
+        <el-radio-group v-model="insertKind" size="small" @change="loadInsertRows">
+          <el-radio-button value="project">项目</el-radio-button>
+          <el-radio-button value="change">变更</el-radio-button>
+        </el-radio-group>
         <el-input
           v-model="insertKeyword"
           :placeholder="insertKind === 'project' ? '搜索项目名称 / 编号' : '搜索变更标题 / 编号'"
           clearable
-          style="width: 260px"
+          style="width: 240px"
           @keyup.enter="loadInsertRows"
         />
-        <el-button type="primary" @click="loadInsertRows">查询</el-button>
+        <el-button :icon="Search" @click="loadInsertRows">查询</el-button>
+        <span class="sub-text">点击左侧记录预览，确认后插入到正文光标处</span>
       </div>
-      <div v-loading="insertLoading" class="rec-list short">
-        <div
-          v-for="row in insertRows"
-          :key="String(row.id)"
-          class="rec-row clickable"
-          @click="insertRecord(row)"
-        >
-          <span class="rec-name">
-            {{ insertKind === 'project' ? row.projectName : row.title }}
-          </span>
-          <span class="rec-account">
-            {{ insertKind === 'project' ? row.projectCode : row.requestCode }}
-          </span>
-          <span class="rec-dept">{{ insertKind === 'project' ? row.pmName || '—' : row.projectName || '—' }}</span>
+
+      <div class="insert-layout">
+        <div v-loading="insertLoading" class="insert-list">
+          <button
+            v-for="row in insertRows"
+            :key="String(row.id)"
+            type="button"
+            class="insert-item"
+            :class="{ active: insertSelected && String(insertSelected.id) === String(row.id) }"
+            @click="insertSelected = row"
+          >
+            <span class="insert-name">{{ insertRowName(row) }}</span>
+            <span class="insert-meta">{{ insertRowCode(row) }} · {{ insertRowMeta(row) }}</span>
+          </button>
+          <el-empty v-if="!insertRows.length" description="没有匹配的数据" :image-size="70" />
         </div>
-        <el-empty v-if="!insertRows.length" description="没有匹配的数据" :image-size="70" />
+
+        <div class="insert-preview">
+          <div class="insert-preview-head">
+            <span>插入预览</span>
+            <el-radio-group v-model="insertMode" size="small">
+              <el-radio-button value="summary">摘要卡片</el-radio-button>
+              <el-radio-button value="link">仅链接</el-radio-button>
+            </el-radio-group>
+          </div>
+          <div v-if="insertSelected" class="insert-preview-box" v-html="insertPreviewHtml" />
+          <el-empty v-else description="从左侧选择一条记录" :image-size="70" />
+        </div>
+      </div>
+
+      <template #footer>
+        <div class="insert-footer">
+          <span class="sub-text">内容会插入到正文当前光标位置，插入后仍可继续编辑</span>
+          <div class="insert-footer-actions">
+            <el-button @click="insertVisible = false">取消</el-button>
+            <el-button type="primary" :disabled="!insertSelected" @click="confirmInsert">插入</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
+
+    <!-- 选择模板 -->
+    <el-dialog v-model="templatePickVisible" title="选择模板" width="min(880px, 94vw)">
+      <div class="tpl-pick">
+        <div class="tpl-pick-list">
+          <el-input v-model="templatePickKeyword" placeholder="搜索模板名称 / 主题" clearable size="small" />
+          <div class="tpl-pick-items">
+            <button
+              v-for="item in pickerTemplates"
+              :key="item.eventCode"
+              type="button"
+              class="tpl-item"
+              :class="{ active: pickedTemplate?.eventCode === item.eventCode }"
+              @click="pickedTemplate = item"
+            >
+              <span class="tpl-item-name">{{ item.name }}</span>
+              <span class="tpl-item-sub">{{ item.subject }}</span>
+            </button>
+            <el-empty v-if="!pickerTemplates.length" description="没有可用模板" :image-size="60" />
+          </div>
+        </div>
+        <div class="tpl-pick-preview">
+          <template v-if="pickedTemplate">
+            <div class="tpl-pick-roles">
+              <span class="sub-text">默认收件角色：{{ receiverRoleNames(pickedTemplate.receiverRoles) }}</span>
+            </div>
+            <iframe class="preview-frame small" :srcdoc="templatePreviewDoc" title="模板预览" />
+            <p class="sub-text">
+              正文中的【方括号】是变量占位，套用后请替换为实际内容；原有单据链接会被去掉。
+            </p>
+          </template>
+          <el-empty v-else description="选择左侧模板查看预览" :image-size="70" />
+        </div>
       </div>
       <template #footer>
-        <span class="sub-text">点击一条记录即插入带系统链接的摘要，收件人可直接打开系统查看</span>
+        <el-button @click="templatePickVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="!pickedTemplate" @click="applyPickedTemplate">
+          使用此模板
+        </el-button>
       </template>
     </el-dialog>
 
@@ -1808,24 +2170,58 @@ onBeforeUnmount(() => {
   background: #f7faff;
 }
 
+/* 人员行用固定列宽：邮箱缺失时黄色标签也占同一列，保证每行字段纵向对齐 */
+.rec-row-cols {
+  display: grid;
+  grid-template-columns: 18px 108px 92px minmax(0, 1fr) 96px;
+  column-gap: 10px;
+  align-items: center;
+}
+
+.rec-row-cols .rec-mail :deep(.el-tag) {
+  max-width: 100%;
+  vertical-align: middle;
+}
+
 .rec-row.clickable:hover {
   background: #eef3ff;
 }
 
 .rec-name {
-  min-width: 120px;
+  flex: 0 0 110px;
+  min-width: 0;
+  overflow: hidden;
   color: var(--pms-text);
   font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rec-account {
-  min-width: 100px;
+  flex: 0 0 92px;
+  overflow: hidden;
   color: var(--pms-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 邮箱列：选人时核对收件地址，过长省略、悬停看全量 */
+.rec-mail {
+  flex: 1 1 160px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--pms-text-2);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rec-dept {
-  flex: 1 1 auto;
+  flex: 0 0 108px;
+  overflow: hidden;
   color: var(--pms-text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rec-footer {
@@ -1905,23 +2301,225 @@ onBeforeUnmount(() => {
   color: var(--pms-text-3);
 }
 
-/* ------------------------------ 其他 ------------------------------ */
-.form-cols {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0 18px;
-}
-
-.form-actions {
+/* ------------------------------ 插入系统内容 ------------------------------ */
+.insert-bar {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin: 4px 0 14px;
+  margin-bottom: 12px;
 }
 
-.test-input {
-  width: 260px;
+.insert-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.insert-list {
+  max-height: 360px;
+  overflow-y: auto;
+  border: 1px solid var(--pms-line-soft);
+  border-radius: 8px;
+}
+
+.insert-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--pms-line-soft);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.insert-item:last-child {
+  border-bottom: 0;
+}
+
+.insert-item:hover {
+  background: #f7faff;
+}
+
+.insert-item.active {
+  background: #eef3ff;
+  box-shadow: inset 3px 0 0 var(--pms-primary);
+}
+
+.insert-name {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--pms-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.insert-meta {
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--pms-text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.insert-preview {
+  min-width: 0;
+  padding: 10px 12px;
+  background: #fbfcff;
+  border: 1px solid var(--pms-line-soft);
+  border-radius: 8px;
+}
+
+.insert-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--pms-text);
+}
+
+.insert-preview-box {
+  max-height: 280px;
+  min-height: 150px;
+  padding: 4px 12px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid var(--pms-line-soft);
+  border-radius: 8px;
+}
+
+.insert-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.insert-footer-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ------------------------------ 选择模板 ------------------------------ */
+.tpl-pick {
+  display: grid;
+  grid-template-columns: minmax(0, 280px) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.tpl-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tpl-pick-items {
+  max-height: 380px;
+  overflow-y: auto;
+  border: 1px solid var(--pms-line-soft);
+  border-radius: 8px;
+}
+
+.tpl-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--pms-line-soft);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tpl-item:last-child {
+  border-bottom: 0;
+}
+
+.tpl-item:hover {
+  background: #f7faff;
+}
+
+.tpl-item.active {
+  background: #eef3ff;
+  box-shadow: inset 3px 0 0 var(--pms-primary);
+}
+
+.tpl-item-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--pms-text);
+}
+
+.tpl-item-sub {
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--pms-text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tpl-pick-preview {
+  min-width: 0;
+  padding: 10px 12px;
+  background: #fbfcff;
+  border: 1px solid var(--pms-line-soft);
+  border-radius: 8px;
+}
+
+.tpl-pick-roles {
+  margin-bottom: 8px;
+}
+
+.preview-frame.small {
+  height: 300px;
+}
+
+.tpl-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--pms-text);
+}
+
+/* ------------------------------ 发件配置 ------------------------------ */
+.config-pane {
+  max-width: 880px;
+}
+
+.config-form {
+  padding-top: 2px;
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 20px;
+}
+
+.config-grid :deep(.el-form-item) {
+  margin-bottom: 14px;
+}
+
+/* 下拉与数字框按内容定宽，避免整列被拉得过长 */
+.config-select {
+  width: 160px;
+}
+
+.config-number {
+  width: 140px;
+}
+
+.config-actions {
+  margin-top: 2px;
 }
 
 .log-filters {
@@ -1972,12 +2570,8 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 900px) {
-  .form-cols {
+  .config-grid {
     grid-template-columns: 1fr;
-  }
-
-  .test-input {
-    width: 100%;
   }
 
   .result-grid {
@@ -1992,8 +2586,24 @@ onBeforeUnmount(() => {
     min-width: 84px;
   }
 
-  .rec-account {
+  .rec-account,
+  .rec-dept {
     display: none;
+  }
+
+  /* 窄屏只留「姓名 + 邮箱」两列，避免固定列宽挤压 */
+  .rec-row-cols {
+    grid-template-columns: 18px 96px minmax(0, 1fr);
+  }
+
+  .insert-layout,
+  .tpl-pick {
+    grid-template-columns: 1fr;
+  }
+
+  .insert-footer {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 </style>

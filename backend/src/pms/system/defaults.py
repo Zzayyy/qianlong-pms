@@ -67,8 +67,8 @@ DEFAULT_CONFIGS: Final[Mapping[str, ConfigValue]] = {
     # ---- 通知与导出 ----
     "notify.mail.enabled": "true",
     "notify.mail.smtpHost": "",
-    "notify.mail.smtpPort": "465",
-    "notify.mail.security": "SSL",
+    "notify.mail.smtpPort": "25",
+    "notify.mail.security": "NONE",
     "notify.mail.smtpUser": "",
     "notify.mail.smtpFrom": "",
     "notify.mail.fromName": "PMS 项目管理",

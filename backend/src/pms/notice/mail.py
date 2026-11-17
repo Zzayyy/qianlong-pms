@@ -229,8 +229,8 @@ async def load_account(session: AsyncSession) -> MailAccount:
     return MailAccount(
         enabled=await config.get_bool("notify.mail.enabled"),
         host=(await config.get_str("notify.mail.smtpHost")).strip(),
-        port=await config.get_int("notify.mail.smtpPort") or 465,
-        security=(await config.get_str("notify.mail.security") or "SSL").upper(),
+        port=await config.get_int("notify.mail.smtpPort") or 25,
+        security=(await config.get_str("notify.mail.security") or "NONE").upper(),
         user=user.strip(),
         password=decrypt_secret(await config.get_str("notify.mail.password")),
         sender=sender.strip(),

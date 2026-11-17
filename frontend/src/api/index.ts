@@ -326,6 +326,8 @@ export interface MailConfig {
   smtpPort: number
   security: string
   smtpUser: string
+  /** 解密后的密码（仅 sys:config 管理员可见） */
+  password: string
   passwordSet: boolean
   smtpFrom: string
   fromName: string
@@ -368,6 +370,8 @@ export interface MailUserOption {
   username: string
   realName: string
   deptId: string
+  /** 邮箱地址（仅写邮件页管理员可见，用于核对收件人） */
+  email?: string
   hasEmail: boolean
 }
 

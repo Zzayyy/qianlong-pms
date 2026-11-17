@@ -44,8 +44,8 @@ class MailConfigIn(BaseModel):
 
     enabled: bool = True
     smtpHost: str = Field(default="", max_length=255)
-    smtpPort: int = Field(default=465, ge=1, le=65535)
-    security: str = Field(default="SSL", max_length=16)
+    smtpPort: int = Field(default=25, ge=1, le=65535)
+    security: str = Field(default="NONE", max_length=16)
     smtpUser: str = Field(default="", max_length=255)
     password: str = Field(default="", max_length=255)
     smtpFrom: str = Field(default="", max_length=255)
@@ -96,7 +96,11 @@ async def get_config(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions(_TAG))],
 ) -> object:
-    """返回发件配置（密码脱敏）。"""
+    """返回发件配置。
+
+    `sys:config` 仅管理员持有；为了方便核对公司邮箱账号，这里回显解密后的
+    SMTP 密码（库中仍是密文存储），普通用户无法访问该接口。
+    """
     del context
     config = ConfigService(session)
     password = await config.get_str("notify.mail.password")
@@ -105,8 +109,9 @@ async def get_config(
             "enabled": await config.get_bool("notify.mail.enabled"),
             "smtpHost": await config.get_str("notify.mail.smtpHost"),
             "smtpPort": await config.get_int("notify.mail.smtpPort"),
-            "security": await config.get_str("notify.mail.security") or "SSL",
+            "security": await config.get_str("notify.mail.security") or "NONE",
             "smtpUser": await config.get_str("notify.mail.smtpUser"),
+            "password": mail.decrypt_secret(password),
             "passwordSet": bool(password),
             "smtpFrom": await config.get_str("notify.mail.smtpFrom"),
             "fromName": await config.get_str("notify.mail.fromName"),
@@ -157,7 +162,8 @@ async def recipient_options(
 ) -> object:
     """写邮件页面用的人员 / 角色 / 部门选项与邮件通道状态。
 
-    只下发姓名、账号、所属部门与「是否维护了邮箱」，不下发邮箱地址本身。
+    收件人选择弹窗需要展示邮箱地址以便核对，因此这里返回邮箱；接口本身要求
+    `sys:config`（仅管理员可进写邮件页），不会下发给普通人员。
     """
     del context
     account = await mail.load_account(session)
@@ -222,6 +228,7 @@ async def recipient_options(
                     "username": row.username,
                     "realName": row.real_name,
                     "deptId": row.dept_id,
+                    "email": (row.email or "").strip(),
                     "hasEmail": bool((row.email or "").strip()),
                 }
                 for row in users

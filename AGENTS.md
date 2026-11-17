@@ -1,0 +1,1 @@
+vue项目完成后只要简单linter，简单vue-tsc(只跑类型检查)即可，不跑npm run build
