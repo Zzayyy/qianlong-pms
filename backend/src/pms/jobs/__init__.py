@@ -199,7 +199,7 @@ async def job_archive_audit(keep_months: int | None = None) -> dict[str, Any]:
 
 
 async def job_dispatch_mail() -> dict[str, object]:
-    """邮件待发队列派发：每分钟执行，失败按指数退避重试。"""
+    """邮件待发队列派发：每分钟执行一次，失败直接标记失败、不自动重试。"""
     factory = get_session_factory()
     async with factory() as session:
         result = await mail_service.dispatch_pending(session)

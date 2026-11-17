@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { EditPen, Promotion } from '@element-plus/icons-vue'
+import { EditPen, Promotion, Search } from '@element-plus/icons-vue'
 import MailEditor from '@/components/MailEditor.vue'
 import {
   listChanges,
@@ -24,7 +24,8 @@ import {
   type MailLogDetail,
   type MailOptions,
   type MailSendResult,
-  type MailTemplate
+  type MailTemplate,
+  type MailUserOption
 } from '@/api'
 import { useUserStore } from '@/stores/user'
 
@@ -191,6 +192,8 @@ const confirmRecipient = () => {
   recipients.userIds = [...draftSel.userIds]
   recipients.roleCodes = [...draftSel.roleCodes]
   recipients.deptIds = [...draftSel.deptIds]
+  // 选过的人进入「最近联系人」，下次可以一键添加
+  draftSel.userIds.forEach(rememberUser)
   recipientVisible.value = false
 }
 
@@ -220,6 +223,69 @@ const scheduleEstimate = () => {
 }
 
 watch(() => JSON.stringify(recipients), scheduleEstimate)
+
+/* ------------------------------ 右侧联系人面板 ------------------------------ */
+
+const sideKeyword = ref('')
+const contactsOpen = ref(true)
+const recentOpen = ref(true)
+const showAllContacts = ref(false)
+const recentIds = ref<string[]>([])
+
+const userById = computed(() => {
+  const map = new Map<string, MailUserOption>()
+  ;(options.value?.users || []).forEach((item) => map.set(String(item.id), item))
+  return map
+})
+
+const recentKey = () => `pms_mail_recent_${store.profile?.id || 'anon'}`
+
+const loadRecent = () => {
+  try {
+    const raw = localStorage.getItem(recentKey())
+    recentIds.value = raw ? (JSON.parse(raw) as string[]) : []
+  } catch {
+    recentIds.value = []
+  }
+}
+
+/** 最近联系人：发送或从面板选人后记录，最多保留 10 个。 */
+const rememberUser = (id: string) => {
+  recentIds.value = [id, ...recentIds.value.filter((item) => item !== id)].slice(0, 10)
+  localStorage.setItem(recentKey(), JSON.stringify(recentIds.value))
+}
+
+const matchKeyword = (item: MailUserOption) => {
+  const keyword = sideKeyword.value.trim().toLowerCase()
+  if (!keyword) return true
+  return (
+    (item.realName || '').toLowerCase().includes(keyword) ||
+    (item.username || '').toLowerCase().includes(keyword) ||
+    deptName(item.deptId).toLowerCase().includes(keyword)
+  )
+}
+
+const recentContacts = computed(() =>
+  recentIds.value
+    .map((id) => userById.value.get(id))
+    .filter((item): item is MailUserOption => Boolean(item) && matchKeyword(item as MailUserOption))
+)
+
+const sideContacts = computed(() => (options.value?.users || []).filter(matchKeyword))
+
+const sideContactsVisible = computed(() =>
+  showAllContacts.value ? sideContacts.value : sideContacts.value.slice(0, 8)
+)
+
+const addRecipient = (user: MailUserOption) => {
+  const id = String(user.id)
+  if (!recipients.userIds.includes(id)) recipients.userIds.push(id)
+  rememberUser(id)
+}
+
+const addRoleRecipient = (code: string) => {
+  if (!recipients.roleCodes.includes(code)) recipients.roleCodes.push(code)
+}
 
 /* ------------------------------ 草稿 ------------------------------ */
 
@@ -474,6 +540,7 @@ const submitCompose = async () => {
     })
     sendResult.value = result
     resultVisible.value = true
+    userIds.forEach(rememberUser)
     compose.subject = ''
     compose.content = ''
     editorRef.value?.clear()
@@ -727,6 +794,7 @@ const loadOptions = async () => {
 }
 
 onMounted(async () => {
+  loadRecent()
   const draft = readDraft()
   if (draft && (draft.subject || draft.content)) {
     draftTip.value = true
@@ -749,6 +817,8 @@ onBeforeUnmount(() => {
       <el-tabs v-model="tab">
         <el-tab-pane label="写邮件" name="compose">
           <div v-loading="optionsLoading" class="tab-body compose-pane">
+            <div class="compose-layout">
+            <div class="compose-main">
             <div class="compose-actions">
               <el-button
                 type="primary"
@@ -851,6 +921,96 @@ onBeforeUnmount(() => {
               <span class="spacer" />
               <span class="sub-text">发送后可在「发送记录」查看投递状态与失败原因</span>
             </div>
+            </div>
+
+            <aside class="compose-side">
+              <div class="side-search">
+                <el-input v-model="sideKeyword" placeholder="搜索联系人 / 部门" clearable size="small">
+                  <template #prefix>
+                    <el-icon><Search /></el-icon>
+                  </template>
+                </el-input>
+              </div>
+
+              <div class="side-section">
+                <button type="button" class="side-title" @click="recentOpen = !recentOpen">
+                  <span class="side-caret" :class="{ collapsed: !recentOpen }">▾</span>
+                  最近联系人
+                  <span class="side-count">{{ recentContacts.length }}</span>
+                </button>
+                <div v-if="recentOpen" class="side-list">
+                  <button
+                    v-for="item in recentContacts"
+                    :key="`recent-${item.id}`"
+                    type="button"
+                    class="side-item"
+                    :title="`添加到收件人：${item.realName || item.username}`"
+                    @click="addRecipient(item)"
+                  >
+                    <span class="side-name">{{ item.realName || item.username }}</span>
+                    <span class="side-sub">{{ deptName(item.deptId) }}</span>
+                  </button>
+                  <p v-if="!recentContacts.length" class="side-empty">
+                    发送邮件或从下方选人后，这里会记住常用联系人
+                  </p>
+                </div>
+              </div>
+
+              <div class="side-section">
+                <button type="button" class="side-title" @click="contactsOpen = !contactsOpen">
+                  <span class="side-caret" :class="{ collapsed: !contactsOpen }">▾</span>
+                  系统联系人
+                  <span class="side-count">{{ sideContacts.length }}</span>
+                </button>
+                <div v-if="contactsOpen" class="side-list">
+                  <button
+                    v-for="item in sideContactsVisible"
+                    :key="`contact-${item.id}`"
+                    type="button"
+                    class="side-item"
+                    :title="`添加到收件人：${item.realName || item.username}`"
+                    @click="addRecipient(item)"
+                  >
+                    <span class="side-name">{{ item.realName || item.username }}</span>
+                    <span class="side-sub">{{ deptName(item.deptId) }}</span>
+                    <span v-if="!item.hasEmail" class="side-flag">无邮箱</span>
+                  </button>
+                  <button
+                    v-if="sideContacts.length > 8"
+                    type="button"
+                    class="side-more"
+                    @click="showAllContacts = !showAllContacts"
+                  >
+                    {{ showAllContacts ? '收起' : `显示更多（${sideContacts.length - 8}）` }}
+                  </button>
+                  <p v-if="!sideContacts.length" class="side-empty">没有匹配的联系人</p>
+                </div>
+              </div>
+
+              <div class="side-section">
+                <div class="side-title static">按角色添加</div>
+                <div class="side-roles">
+                  <el-tag
+                    v-for="item in options?.roles || []"
+                    :key="item.roleCode"
+                    size="small"
+                    effect="plain"
+                    class="side-role"
+                    @click="addRoleRecipient(item.roleCode)"
+                  >
+                    {{ item.roleName }}
+                  </el-tag>
+                </div>
+              </div>
+
+              <div class="side-section side-account">
+                <div class="side-title static">发件账号</div>
+                <p class="side-account-name">{{ options?.fromName || '未配置' }}</p>
+                <p class="side-account-mail">{{ options?.sender || '未配置' }}</p>
+                <p class="side-account-tip">收件人按角色 / 部门 / 人员取并集，重复自动去除</p>
+              </div>
+            </aside>
+            </div>
           </div>
         </el-tab-pane>
 
@@ -898,7 +1058,7 @@ onBeforeUnmount(() => {
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="重试" width="64" align="center">
+              <el-table-column label="失败次数" width="84" align="center">
                 <template #default="{ row }">{{ row.retryCount }}</template>
               </el-table-column>
               <el-table-column label="时间" width="160">
@@ -1200,8 +1360,8 @@ onBeforeUnmount(() => {
             <span class="label">发送成功</span>
           </div>
           <div class="result-item warn">
-            <span class="value">{{ sendResult.retry }}</span>
-            <span class="label">排队重试</span>
+            <span class="value">{{ sendResult.recipients }}</span>
+            <span class="label">收件人数</span>
           </div>
           <div class="result-item danger">
             <span class="value">{{ sendResult.failed }}</span>
@@ -1225,7 +1385,7 @@ onBeforeUnmount(() => {
           </div>
         </el-alert>
         <p class="sub-text" style="margin-top: 12px">
-          排队重试的邮件会由系统定时任务按 1 / 5 / 15 / 60 / 120 分钟自动重试，最多 5 次。
+          发送失败的邮件不会自动重试，可在「发送记录」查看原因并手动重发。
         </p>
       </template>
       <template #footer>
@@ -1244,7 +1404,7 @@ onBeforeUnmount(() => {
             <el-tag size="small" :type="statusMeta(logDetail.status).type">
               {{ statusMeta(logDetail.status).label }}
             </el-tag>
-            <span class="sub-text" style="margin-left: 8px">重试 {{ logDetail.retryCount }} 次</span>
+            <span class="sub-text" style="margin-left: 8px">累计失败 {{ logDetail.retryCount }} 次</span>
           </div>
           <div><span>时间</span>{{ logDetail.sentAt || logDetail.createTime }}</div>
         </div>
@@ -1326,7 +1486,186 @@ onBeforeUnmount(() => {
 
 /* ------------------------------ 写邮件 ------------------------------ */
 .compose-pane {
-  max-width: 980px;
+  width: 100%;
+}
+
+.compose-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.compose-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 右侧联系人面板：与左侧编辑区同一屏，窄屏时自动落到下方 */
+.compose-side {
+  flex: 0 0 250px;
+  align-self: stretch;
+  padding-left: 18px;
+  border-left: 1px solid var(--pms-line-soft);
+}
+
+.side-search {
+  margin-bottom: 10px;
+}
+
+.side-section {
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--pms-line-soft);
+}
+
+.side-section:last-child {
+  border-bottom: 0;
+}
+
+.side-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--pms-text);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-title.static {
+  cursor: default;
+}
+
+.side-caret {
+  display: inline-block;
+  color: var(--pms-text-3);
+  font-size: 11px;
+  transition: transform 0.16s ease;
+}
+
+.side-caret.collapsed {
+  transform: rotate(-90deg);
+}
+
+.side-count {
+  margin-left: auto;
+  color: var(--pms-text-3);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.side-list {
+  display: flex;
+  flex-direction: column;
+  margin-top: 6px;
+  max-height: 268px;
+  overflow-y: auto;
+}
+
+.side-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--pms-text-2);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-item:hover {
+  background: #eef3ff;
+  color: var(--pms-primary-deep);
+}
+
+.side-name {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-sub {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--pms-text-3);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-flag {
+  flex: 0 0 auto;
+  color: var(--pms-warn);
+  font-size: 11px;
+}
+
+.side-more {
+  margin-top: 2px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--pms-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-more:hover {
+  background: #eef3ff;
+}
+
+.side-empty {
+  margin: 4px 0 0;
+  padding: 4px 8px;
+  color: var(--pms-text-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.side-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.side-role {
+  cursor: pointer;
+}
+
+.side-role:hover {
+  color: var(--pms-primary-deep);
+  border-color: var(--el-color-primary-light-5);
+}
+
+.side-account-name {
+  margin: 6px 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--pms-text);
+}
+
+.side-account-mail {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--pms-text-2);
+  word-break: break-all;
+}
+
+.side-account-tip {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--pms-text-3);
 }
 
 .compose-actions {
@@ -1612,6 +1951,24 @@ onBeforeUnmount(() => {
 
 .var-chip {
   cursor: pointer;
+}
+
+@media (max-width: 1100px) {
+  .compose-layout {
+    flex-direction: column;
+  }
+
+  .compose-side {
+    flex: 0 0 auto;
+    width: 100%;
+    padding: 8px 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--pms-line-soft);
+  }
+
+  .side-list {
+    max-height: 220px;
+  }
 }
 
 @media (max-width: 900px) {

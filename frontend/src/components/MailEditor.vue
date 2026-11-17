@@ -612,21 +612,23 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <div
-      ref="editorRef"
-      class="me-body"
-      :class="{ 'is-empty': isEmpty }"
-      :style="{ minHeight: `${minHeight}px` }"
-      :contenteditable="!disabled"
-      :data-placeholder="placeholder"
-      spellcheck="false"
-      @input="onInput"
-      @paste="onPaste"
-      @keydown="onKeydown"
-      @mouseup="saveRange"
-      @keyup="saveRange"
-      @blur="saveRange"
-    />
+    <div class="me-body-wrap">
+      <div
+        ref="editorRef"
+        class="me-body"
+        :style="{ minHeight: `${minHeight}px` }"
+        :contenteditable="!disabled"
+        spellcheck="false"
+        @input="onInput"
+        @paste="onPaste"
+        @keydown="onKeydown"
+        @mouseup="saveRange"
+        @keyup="saveRange"
+        @blur="saveRange"
+      />
+      <!-- 占位文案独立成层：放在编辑区内会被当成正文内容，导致光标落到文字后面 -->
+      <div v-if="isEmpty" class="me-placeholder">{{ placeholder }}</div>
+    </div>
 
     <el-dialog v-model="linkVisible" title="插入链接" width="min(440px, 92vw)" append-to-body>
       <el-form label-width="64px">
@@ -766,6 +768,10 @@ onBeforeUnmount(() => {
   width: 76px;
 }
 
+.me-body-wrap {
+  position: relative;
+}
+
 .me-body {
   padding: 14px 16px;
   font-size: 14px;
@@ -780,10 +786,16 @@ onBeforeUnmount(() => {
   box-shadow: inset 0 0 0 1px var(--el-color-primary-light-7);
 }
 
-.me-body.is-empty::before {
-  content: attr(data-placeholder);
+.me-placeholder {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  right: 16px;
+  font-size: 14px;
+  line-height: 1.75;
   color: var(--pms-text-3);
   pointer-events: none;
+  user-select: none;
 }
 
 .me-body :deep(p) {

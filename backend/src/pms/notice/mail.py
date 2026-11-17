@@ -2,7 +2,8 @@
 
 设计要点：
 - 业务事务内只写 `t_sys_mail_log`（PENDING），不直接连 SMTP，避免拖慢业务；
-- 定时任务 `mail_dispatch` 抢占待发记录并发送，失败按指数退避重试；
+- 定时任务 `mail_dispatch` 抢占待发记录并发送；失败直接置 FAILED（自动重试已关闭），
+  需要时在「发送记录」手动重发；
 - SMTP 密码使用 Fernet（密钥由 `APP_SECRET_KEY` 派生）加密后存入 `t_sys_config`；
 - 模板按事件编码存库，未自定义时回落到内置模板。
 """
@@ -40,6 +41,10 @@ MAIL_SENDING: Final[str] = "SENDING"
 MAIL_SENT: Final[str] = "SENT"
 MAIL_FAILED: Final[str] = "FAILED"
 MAIL_SKIPPED: Final[str] = "SKIPPED"
+
+#: 失败自动重试总开关：当前关闭。失败记录直接置 FAILED，由用户在「发送记录」手动重发，
+#: 避免 SMTP 不可用时队列反复重试、产生无意义记录。重试间隔配置保留，后续开启即可。
+AUTO_RETRY_ENABLED: Final[bool] = False
 
 #: 重试间隔（秒）：1 / 5 / 15 / 60 / 120 分钟，最多 5 次
 RETRY_DELAYS: Final[tuple[int, ...]] = (60, 300, 900, 3600, 7200)
@@ -509,10 +514,10 @@ async def _deliver(
                         "error": str(exc)[:200],
                     }
                 )
-            if row.retry_count > len(RETRY_DELAYS):
+            if not AUTO_RETRY_ENABLED or row.retry_count > len(RETRY_DELAYS):
                 row.status = MAIL_FAILED
                 failed += 1
-                logger.warning("邮件发送失败（已达重试上限）：%s %s", row.recipient, exc)
+                logger.warning("邮件发送失败：%s %s", row.recipient, exc)
             else:
                 delay = RETRY_DELAYS[row.retry_count - 1]
                 row.status = MAIL_PENDING
@@ -529,7 +534,7 @@ async def _deliver(
 
 
 async def dispatch_pending(session: AsyncSession, limit: int = DISPATCH_BATCH) -> dict[str, object]:
-    """发送待发邮件：成功置 SENT，失败按指数退避重试。"""
+    """发送待发邮件：成功置 SENT，失败直接置 FAILED（自动重试已关闭）。"""
     account = await mail_ready(session)
     if account is None:
         return {"sent": 0, "failed": 0, "retry": 0, "failures": []}
@@ -623,6 +628,8 @@ async def resend(session: AsyncSession, log_id: int) -> None:
     except Exception as exc:
         row.status = MAIL_FAILED
         row.error = str(exc)[:500]
+        # 自动重试关闭后，该字段表示累计失败次数
+        row.retry_count += 1
         await session.commit()
         raise
     row.status = MAIL_SENT
