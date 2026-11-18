@@ -325,14 +325,19 @@ async def dept_options(
 ) -> object:
     """部门下拉选项：立项选部门、项目筛选等表单共用。
 
-    与 `/depts/tree` 的区别：只返回 `id / parentId / deptName`，不含负责人、
+    与 `/depts/tree` 的区别：只返回 `id / parentId / deptName / deptCode`，不含负责人、
     在岗人数、状态等组织管理信息，因此只要求登录、不要求 `org:dept:view`
     （该权限对应「部门架构」页及其编辑能力）。
     """
     depts: list[SysDept] = await service.list_dept_tree(session)
     return ok(
         [
-            {"id": dept.id, "parentId": dept.parent_id, "deptName": dept.dept_name}
+            {
+                "id": dept.id,
+                "parentId": dept.parent_id,
+                "deptName": dept.dept_name,
+                "deptCode": dept.dept_code,
+            }
             for dept in depts
         ]
     )

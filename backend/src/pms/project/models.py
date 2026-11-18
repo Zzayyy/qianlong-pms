@@ -76,6 +76,7 @@ class PrjStage(Base, CommonMixin):
 
     project_id: Mapped[int] = mapped_column(BigInteger, default=0)
     stage_name: Mapped[str] = mapped_column(String(128), default="")
+    owner_id: Mapped[int] = mapped_column(BigInteger, default=0)
     seq: Mapped[int] = mapped_column(Integer, default=1)
     weight: Mapped[float] = mapped_column(Numeric(8, 2), default=0)
     plan_start: Mapped[str | None] = mapped_column(Date, default=None)

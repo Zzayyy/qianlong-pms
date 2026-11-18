@@ -46,7 +46,18 @@ export const listProjects = (params: Record<string, unknown>) =>
 export const createProject = (data: Record<string, unknown>) =>
   post<{ id: string; projectCode: string; status: string }>('/projects', data)
 
+export interface ProjectFormOptions {
+  approvalEnabled: boolean
+  defaultDeptId: string
+}
+
+export const projectOptions = () => get<ProjectFormOptions>('/projects/options')
+
 export const projectDetail = (id: string) => get<Record<string, unknown>>(`/projects/${id}`)
+
+/** 立项后维护基础信息（所属部门 / 合同金额），只传要改的字段。 */
+export const updateProject = (id: string, data: Record<string, unknown>) =>
+  put<Record<string, unknown>>(`/projects/${id}`, data)
 
 export const submitProject = (id: string) => post<{ status: string }>(`/projects/${id}/submit`)
 

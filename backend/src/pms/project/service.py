@@ -40,6 +40,13 @@ _BASELINE_VERSION: Final[str] = "V1.0"
 
 logger = get_logger(__name__)
 
+
+class _UnsetType:
+    """哨兵类型：区分「请求未带该字段」与「显式清空（传 None）」。"""
+
+
+UNSET = _UnsetType()
+
 _PROJECT_STATUS_TEXT: Final[dict[str, str]] = {
     "DRAFT": "草稿",
     "APPROVING": "审批中",
@@ -135,19 +142,26 @@ async def create_project(
     plan_end: str | None = None,
     remark: str = "",
     members: list[dict[str, object]] | None = None,
+    stages: list[dict[str, object]] | None = None,
+    director_ids: list[int] | None = None,
+    auto_approve: bool = False,
 ) -> PrjProject:
-    """创建项目草稿（立项来源：手工或商机转化），可同时带入项目组成员。
+    """创建项目（立项来源：手工或商机转化），可同时带入成员与初始阶段。
 
     实现说明：负责人（PM）自动入组；`members` 每项形如
     `{"userId": 1, "deptId": 0, "roleInProject": "MEMBER", "allocation": 100}`，
     重复的成员自动跳过，不因重复而失败。
+    `stages` 每项形如 `{"stageName": "设计", "ownerId": 1, "planStart": ..., "planEnd": ...}`；
+    阶段负责人同样自动入组，便于其后续上报进度。
+    `auto_approve=True` 时跳过审批直接置为 APPROVED 并冻结立项基线。
+    部门传 0 时回落到「总公司」。
     """
     project = PrjProject(
         project_code=await next_project_code(session),
         project_name=project_name,
         project_type=project_type,
         secret_level=secret_level,
-        dept_id=dept_id,
+        dept_id=dept_id or await default_dept_id(session),
         pm_id=pm_id,
         sponsor_id=sponsor_id or context.user_id,
         customer_id=customer_id,
@@ -165,7 +179,91 @@ async def create_project(
         await ensure_member(session, project.id, pm_id, 0, role_in_project="PM")
     if members:
         await add_members(session, project.id, members)
+    if stages:
+        await create_initial_stages(session, project.id, stages)
+    if director_ids:
+        await set_directors(session, project.id, director_ids, context.user_id)
+    if auto_approve:
+        project.approval_level = await resolve_approval_level(session, float(contract_amount or 0))
+        project.status = ProjectStatus.APPROVED
+        await session.flush()
+        await freeze_baseline(session, project.id, context.user_id)
     return project
+
+
+async def update_project_basic(
+    session: AsyncSession,
+    project_id: int,
+    *,
+    dept_id: int | None = None,
+    contract_amount: float | None = None,
+    plan_start: str | None | _UnsetType = UNSET,
+    plan_end: str | None | _UnsetType = UNSET,
+    operator_id: int = 0,
+) -> PrjProject:
+    """编辑立项后仍可维护的基础信息（所属部门 / 合同金额 / 计划周期）。
+
+    约定：`dept_id` / `contract_amount` 传 None 表示不修改；`plan_start` / `plan_end`
+    用 `UNSET` 表示不修改、传 None 表示清空，便于前端把日期改回「未排期」。
+    部门传 0 视为「未选择」，回落到总公司；合同金额变化时草稿态同步重算审批层级。
+    """
+    project = await _get_project(session, project_id)
+    # 先按「本次要落库的值」校验日期，避免校验失败前已改动实体
+    # 库里读出的 DATE 是 date 对象、本次传入的是字符串，统一按 ISO 文本比较
+    next_start = project.plan_start if isinstance(plan_start, _UnsetType) else plan_start
+    next_end = project.plan_end if isinstance(plan_end, _UnsetType) else plan_end
+    if next_start and next_end and str(next_start) > str(next_end):
+        raise BizRuleError("计划开始日期不能晚于计划结束日期")
+    if dept_id is not None:
+        project.dept_id = dept_id or await default_dept_id(session)
+    if contract_amount is not None:
+        project.contract_amount = contract_amount
+        if project.status == ProjectStatus.DRAFT:
+            project.approval_level = await resolve_approval_level(session, float(contract_amount))
+    if not isinstance(plan_start, _UnsetType):
+        project.plan_start = plan_start or None
+    if not isinstance(plan_end, _UnsetType):
+        project.plan_end = plan_end or None
+    project.update_by = operator_id or project.create_by
+    await session.flush()
+    return project
+
+
+async def default_dept_id(session: AsyncSession) -> int:
+    """立项部门缺省值：总公司（dept_code=ROOT），找不到时返回 0。"""
+    from pms.org.models import SysDept
+
+    result = await session.execute(
+        select(SysDept.id).where(SysDept.dept_code == "ROOT", SysDept.deleted == 0)
+    )
+    return int(result.scalar_one_or_none() or 0)
+
+
+async def create_initial_stages(
+    session: AsyncSession, project_id: int, stages: list[dict[str, object]]
+) -> list[PrjStage]:
+    """立项时一次性建立阶段，并把阶段负责人加入项目组。"""
+    created: list[PrjStage] = []
+    for index, item in enumerate(stages, start=1):
+        name = str(item.get("stageName") or "").strip()
+        if not name:
+            continue
+        owner_id = int(item.get("ownerId") or 0)  # type: ignore[arg-type]
+        if owner_id:
+            await ensure_member(session, project_id, owner_id, 0, role_in_project="MEMBER")
+        created.append(
+            await create_stage(
+                session,
+                project_id,
+                name,
+                weight=float(item.get("weight") or 0),  # type: ignore[arg-type]
+                seq=int(item.get("seq") or index),  # type: ignore[arg-type]
+                owner_id=owner_id,
+                plan_start=str(item["planStart"]) if item.get("planStart") else None,
+                plan_end=str(item["planEnd"]) if item.get("planEnd") else None,
+            )
+        )
+    return created
 
 
 async def ensure_member(
@@ -243,6 +341,17 @@ async def change_project_pm(
             raise NotFoundError("用户不存在")
     project.pm_id = pm_id
     project.update_by = operator_id
+    await session.flush()
+    # 「项目经理」只对应当前负责人：旧负责人降级为普通成员，避免列表中出现多个 PM
+    stmt = select(PrjMember).where(
+        PrjMember.project_id == project_id,
+        PrjMember.role_in_project == "PM",
+        PrjMember.deleted == 0,
+        PrjMember.user_id != pm_id,
+    )
+    for old_pm in (await session.execute(stmt)).scalars().all():
+        old_pm.role_in_project = "MEMBER"
+        old_pm.update_by = operator_id
     await session.flush()
     if pm_id:
         # 已是成员时提升组内角色为 PM，避免「负责人却是普通成员」
@@ -339,6 +448,7 @@ async def freeze_baseline(
             {
                 "id": stage.id,
                 "name": stage.stage_name,
+                "ownerId": stage.owner_id,
                 "weight": float(stage.weight),
                 "planStart": stage.plan_start,
                 "planEnd": stage.plan_end,
@@ -465,6 +575,7 @@ async def create_stage(
     stage_name: str,
     weight: float = 0,
     seq: int = 1,
+    owner_id: int = 0,
     plan_start: str | None = None,
     plan_end: str | None = None,
 ) -> PrjStage:
@@ -474,6 +585,7 @@ async def create_stage(
         stage_name=stage_name,
         weight=weight,
         seq=seq,
+        owner_id=owner_id,
         plan_start=plan_start,
         plan_end=plan_end,
     )
@@ -664,13 +776,17 @@ async def update_stage(
     seq: int,
     plan_start: str | None,
     plan_end: str | None,
+    owner_id: int = 0,
     operator_id: int = 0,
 ) -> PrjStage:
-    """编辑阶段（名称/权重/序号/计划起止）。"""
+    """编辑阶段（名称/权重/序号/负责人/计划起止）。"""
     stage = await _get_stage(session, project_id, stage_id)
     stage.stage_name = stage_name
     stage.weight = weight
     stage.seq = seq
+    stage.owner_id = owner_id
+    if owner_id:
+        await ensure_member(session, project_id, owner_id, 0, role_in_project="MEMBER")
     stage.plan_start = plan_start
     stage.plan_end = plan_end
     stage.update_by = operator_id

@@ -20,7 +20,7 @@ from pms.core.deps import (
     require_any_permission,
     require_permissions,
 )
-from pms.org.models import SysUser
+from pms.org.models import SysDept, SysUser
 from pms.project import service
 from pms.project.models import PrjProject
 from pms.project.visibility import (
@@ -29,6 +29,7 @@ from pms.project.visibility import (
     ensure_project_visible,
     is_project_manager,
 )
+from pms.system.config_service import ConfigService
 
 router = APIRouter(prefix="/api/v1/projects", tags=["项目周期"])
 
@@ -71,11 +72,22 @@ def _project_out(project: PrjProject, pm_name: str = "") -> dict[str, object]:
     }
 
 
+class ProjectStageIn(BaseModel):
+    """立项时一并创建的阶段（默认四段式：设计/开发/测试/交付）。"""
+
+    stageName: str = Field(min_length=1, max_length=128)
+    ownerId: int = 0
+    weight: float = 0
+    seq: int = 1
+    planStart: str | None = None
+    planEnd: str | None = None
+
+
 class ProjectIn(BaseModel):
     """立项入参。"""
 
     projectName: str = Field(min_length=1, max_length=200)
-    deptId: int
+    deptId: int = 0
     pmId: int
     projectType: str = "DEV"
     secretLevel: str = "INTERNAL"
@@ -86,6 +98,22 @@ class ProjectIn(BaseModel):
     planEnd: str | None = None
     remark: str = ""
     members: list[MemberIn] = Field(default_factory=list)
+    stages: list[ProjectStageIn] = Field(default_factory=list)
+    directorIds: list[int] = Field(default_factory=list)
+    # None=沿用系统参数；显式传入时按项目决定（false 即「直接立项、审批前可动手」）
+    needApproval: bool | None = None
+
+
+class ProjectBasicIn(BaseModel):
+    """项目基础信息维护入参（立项后仍可调整的字段，只传需要改的项）。
+
+    `planStart` / `planEnd` 传 `null` 表示清空计划日期（改回「未排期」）。
+    """
+
+    deptId: int | None = Field(default=None, ge=0)
+    contractAmount: float | None = Field(default=None, ge=0)
+    planStart: str | None = None
+    planEnd: str | None = None
 
 
 class StatusIn(BaseModel):
@@ -99,6 +127,7 @@ class StageIn(BaseModel):
     """阶段入参。"""
 
     stageName: str = Field(min_length=1, max_length=128)
+    ownerId: int = 0
     weight: float = 0
     seq: int = 1
     planStart: str | None = None
@@ -176,7 +205,14 @@ async def create_project(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:create"))],
 ) -> object:
-    """创建项目草稿（手工立项；商机转化走 `/crm/opportunities/{id}/convert`）。"""
+    """创建项目（手工立项；商机转化走 `/crm/opportunities/{id}/convert`）。
+
+    审批开关关闭时直接立项通过并冻结基线；开启时先建草稿，审批前也可排期。
+    """
+    config = ConfigService(session)
+    need_approval = body.needApproval
+    if need_approval is None:
+        need_approval = await config.get_bool("approval.project.enabled")
     project = await service.create_project(
         session,
         context,
@@ -192,9 +228,12 @@ async def create_project(
         plan_end=body.planEnd,
         remark=body.remark,
         members=[item.model_dump() for item in body.members],
+        stages=[item.model_dump() for item in body.stages],
+        director_ids=body.directorIds,
+        auto_approve=not need_approval,
     )
     await session.commit()
-    return ok({"id": project.id, "projectCode": project.project_code})
+    return ok({"id": project.id, "projectCode": project.project_code, "status": project.status})
 
 
 @router.get("", summary="项目列表")
@@ -248,6 +287,24 @@ async def list_projects(
     )
 
 
+@router.get("/options", summary="新建项目表单选项")
+async def project_options(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
+) -> object:
+    """新建项目所需的轻量配置：审批开关与默认部门（总公司）。"""
+    config = ConfigService(session)
+    default_dept = await session.execute(
+        select(SysDept.id).where(SysDept.dept_code == "ROOT", SysDept.deleted == 0)
+    )
+    return ok(
+        {
+            "approvalEnabled": await config.get_bool("approval.project.enabled"),
+            "defaultDeptId": default_dept.scalar_one_or_none() or 0,
+        }
+    )
+
+
 @router.get("/{project_id}", summary="项目详情")
 async def project_detail(
     project_id: int,
@@ -276,6 +333,36 @@ async def project_detail(
         data["health"] = health
         await session.commit()
     return ok(data)
+
+
+@router.put("/{project_id}", summary="编辑项目基础信息")
+async def update_project(
+    project_id: int,
+    body: ProjectBasicIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+) -> object:
+    """维护立项后仍需调整的基础信息：所属部门、合同金额、计划周期。
+
+    改金额时草稿态会同步重算审批层级，避免提交审批时阈值与表单不一致；
+    计划日期未出现在请求体里表示「不修改」，显式传 null 表示清空。
+    其它字段（名称、编码、状态）仍走各自的专用接口。
+    """
+    project = await service.get_project(session, project_id)
+    await ensure_project_manager(session, context, project)
+    provided = body.model_fields_set
+    updated = await service.update_project_basic(
+        session,
+        project_id,
+        dept_id=body.deptId,
+        contract_amount=body.contractAmount,
+        plan_start=body.planStart if "planStart" in provided else service.UNSET,
+        plan_end=body.planEnd if "planEnd" in provided else service.UNSET,
+        operator_id=context.user_id,
+    )
+    await session.commit()
+    names = await _user_names(session, {updated.pm_id})
+    return ok(_project_out(updated, names.get(updated.pm_id, "")))
 
 
 @router.post("/{project_id}/submit", summary="提交立项审批")
@@ -345,13 +432,16 @@ async def stages(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
 ) -> object:
-    """阶段列表（含权重与进度）。"""
+    """阶段列表（含负责人、权重与进度）。"""
     items = await service.list_stages(session, project_id)
+    names = await _user_names(session, {item.owner_id for item in items})
     return ok(
         [
             {
                 "id": item.id,
                 "stageName": item.stage_name,
+                "ownerId": item.owner_id,
+                "ownerName": names.get(item.owner_id, ""),
                 "seq": item.seq,
                 "weight": float(item.weight),
                 "progress": float(item.progress),
@@ -380,6 +470,7 @@ async def create_stage(
         body.stageName,
         weight=body.weight,
         seq=body.seq,
+        owner_id=body.ownerId,
         plan_start=body.planStart,
         plan_end=body.planEnd,
     )
@@ -395,7 +486,7 @@ async def update_stage(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:stage:edit"))],
 ) -> object:
-    """编辑阶段名称/权重/顺序/计划起止。"""
+    """编辑阶段名称/权重/顺序/负责人/计划起止。"""
     project = await service.get_project(session, project_id)
     await ensure_project_manager(session, context, project)
     stage = await service.update_stage(
@@ -405,6 +496,7 @@ async def update_stage(
         stage_name=body.stageName,
         weight=body.weight,
         seq=body.seq,
+        owner_id=body.ownerId,
         plan_start=body.planStart,
         plan_end=body.planEnd,
         operator_id=context.user_id,
