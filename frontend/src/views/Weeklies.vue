@@ -12,6 +12,8 @@ import {
   type WeeklyItem,
   type WeeklyOptions
 } from '@/api'
+import { renderMarkdown, stripLeadingTitle } from '@/utils/markdown'
+import { confirmWeeklyOverwrite, toWeekStart, weekLabelOf } from '@/utils/weekly'
 
 defineOptions({ name: 'WeekliesPage' })
 
@@ -62,73 +64,8 @@ const dirty = computed(
 const STATUS_LABEL: Record<string, string> = { GENERATED: '待确认', CONFIRMED: '已确认' }
 const SOURCE_LABEL: Record<string, string> = { AUTO: '自动生成', MANUAL: '手动生成' }
 
-const escapeHtml = (text: string) =>
-  text.replace(/[&<>"']/g, (char) => {
-    const map: Record<string, string> = {
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;'
-    }
-    return map[char] ?? char
-  })
-
-/** 极简 Markdown 渲染（标题 / 有序无序列表 / 引用 / 加粗），先转义再格式化，避免 XSS。 */
-const renderMarkdown = (raw: string) => {
-  const lines = escapeHtml(raw || '').split(/\r?\n/)
-  const html: string[] = []
-  let listTag: 'ul' | 'ol' | '' = ''
-  const closeList = () => {
-    if (listTag) {
-      html.push(`</${listTag}>`)
-      listTag = ''
-    }
-  }
-  const openList = (tag: 'ul' | 'ol') => {
-    if (listTag !== tag) {
-      closeList()
-      html.push(`<${tag}>`)
-      listTag = tag
-    }
-  }
-  for (const line of lines) {
-    const text = line.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-    if (!text.trim()) {
-      closeList()
-      continue
-    }
-    const heading = /^(#{1,4})\s+(.*)$/.exec(text)
-    if (heading) {
-      closeList()
-      const level = Math.min(heading[1].length + 1, 5)
-      html.push(`<h${level}>${heading[2]}</h${level}>`)
-      continue
-    }
-    if (/^\s*\d+[.、)]\s+/.test(text)) {
-      openList('ol')
-      html.push(`<li>${text.replace(/^\s*\d+[.、)]\s+/, '')}</li>`)
-      continue
-    }
-    if (/^\s*[-*]\s+/.test(text)) {
-      openList('ul')
-      html.push(`<li>${text.replace(/^\s*[-*]\s+/, '')}</li>`)
-      continue
-    }
-    if (/^&gt;\s?/.test(text)) {
-      closeList()
-      html.push(`<blockquote>${text.replace(/^&gt;\s?/, '')}</blockquote>`)
-      continue
-    }
-    closeList()
-    html.push(`<p>${text}</p>`)
-  }
-  closeList()
-  return html.join('')
-}
-
 /** 正文去掉首行一级标题（标题已在详情头部展示，避免重复）。 */
-const bodyText = computed(() => (current.value?.content || '').replace(/^\s*#\s+.*(?:\r?\n)+/, ''))
+const bodyText = computed(() => stripLeadingTitle(current.value?.content || ''))
 const rendered = computed(() => renderMarkdown(bodyText.value))
 
 const loadOptions = async () => {
@@ -160,6 +97,20 @@ const loadList = async () => {
 const search = () => {
   page.pageNum = 1
   loadList()
+}
+
+/**
+ * 周选择器拿到的值是「周日」（dayjs 未注册中文包，周首日是周日），
+ * 这里统一换算成后端使用的 ISO 周一，否则按周过滤会查不到数据。
+ */
+const onProjectWeekChange = (value: any) => {
+  projectFilters.weekStart = toWeekStart(String(value || '')) || options.value.weekStart
+  search()
+}
+
+const onPersonalWeekChange = (value: any) => {
+  personalFilters.weekStart = toWeekStart(String(value || '')) || options.value.weekStart
+  search()
 }
 
 const reset = () => {
@@ -210,6 +161,15 @@ const generateProject = async () => {
     ElMessage.warning('请先选择项目')
     return
   }
+  if (
+    !(await confirmWeeklyOverwrite({
+      scope: 'PROJECT',
+      projectId: projectFilters.projectId,
+      weekStart: projectFilters.weekStart
+    }))
+  ) {
+    return
+  }
   notifyAiHint()
   generating.value = true
   try {
@@ -226,6 +186,14 @@ const generateProject = async () => {
 }
 
 const generatePersonal = async () => {
+  if (
+    !(await confirmWeeklyOverwrite({
+      scope: 'PERSONAL',
+      weekStart: personalFilters.weekStart
+    }))
+  ) {
+    return
+  }
   notifyAiHint()
   generating.value = true
   try {
@@ -300,16 +268,14 @@ const confirm = async () => {
 
 const regenerate = async () => {
   if (!current.value) return
-  if (current.value.status === 'CONFIRMED') {
-    try {
-      await ElMessageBox.confirm(
-        '重新生成会覆盖已确认的正文并回到「待确认」，需要重新确认。继续？',
-        '重新生成',
-        { type: 'warning', confirmButtonText: '重新生成', cancelButtonText: '取消' }
-      )
-    } catch {
-      return
-    }
+  if (
+    !(await confirmWeeklyOverwrite({
+      scope: current.value.scope,
+      projectId: current.value.projectId,
+      weekStart: current.value.weekStart
+    }))
+  ) {
+    return
   }
   notifyAiHint()
   generating.value = true
@@ -369,7 +335,7 @@ onMounted(async () => {
               :clearable="false"
               placeholder="选择周"
               style="width: 170px"
-              @change="search"
+              @change="onProjectWeekChange"
             />
             <el-select
               v-model="projectFilters.projectId"
@@ -399,7 +365,10 @@ onMounted(async () => {
             <el-button @click="reset">重置</el-button>
             <span class="spacer"></span>
             <el-button :icon="RefreshCw" circle :loading="loading" aria-label="刷新" @click="loadList" />
-            <el-tooltip content="为所选项目生成本周周报（项目经理）" placement="top">
+            <el-tooltip
+              :content="`按所选周次（${weekLabelOf(projectFilters.weekStart)}）汇总所选项目日志生成周报；已有则覆盖并升版本（需项目经理）`"
+              placement="top"
+            >
               <el-button
                 type="primary"
                 :icon="Sparkles"
@@ -424,14 +393,19 @@ onMounted(async () => {
               :clearable="false"
               placeholder="选择周"
               style="width: 170px"
-              @change="search"
+              @change="onPersonalWeekChange"
             />
             <span class="hint">不限周五，任意时间都可生成本周总结；想补写上周也可切换周次</span>
             <span class="spacer"></span>
             <el-button :icon="RefreshCw" circle :loading="loading" aria-label="刷新" @click="loadList" />
-            <el-button type="primary" :icon="Sparkles" :loading="generating" @click="generatePersonal">
-              生成我的周总结
-            </el-button>
+            <el-tooltip
+              :content="`按所选周次（${weekLabelOf(personalFilters.weekStart)}）汇总本人日志生成周总结；已有则覆盖并升版本`"
+              placement="top"
+            >
+              <el-button type="primary" :icon="Sparkles" :loading="generating" @click="generatePersonal">
+                生成我的周总结
+              </el-button>
+            </el-tooltip>
           </div>
         </el-tab-pane>
       </el-tabs>

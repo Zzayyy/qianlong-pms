@@ -11,6 +11,7 @@ import {
   changeProjectPm,
   changeProjectStatus,
   changeRiskStatus,
+  confirmWeekly,
   createMilestone,
   createProject,
   createRisk,
@@ -23,6 +24,7 @@ import {
   deleteTask,
   deptOptions,
   downloadProjectFile,
+  generateWeekly,
   listBaselines,
   listMembers,
   listMilestones,
@@ -30,6 +32,8 @@ import {
   listRisks,
   listStages,
   listTasks,
+  listWeeklies,
+  listWorklogs,
   milestoneStatus,
   projectAttachments,
   projectDetail,
@@ -46,13 +50,18 @@ import {
   updateStage,
   updateTask,
   updateTaskProgress,
+  updateWeekly,
   uploadProjectFile,
-  userOptions
+  userOptions,
+  weeklyDetail,
+  type WeeklyItem
 } from '@/api'
 import ChangeBoard from '@/components/ChangeBoard.vue'
 import PersonPicker from '@/components/PersonPicker.vue'
 import { useUserStore } from '@/stores/user'
 import { useKeepAliveRefresh } from '@/utils/keepAlive'
+import { renderMarkdown, stripLeadingTitle } from '@/utils/markdown'
+import { confirmWeeklyOverwrite, mondayOf, toWeekStart, weekLabelOf } from '@/utils/weekly'
 import {
   ASSIGNABLE_MEMBER_ROLE,
   BASELINE_TYPE,
@@ -893,6 +902,10 @@ const openDetail = async (row: any) => {
   riskFilter.value = ''
   await loadRisks()
   await loadBaselines()
+  weeklyFilter.value = { weekStart: '', status: '' }
+  weeklyPage.value.pageNum = 1
+  weeklyTargetReport.value = null
+  await loadWeeklies()
   detailVisible.value = true
 }
 
@@ -954,6 +967,277 @@ const saveBasic = async () => {
   } finally {
     basicSaving.value = false
   }
+}
+
+/* ------------------------------ 项目周报 ------------------------------ */
+interface WeeklyStats {
+  totalHours?: number
+  logCount?: number
+  memberCount?: number
+  riskLogCount?: number
+  dateFrom?: string
+  dateTo?: string
+}
+
+const WEEKLY_STATUS_LABEL: Record<string, string> = { GENERATED: '待确认', CONFIRMED: '已确认' }
+const WEEKLY_SOURCE_LABEL: Record<string, string> = {
+  AUTO: '自动生成',
+  MANUAL: '手动生成'
+}
+const LOG_STATUS_LABEL: Record<string, string> = {
+  DRAFT: '草稿',
+  SUBMITTED: '待确认',
+  PENDING_APPROVE: '补填待审批',
+  CONFIRMED: '已确认',
+  REJECTED: '已驳回'
+}
+
+/** 周报入口复用 `worklog:view`，无权限时不请求、也不显示列表 */
+const canViewWeekly = computed(() => store.has('worklog:view'))
+const weeklies = ref<WeeklyItem[]>([])
+const weeklyLoading = ref(false)
+const weeklyGenerating = ref(false)
+const weeklyTotal = ref(0)
+const weeklyPage = ref({ pageNum: 1, pageSize: 5 })
+const weeklyFilter = ref({ weekStart: '', status: '' })
+const weeklyReportVisible = ref(false)
+const weeklyReportLoading = ref(false)
+const weeklyReport = ref<WeeklyItem | null>(null)
+const weeklyReportTab = ref<'content' | 'logs'>('content')
+const weeklyLogs = ref<any[]>([])
+const weeklyLogsLoading = ref(false)
+const weeklyEditing = ref(false)
+const weeklySaving = ref(false)
+const weeklyForm = ref({ title: '', content: '' })
+
+const weeklyStats = computed<WeeklyStats>(() => (weeklyReport.value?.stats as WeeklyStats) || {})
+const weeklyHtml = computed(() => renderMarkdown(stripLeadingTitle(weeklyReport.value?.content || '')))
+const weeklyDirty = computed(
+  () =>
+    !!weeklyReport.value &&
+    (weeklyForm.value.content !== (weeklyReport.value.content || '') ||
+      weeklyForm.value.title !== (weeklyReport.value.title || ''))
+)
+
+/** 「生成周报」的目标周：选了周次就按周次（已归一为 ISO 周一），否则按本周 */
+const weeklyTargetWeek = computed(
+  () => toWeekStart(weeklyFilter.value.weekStart) || mondayOf()
+)
+/** 目标周文案：选了周次显示该周标签，否则明确写成「本周」 */
+const weeklyTargetLabel = computed(() => {
+  const label = weekLabelOf(weeklyTargetWeek.value)
+  return weeklyFilter.value.weekStart ? label : `本周（${label}）`
+})
+/** 目标周已有的周报：用来把按钮变成「重新生成」并提前提示会覆盖 */
+const weeklyTargetReport = ref<WeeklyItem | null>(null)
+
+const loadWeeklyTarget = async () => {
+  if (!detail.value.id || !canViewWeekly.value) {
+    weeklyTargetReport.value = null
+    return
+  }
+  try {
+    const data = await listWeeklies({
+      scope: 'PROJECT',
+      projectId: detail.value.id,
+      weekStart: weeklyTargetWeek.value,
+      pageNum: 1,
+      pageSize: 1
+    })
+    weeklyTargetReport.value = (data.list || [])[0] || null
+  } catch {
+    weeklyTargetReport.value = null
+  }
+}
+
+const loadWeeklies = async () => {
+  if (!detail.value.id || !canViewWeekly.value) {
+    weeklies.value = []
+    weeklyTotal.value = 0
+    return
+  }
+  weeklyLoading.value = true
+  try {
+    const data = await listWeeklies({
+      scope: 'PROJECT',
+      projectId: detail.value.id,
+      weekStart: weeklyFilter.value.weekStart || undefined,
+      status: weeklyFilter.value.status || undefined,
+      pageNum: weeklyPage.value.pageNum,
+      pageSize: weeklyPage.value.pageSize
+    })
+    weeklies.value = data.list || []
+    weeklyTotal.value = Number(data.total || 0)
+  } catch {
+    weeklies.value = []
+    weeklyTotal.value = 0
+  } finally {
+    weeklyLoading.value = false
+  }
+  await loadWeeklyTarget()
+}
+
+const searchWeeklies = () => {
+  weeklyPage.value.pageNum = 1
+  loadWeeklies()
+}
+
+/** 周选择器返回「周日」，换算成后端使用的 ISO 周一后再查，否则按周过滤查不到 */
+const onWeeklyWeekChange = (value: any) => {
+  weeklyFilter.value.weekStart = toWeekStart(String(value || ''))
+  searchWeeklies()
+}
+
+/** 生成目标周的项目周报；同一周已有则弹窗确认覆盖，后端会校验项目经理权限 */
+const generateProjectWeekly = async () => {
+  const weekStart = weeklyTargetWeek.value
+  if (!(await confirmWeeklyOverwrite({ scope: 'PROJECT', projectId: detail.value.id, weekStart }))) return
+  weeklyGenerating.value = true
+  try {
+    const item = await generateWeekly({
+      scope: 'PROJECT',
+      projectId: detail.value.id,
+      weekStart
+    })
+    ElMessage.success(
+      `周报已${Number(item.revision || 1) > 1 ? '覆盖更新' : '生成'}（v${item.revision || 1}），请核对后确认`
+    )
+    await loadWeeklies()
+    await openWeeklyReport(item)
+  } finally {
+    weeklyGenerating.value = false
+  }
+}
+
+/** 周报里那一周的日志明细：直接按周报周区间 + 本项目查工作日志 */
+const loadWeeklyLogs = async () => {
+  const report = weeklyReport.value
+  if (!report) return
+  weeklyLogsLoading.value = true
+  try {
+    const data = await listWorklogs({
+      scope: 'visible',
+      projectId: report.projectId || detail.value.id,
+      dateFrom: report.weekStart,
+      dateTo: report.weekEnd,
+      pageNum: 1,
+      pageSize: 50
+    })
+    weeklyLogs.value = data.list || []
+  } catch {
+    weeklyLogs.value = []
+  } finally {
+    weeklyLogsLoading.value = false
+  }
+}
+
+const openWeeklyReport = async (row: any) => {
+  weeklyReportVisible.value = true
+  weeklyReportLoading.value = true
+  weeklyReportTab.value = 'content'
+  weeklyEditing.value = false
+  weeklyReport.value = row as WeeklyItem
+  weeklyForm.value = {
+    title: weeklyReport.value?.title || '',
+    content: weeklyReport.value?.content || ''
+  }
+  weeklyLogs.value = []
+  try {
+    weeklyReport.value = await weeklyDetail(String(row.id))
+    weeklyForm.value = {
+      title: weeklyReport.value.title || '',
+      content: weeklyReport.value.content || ''
+    }
+    await loadWeeklyLogs()
+  } finally {
+    weeklyReportLoading.value = false
+  }
+}
+
+const toggleWeeklyEdit = () => {
+  if (!weeklyReport.value) return
+  if (weeklyEditing.value && weeklyDirty.value) {
+    weeklyForm.value = {
+      title: weeklyReport.value.title || '',
+      content: weeklyReport.value.content || ''
+    }
+  }
+  weeklyEditing.value = !weeklyEditing.value
+}
+
+/** 确认前可自由改标题 / 正文，保存后仍在「待确认」 */
+const saveWeekly = async () => {
+  if (!weeklyReport.value) return
+  if (!weeklyForm.value.content.trim()) {
+    ElMessage.warning('周报正文不能为空')
+    return
+  }
+  weeklySaving.value = true
+  try {
+    weeklyReport.value = await updateWeekly(String(weeklyReport.value.id), {
+      title: weeklyForm.value.title.trim(),
+      content: weeklyForm.value.content
+    })
+    weeklyForm.value = {
+      title: weeklyReport.value.title || '',
+      content: weeklyReport.value.content || ''
+    }
+    weeklyEditing.value = false
+    ElMessage.success('已保存')
+    await loadWeeklies()
+  } finally {
+    weeklySaving.value = false
+  }
+}
+
+/** 重新生成：覆盖现有正文（版本 +1），已确认的会回到待确认，需要重新确认 */
+const regenerateWeekly = async () => {
+  const report = weeklyReport.value
+  if (!report) return
+  if (
+    !(await confirmWeeklyOverwrite({
+      scope: 'PROJECT',
+      projectId: detail.value.id,
+      weekStart: report.weekStart
+    }))
+  ) {
+    return
+  }
+  weeklyGenerating.value = true
+  try {
+    const item = await generateWeekly({
+      scope: 'PROJECT',
+      projectId: detail.value.id,
+      weekStart: report.weekStart
+    })
+    weeklyReport.value = item
+    weeklyForm.value = { title: item.title || '', content: item.content || '' }
+    weeklyEditing.value = false
+    ElMessage.success('已重新生成')
+    await loadWeeklies()
+  } finally {
+    weeklyGenerating.value = false
+  }
+}
+
+const doConfirmWeekly = async (row: any) => {
+  try {
+    await ElMessageBox.confirm(
+      '确认后周报归档，不再随日志自动变化，正文也不能再编辑。确认提交？',
+      '确认周报',
+      { type: 'warning', confirmButtonText: '确认归档', cancelButtonText: '再看看' }
+    )
+  } catch {
+    return
+  }
+  // 还没保存的编辑先落库，避免确认后丢失改动
+  if (weeklyEditing.value && weeklyDirty.value) await saveWeekly()
+  const updated = await confirmWeekly(String(row.id))
+  weeklyReport.value = updated
+  weeklyForm.value = { title: updated.title || '', content: updated.content || '' }
+  weeklyEditing.value = false
+  ElMessage.success('周报已确认归档')
+  await loadWeeklies()
 }
 
 const doAddMember = async () => {
@@ -1719,6 +2003,146 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       </template>
     </el-dialog>
 
+    <!-- 项目周报详情：正文（可编辑）+ 当周日志明细 -->
+    <el-dialog
+      v-model="weeklyReportVisible"
+      title="项目周报"
+      width="min(880px, 94vw)"
+      align-center
+      append-to-body
+      :close-on-click-modal="false"
+    >
+      <div v-loading="weeklyReportLoading" class="weekly-report">
+        <div v-if="weeklyReport" class="weekly-report-head">
+          <h4>{{ weeklyReport.title || '未命名周报' }}</h4>
+          <div class="weekly-meta">
+            <el-tag size="small" effect="plain">{{ weeklyReport.weekLabel }}</el-tag>
+            <el-tag
+              :type="weeklyReport.status === 'CONFIRMED' ? 'success' : 'warning'"
+              size="small"
+              effect="plain"
+            >
+              {{ WEEKLY_STATUS_LABEL[weeklyReport.status] || weeklyReport.status }}
+            </el-tag>
+            <el-tag size="small" type="info" effect="plain">
+              {{ WEEKLY_SOURCE_LABEL[weeklyReport.source] || weeklyReport.source }}
+            </el-tag>
+            <el-tag size="small" type="info" effect="plain">v{{ weeklyReport.revision }}</el-tag>
+            <span v-if="weeklyStats.dateFrom" class="block-tip">
+              {{ weeklyStats.dateFrom }} ~ {{ weeklyStats.dateTo }}
+            </span>
+            <span v-if="weeklyReport.confirmTime" class="block-tip">
+              {{ weeklyReport.confirmName }} 于 {{ weeklyReport.confirmTime }} 确认
+            </span>
+          </div>
+          <el-alert
+            v-if="!weeklyReport.aiUsed"
+            type="warning"
+            :closable="false"
+            show-icon
+            :title="weeklyReport.aiMessage || 'AI 生成不可用，已降级为数据模板，请人工补充'"
+          />
+          <div class="weekly-stats">
+            <div class="weekly-stat">
+              <span>日志</span>
+              <b>{{ weeklyStats.logCount ?? 0 }} 条</b>
+            </div>
+            <div class="weekly-stat">
+              <span>工时</span>
+              <b>{{ weeklyStats.totalHours ?? 0 }} h</b>
+            </div>
+            <div class="weekly-stat">
+              <span>参与人</span>
+              <b>{{ weeklyStats.memberCount ?? 0 }} 人</b>
+            </div>
+            <div class="weekly-stat">
+              <span>问题 / 风险</span>
+              <b>{{ weeklyStats.riskLogCount ?? 0 }} 条</b>
+            </div>
+          </div>
+        </div>
+
+        <el-tabs v-model="weeklyReportTab">
+          <el-tab-pane label="周报正文" name="content">
+            <template v-if="weeklyEditing">
+              <el-input
+                v-model="weeklyForm.title"
+                maxlength="200"
+                show-word-limit
+                class="weekly-edit-title"
+                placeholder="周报标题"
+              />
+              <el-input
+                v-model="weeklyForm.content"
+                type="textarea"
+                :rows="16"
+                resize="vertical"
+                placeholder="周报正文（支持 Markdown：## 标题、- 列表、> 引用、**加粗**）"
+              />
+            </template>
+            <div v-else class="md-body" v-html="weeklyHtml"></div>
+          </el-tab-pane>
+          <el-tab-pane :label="`本周日志（${weeklyLogs.length}）`" name="logs">
+            <el-table
+              v-loading="weeklyLogsLoading"
+              :data="weeklyLogs"
+              size="small"
+              max-height="420"
+              empty-text="这一周没有填报日志"
+            >
+              <el-table-column label="日期" prop="logDate" width="110" />
+              <el-table-column label="填报人" width="100">
+                <template #default="{ row }">{{ row.realName || row.userName || '—' }}</template>
+              </el-table-column>
+              <el-table-column label="工时" width="80" align="right">
+                <template #default="{ row }">{{ Number(row.totalHours || 0) }} h</template>
+              </el-table-column>
+              <el-table-column label="内容" min-width="240" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.content || '—' }}</template>
+              </el-table-column>
+              <el-table-column label="问题 / 风险" min-width="170" show-overflow-tooltip>
+                <template #default="{ row }">
+                  {{ row.riskFlag ? row.problem || '已标记风险' : row.problem || '—' }}
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="100">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="plain">
+                    {{ LOG_STATUS_LABEL[row.status] || row.status }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+            </el-table>
+            <p v-if="weeklyLogs.length >= 50" class="block-tip">
+              仅展示本周前 50 条日志，完整明细请到「工作日志」页查看
+            </p>
+          </el-tab-pane>
+        </el-tabs>
+      </div>
+      <template #footer>
+        <div class="weekly-footer">
+          <el-button @click="weeklyReportVisible = false">关闭</el-button>
+          <span class="pane-spacer"></span>
+          <template v-if="weeklyReport && canManage">
+            <el-button :loading="weeklyGenerating" @click="regenerateWeekly">重新生成</el-button>
+            <el-button v-if="weeklyReport.status === 'GENERATED'" @click="toggleWeeklyEdit">
+              {{ weeklyEditing ? '取消编辑' : '编辑' }}
+            </el-button>
+            <el-button v-if="weeklyEditing" type="primary" :loading="weeklySaving" @click="saveWeekly">
+              保存修改
+            </el-button>
+            <el-button
+              v-if="weeklyReport.status === 'GENERATED'"
+              type="primary"
+              @click="doConfirmWeekly(weeklyReport)"
+            >
+              确认周报
+            </el-button>
+          </template>
+        </div>
+      </template>
+    </el-dialog>
+
     <el-drawer v-model="detailVisible" title="项目详情" size="min(1180px, 96vw)">
       <div class="detail">
         <div class="detail-head">
@@ -2335,6 +2759,137 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               </el-table-column>
             </el-table>
           </el-tab-pane>
+
+          <el-tab-pane label="周报" name="weekly">
+            <el-alert
+              v-if="!canViewWeekly"
+              type="info"
+              :closable="false"
+              show-icon
+              title="当前账号无日志查看权限，无法查看项目周报"
+            />
+            <template v-else>
+              <div class="pane-ops">
+                <el-date-picker
+                  v-model="weeklyFilter.weekStart"
+                  type="week"
+                  format="YYYY 第 ww 周"
+                  value-format="YYYY-MM-DD"
+                  :first-day-of-week="1"
+                  size="small"
+                  class="weekly-week"
+                  placeholder="全部周次"
+                  @change="onWeeklyWeekChange"
+                />
+                <el-select
+                  v-model="weeklyFilter.status"
+                  class="ops-select narrow"
+                  size="small"
+                  placeholder="全部状态"
+                  clearable
+                  @change="searchWeeklies"
+                >
+                  <el-option label="待确认" value="GENERATED" />
+                  <el-option label="已确认" value="CONFIRMED" />
+                </el-select>
+                <el-button size="small" :loading="weeklyLoading" @click="loadWeeklies">刷新</el-button>
+                <span class="block-tip">每周五 12:00 自动生成，生成后由项目经理核对确认</span>
+                <span class="pane-spacer"></span>
+                <span class="weekly-target" :class="{ 'is-warn': weeklyTargetReport }">
+                  <template v-if="weeklyTargetReport">
+                    {{ weeklyTargetReport.weekLabel }} 已生成 v{{ weeklyTargetReport.revision }}（{{
+                      WEEKLY_STATUS_LABEL[weeklyTargetReport.status] || weeklyTargetReport.status
+                    }}），再次生成会覆盖
+                  </template>
+                  <template v-else>{{ weeklyTargetLabel }} 还没有周报</template>
+                </span>
+                <el-tooltip
+                  :content="
+                    canManage
+                      ? weeklyTargetReport
+                        ? `将覆盖 ${weeklyTargetLabel} 已生成的周报（版本 +1，回到待确认）`
+                        : `按 ${weeklyTargetLabel} 的工作日志生成项目周报`
+                      : '生成 / 重新生成需项目经理（PMO）权限，其他人可查看已生成的周报'
+                  "
+                  placement="top"
+                  :disabled="canManage && !weeklyTargetReport"
+                >
+                  <span>
+                    <el-button
+                      size="small"
+                      :type="weeklyTargetReport ? 'warning' : 'primary'"
+                      :loading="weeklyGenerating"
+                      :disabled="!canManage"
+                      @click="generateProjectWeekly"
+                    >
+                      {{ weeklyTargetReport ? '重新生成' : '生成' }}{{
+                        weeklyFilter.weekStart ? '所选周' : '本周'
+                      }}
+                    </el-button>
+                  </span>
+                </el-tooltip>
+              </div>
+
+              <el-table v-loading="weeklyLoading" :data="weeklies" size="small">
+                <el-table-column label="周次" width="110" prop="weekLabel" />
+                <el-table-column label="标题" min-width="240" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    <el-button link type="primary" class="weekly-title" @click="openWeeklyReport(row)">
+                      {{ row.title || '未命名周报' }}
+                    </el-button>
+                  </template>
+                </el-table-column>
+                <el-table-column label="状态" width="96">
+                  <template #default="{ row }">
+                    <el-tag
+                      :type="row.status === 'CONFIRMED' ? 'success' : 'warning'"
+                      size="small"
+                      effect="plain"
+                    >
+                      {{ WEEKLY_STATUS_LABEL[row.status] || row.status }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="生成" width="110" class-name="pms-mobile-hide">
+                  <template #default="{ row }">
+                    {{ WEEKLY_SOURCE_LABEL[row.source] || row.source }}
+                    <span v-if="!row.aiUsed" class="ops-hint">（模板）</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="确认人" width="110" class-name="pms-mobile-hide">
+                  <template #default="{ row }">{{ row.confirmName || '—' }}</template>
+                </el-table-column>
+                <el-table-column label="生成时间" prop="createTime" width="160" class-name="pms-mobile-hide" />
+                <el-table-column label="操作" width="110">
+                  <template #default="{ row }">
+                    <el-button link type="primary" @click="openWeeklyReport(row)">查看</el-button>
+                    <el-button
+                      v-if="row.status === 'GENERATED' && canManage"
+                      link
+                      type="primary"
+                      @click="doConfirmWeekly(row)"
+                    >
+                      确认
+                    </el-button>
+                  </template>
+                </el-table-column>
+                <template #empty>
+                  <el-empty
+                    description="还没有生成过周报，可点右上角「生成周报」汇总本周日志"
+                    :image-size="64"
+                  />
+                </template>
+              </el-table>
+              <el-pagination
+                v-model:current-page="weeklyPage.pageNum"
+                :page-size="weeklyPage.pageSize"
+                :total="weeklyTotal"
+                layout="total, prev, pager, next"
+                class="weekly-pager"
+                @current-change="loadWeeklies"
+              />
+            </template>
+          </el-tab-pane>
         </el-tabs>
       </div>
       <template #footer>
@@ -2917,6 +3472,155 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .basic-range-sep {
   flex: none;
   color: var(--pms-text-3);
+}
+
+/* ---------------- 周报页签 ---------------- */
+.pane-spacer {
+  flex: 1 1 auto;
+}
+
+.weekly-week {
+  width: 150px;
+}
+
+/* 生成按钮左侧的状态提示：本周已生成时提示会覆盖 */
+.weekly-target {
+  font-size: 12px;
+  color: var(--pms-text-3);
+}
+
+.weekly-target.is-warn {
+  color: var(--el-color-warning);
+}
+
+.weekly-title {
+  font-weight: 500;
+  text-align: left;
+}
+
+.weekly-pager {
+  margin-top: 10px;
+  justify-content: flex-end;
+}
+
+.weekly-report {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 220px;
+  /* 弹窗比正文宽时也让内容整体居中，避免大面积右侧留白 */
+  max-width: 820px;
+  margin: 0 auto;
+}
+
+.weekly-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.weekly-edit-title {
+  margin-bottom: 10px;
+}
+
+.weekly-report-head {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.weekly-report-head h4 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--pms-text);
+}
+
+.weekly-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.weekly-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.weekly-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--pms-line);
+  border-radius: 8px;
+  background: #fafbfe;
+}
+
+.weekly-stat span {
+  font-size: 11.5px;
+  color: var(--pms-text-3);
+}
+
+.weekly-stat b {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--pms-text);
+}
+
+/* 周报正文（v-html 渲染的极简 Markdown） */
+.md-body {
+  max-height: 52vh;
+  overflow-y: auto;
+  padding: 4px 2px;
+  font-size: 13.5px;
+  line-height: 1.95;
+  color: var(--pms-text);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.md-body :deep(h2),
+.md-body :deep(h3),
+.md-body :deep(h4) {
+  margin: 18px 0 8px;
+  padding-left: 10px;
+  border-left: 3px solid var(--pms-primary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.md-body :deep(h2:first-child),
+.md-body :deep(h3:first-child) {
+  margin-top: 6px;
+}
+
+.md-body :deep(p) {
+  margin: 8px 0;
+}
+
+.md-body :deep(ul),
+.md-body :deep(ol) {
+  margin: 8px 0;
+  padding-left: 22px;
+}
+
+.md-body :deep(li) {
+  margin: 4px 0;
+}
+
+.md-body :deep(blockquote) {
+  margin: 10px 0;
+  padding: 8px 14px;
+  border-left: 3px solid var(--pms-primary);
+  border-radius: 0 8px 8px 0;
+  background: #f4f6fa;
+  font-size: 12.5px;
+  color: var(--pms-text-2);
 }
 
 .form-grid {
@@ -3682,6 +4386,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     flex: 1 1 100%;
     width: 100%;
     max-width: none;
+  }
+
+  .weekly-week {
+    width: 100%;
+  }
+
+  .weekly-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .plan-head {
