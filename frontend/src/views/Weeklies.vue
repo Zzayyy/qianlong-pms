@@ -12,6 +12,7 @@ import {
   type WeeklyItem,
   type WeeklyOptions
 } from '@/api'
+import { useUserStore } from '@/stores/user'
 import { renderMarkdown, stripLeadingTitle } from '@/utils/markdown'
 import { confirmWeeklyOverwrite, toWeekStart, weekLabelOf } from '@/utils/weekly'
 
@@ -27,6 +28,12 @@ interface WeeklyStats {
   members?: { name: string; hours: number; logCount: number }[]
   byProject?: { name: string; hours: number; logCount: number }[]
 }
+
+const store = useUserStore()
+/** 项目周报只对领导层（weekly:project:view）与项目经理（project:edit）开放 */
+const canViewProjectWeekly = computed(
+  () => store.has('weekly:project:view') || store.has('project:edit')
+)
 
 const tab = ref<'project' | 'personal'>('project')
 const options = ref<WeeklyOptions>({
@@ -297,6 +304,7 @@ const regenerate = async () => {
 }
 
 onMounted(async () => {
+  if (!canViewProjectWeekly.value) tab.value = 'personal'
   await loadOptions()
   await loadList()
 })
@@ -324,7 +332,7 @@ onMounted(async () => {
 
     <div class="pms-card">
       <el-tabs v-model="tab" @tab-change="switchTab">
-        <el-tab-pane label="项目周报" name="project">
+        <el-tab-pane v-if="canViewProjectWeekly" label="项目周报" name="project">
           <div class="toolbar">
             <el-date-picker
               v-model="projectFilters.weekStart"

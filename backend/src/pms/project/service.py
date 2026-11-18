@@ -67,7 +67,14 @@ async def _notify_project(
     operator_id: int = 0,
     reason: str = "",
 ) -> None:
-    """发送项目相关邮件（仅入队，失败不影响主流程）。"""
+    """发送项目相关邮件（仅入队，失败不影响主流程）。
+
+    项目级开关 `notify_enabled` 关闭时直接跳过，避免该项目继续打扰成员；
+    老数据（列为 None）按开启处理。
+    """
+    if project.notify_enabled is not None and int(project.notify_enabled) == 0:
+        logger.info("项目已关闭自动通知，跳过邮件：%s %s", event_code, project.id)
+        return
     try:
         if event_code == "PROJECT_SUBMITTED":
             receivers = await mail_service.role_user_ids(session, ("PMO", "ADMIN"))
@@ -199,13 +206,15 @@ async def update_project_basic(
     contract_amount: float | None = None,
     plan_start: str | None | _UnsetType = UNSET,
     plan_end: str | None | _UnsetType = UNSET,
+    notify_enabled: bool | None = None,
     operator_id: int = 0,
 ) -> PrjProject:
-    """编辑立项后仍可维护的基础信息（所属部门 / 合同金额 / 计划周期）。
+    """编辑立项后仍可维护的基础信息（所属部门 / 合同金额 / 计划周期 / 自动通知）。
 
-    约定：`dept_id` / `contract_amount` 传 None 表示不修改；`plan_start` / `plan_end`
-    用 `UNSET` 表示不修改、传 None 表示清空，便于前端把日期改回「未排期」。
-    部门传 0 视为「未选择」，回落到总公司；合同金额变化时草稿态同步重算审批层级。
+    约定：`dept_id` / `contract_amount` / `notify_enabled` 传 None 表示不修改；
+    `plan_start` / `plan_end` 用 `UNSET` 表示不修改、传 None 表示清空，便于前端把日期
+    改回「未排期」。部门传 0 视为「未选择」，回落到总公司；合同金额变化时草稿态同步
+    重算审批层级。
     """
     project = await _get_project(session, project_id)
     # 先按「本次要落库的值」校验日期，避免校验失败前已改动实体
@@ -224,6 +233,8 @@ async def update_project_basic(
         project.plan_start = plan_start or None
     if not isinstance(plan_end, _UnsetType):
         project.plan_end = plan_end or None
+    if notify_enabled is not None:
+        project.notify_enabled = 1 if notify_enabled else 0
     project.update_by = operator_id or project.create_by
     await session.flush()
     return project

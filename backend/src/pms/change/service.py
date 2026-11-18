@@ -55,6 +55,10 @@ async def _notify_change(
         if event_code == "CHANGE_SUBMITTED":
             receivers |= await mail_service.role_user_ids(session, ("PMO", "ADMIN"))
         project = await session.get(PrjProject, request.project_id)
+        # 项目级「自动通知」开关：关闭后该项目不再推送变更邮件
+        if project is not None and project.notify_enabled is not None and int(project.notify_enabled) == 0:
+            logger.info("项目已关闭自动通知，跳过变更邮件：%s %s", event_code, request.id)
+            return
         await mail_service.notify_event(
             session,
             event_code,

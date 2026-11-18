@@ -44,6 +44,7 @@ const moduleLabels: [string, string][] = [
   ['project', '项目周期'],
   ['change', '变更管理'],
   ['worklog', '工作日志'],
+  ['weekly', '周报总结'],
   ['report', '统计看板'],
   ['sys', '系统设置']
 ]

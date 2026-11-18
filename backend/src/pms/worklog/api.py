@@ -9,18 +9,20 @@ from __future__ import annotations
 import csv
 import io
 from datetime import date
-from typing import Annotated
+from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pms.common.exceptions import DataForbiddenError, ParamError
+from pms.common.exceptions import DataForbiddenError, NotFoundError, ParamError
 from pms.common.response import ok, paged
 from pms.core.context import AuthContext
 from pms.core.deps import Pagination, get_pagination, get_session, require_permissions
 from pms.notice import service as notice_service
 from pms.org.models import SysUser
+from pms.project.models import PrjProject
+from pms.weekly import service as weekly_service
 from pms.worklog import service
 from pms.worklog.models import WlComment
 
@@ -356,6 +358,80 @@ async def list_worklogs(
         total,
         pagination.page_num,
         pagination.page_size,
+    )
+
+
+#: 团队日志只回已生效状态：草稿、补填待审批中的草稿态与驳回明细不外泄
+_TEAM_LOG_STATUSES: Final[str] = "SUBMITTED,PENDING_APPROVE,CONFIRMED"
+
+
+@router.get("/team", summary="项目团队日志")
+async def team_worklogs(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:view"))],
+    pagination: Annotated[Pagination, Depends(get_pagination)],
+    projectId: Annotated[int, Query(gt=0)],
+    dateFrom: Annotated[str | None, Query()] = None,
+    dateTo: Annotated[str | None, Query()] = None,
+    userId: Annotated[int | None, Query()] = None,
+    logType: Annotated[str, Query()] = "",
+    keyword: Annotated[str, Query()] = "",
+) -> object:
+    """项目团队日志：分页明细 + 汇总（条数 / 工时 / 参与人）。
+
+    口径：
+    - 可见性与项目周报一致（项目经理 + 领导层），避免绕过周报权限直接读日志；
+    - 只返回已生效日志，草稿与驳回不出现；
+    - 汇总不分页，按同一组筛选条件聚合，便于和周报统计对照。
+
+    注：必须定义在 `/{worklog_id}` 之前，否则会被路径参数路由抢先匹配。
+    """
+    project = await session.get(PrjProject, projectId)
+    if project is None or project.deleted:
+        raise NotFoundError("项目不存在")
+    if not await weekly_service.can_view_project_weekly(session, context, project):
+        raise DataForbiddenError("无该项目团队日志查看权限")
+
+    filters: dict[str, object] = {
+        "project_id": projectId,
+        "user_ids": [userId] if userId else None,
+        "date_from": dateFrom or None,
+        "date_to": dateTo or None,
+        "status": _TEAM_LOG_STATUSES,
+        "log_type": logType,
+        "keyword": keyword,
+    }
+    total = await service.count_worklogs(session, **filters)  # type: ignore[arg-type]
+    rows = await service.list_worklogs(
+        session,
+        offset=pagination.offset,
+        limit=pagination.page_size,
+        **filters,  # type: ignore[arg-type]
+    )
+    summary = await service.team_summary(session, **filters)  # type: ignore[arg-type]
+
+    names = await service.project_names(session, {row.project_id for row in rows})
+    users = await service.user_names(session, {row.user_id for row in rows})
+    tasks = await service.task_names(session, {row.task_id for row in rows})
+    page_size = pagination.page_size
+    return ok(
+        {
+            "list": [
+                _out(
+                    row,
+                    names.get(row.project_id, ""),
+                    user_name=users.get(row.user_id, ("", ""))[0],
+                    real_name=users.get(row.user_id, ("", ""))[1],
+                    task_name=tasks.get(row.task_id, ""),
+                )
+                for row in rows
+            ],
+            "total": total,
+            "pageNum": pagination.page_num,
+            "pageSize": page_size,
+            "pages": (total + page_size - 1) // page_size if page_size > 0 else 0,
+            "summary": summary,
+        }
     )
 
 

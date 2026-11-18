@@ -38,6 +38,8 @@ class PrjProject(Base, CommonMixin):
     version: Mapped[int] = mapped_column(Integer, default=0)
     remark: Mapped[str] = mapped_column(Text, default="")
     terminate_reason: Mapped[str] = mapped_column(Text, default="")
+    # 项目级「自动通知」开关：1=开启（默认），0=关闭后不再为该项目的业务事件排队邮件
+    notify_enabled: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class PrjMember(Base, CommonMixin):

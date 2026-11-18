@@ -242,6 +242,23 @@ export const worklogAction = (id: string, action: string, payload: Record<string
 export const listWorklogs = (params: Record<string, unknown>) =>
   get<Page<Record<string, unknown>>>('/worklogs', params)
 
+/** 项目团队日志汇总（实时口径，与周报正文里的生成快照可能不同）。 */
+export interface TeamWorklogSummary {
+  logCount: number
+  totalHours: number
+  memberCount: number
+  members: { userId: string; name: string; logCount: number; hours: number }[]
+  byDay: { date: string; count: number; hours: number }[]
+}
+
+export interface TeamWorklogPage extends Page<Record<string, unknown>> {
+  summary: TeamWorklogSummary
+}
+
+/** 项目团队日志：只回已生效日志，需项目经理或领导层权限。 */
+export const projectTeamWorklogs = (params: Record<string, unknown>) =>
+  get<TeamWorklogPage>('/worklogs/team', params)
+
 /** 按当前筛选条件导出工作日志 CSV。 */
 export const exportWorklogs = (params: Record<string, unknown>) => {
   const query = new URLSearchParams()

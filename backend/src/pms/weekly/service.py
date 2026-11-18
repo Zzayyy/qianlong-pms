@@ -25,7 +25,7 @@ from pms.core.context import AuthContext
 from pms.notice import service as notice_service
 from pms.org.models import SysUser
 from pms.project.models import PrjMember, PrjProject
-from pms.project.visibility import can_view_project, is_project_manager
+from pms.project.visibility import is_project_manager
 from pms.system.config_service import ConfigService
 from pms.weekly.models import WkWeekly
 from pms.weekly.rules import (
@@ -41,6 +41,9 @@ from pms.worklog.models import WlItem, WlWorklog
 from pms.worklog.rules import WorklogStatus, round_hours
 
 logger = get_logger(__name__)
+
+#: 项目周报查看权限点（仅授予公司领导 / PMO / 部门领导）
+PROJECT_WEEKLY_VIEW_PERM: Final[str] = "weekly:project:view"
 
 #: 参与自动生成的活跃项目状态
 _ACTIVE_STATUSES: Final[tuple[str, ...]] = (
@@ -687,7 +690,7 @@ async def list_reports(
     offset: int = 0,
     limit: int = 20,
 ) -> tuple[list[dict[str, object]], int]:
-    """周报列表：项目周报按项目可见性过滤，个人周总结只返回本人。"""
+    """周报列表：项目周报按「项目经理 + 领导层」口径过滤，个人周总结只返回本人。"""
     conditions = [WkWeekly.deleted == 0, WkWeekly.scope == scope]
     if scope == WeeklyScope.PERSONAL:
         conditions.append(WkWeekly.user_id == context.user_id)
@@ -716,7 +719,7 @@ async def list_reports(
                 project = await session.get(PrjProject, report.project_id)
                 project_cache[report.project_id] = bool(
                     project and not project.deleted
-                    and await can_view_project(session, context, project)
+                    and await can_view_project_weekly(session, context, project)
                 )
             if not project_cache[report.project_id]:
                 continue
@@ -750,6 +753,16 @@ async def list_options(session: AsyncSession, context: AuthContext) -> dict[str,
             .where(PrjProject.deleted == 0, PrjProject.status.in_(_ACTIVE_STATUSES))
             .order_by(PrjProject.id.desc())
         )
+    elif context.has_permission(PROJECT_WEEKLY_VIEW_PERM):
+        # 部门领导等领导层：只列自己数据范围内的项目，避免下拉里出现无权查看的项目
+        scoped = select(PrjProject).where(
+            PrjProject.deleted == 0, PrjProject.status.in_(_ACTIVE_STATUSES)
+        )
+        if not context.is_all_scope:
+            scoped = scoped.where(
+                PrjProject.dept_id.in_(sorted(context.visible_dept_ids or {context.dept_id}))
+            )
+        result = await session.execute(scoped.order_by(PrjProject.id.desc()))
     else:
         pm_member_projects = select(PrjMember.project_id).where(
             PrjMember.user_id == context.user_id,
@@ -859,6 +872,25 @@ async def _get(session: AsyncSession, report_id: int) -> WkWeekly:
     return report
 
 
+async def can_view_project_weekly(
+    session: AsyncSession, context: AuthContext, project: PrjProject
+) -> bool:
+    """项目周报可见性：项目经理 + 领导层。
+
+    口径说明：
+    - 项目经理（含组内 PM、PMO、公司领导、系统管理员）必须能看，否则自动生成的
+      周报没人核对确认；
+    - 其他角色需具备 `weekly:project:view`，且项目归属部门在其数据范围内
+      （部门领导只看本部门及下级，避免跨部门窥探）；
+    - 项目组成员、普通员工不再默认可见。
+    """
+    if await is_project_manager(session, context, project):
+        return True
+    if not context.has_permission(PROJECT_WEEKLY_VIEW_PERM):
+        return False
+    return context.can_see_dept(project.dept_id)
+
+
 async def _can_manage(
     session: AsyncSession, context: AuthContext, report: WkWeekly
 ) -> bool:
@@ -874,10 +906,10 @@ async def _can_manage(
 async def _can_view(
     session: AsyncSession, context: AuthContext, report: WkWeekly
 ) -> bool:
-    """查看权限：个人总结限本人，项目周报按项目可见性。"""
+    """查看权限：个人总结限本人，项目周报限项目经理与领导层。"""
     if report.scope == WeeklyScope.PERSONAL:
         return report.user_id == context.user_id
     project = await session.get(PrjProject, report.project_id)
     if project is None or project.deleted:
         return False
-    return await can_view_project(session, context, project)
+    return await can_view_project_weekly(session, context, project)

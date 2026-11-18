@@ -69,6 +69,7 @@ def _project_out(project: PrjProject, pm_name: str = "") -> dict[str, object]:
         "planEnd": project.plan_end,
         "approvalLevel": project.approval_level,
         "terminateReason": project.terminate_reason,
+        "notifyEnabled": project.notify_enabled is None or int(project.notify_enabled) == 1,
     }
 
 
@@ -114,6 +115,8 @@ class ProjectBasicIn(BaseModel):
     contractAmount: float | None = Field(default=None, ge=0)
     planStart: str | None = None
     planEnd: str | None = None
+    # 项目级「自动通知」开关：false 关闭该项目所有业务邮件
+    notifyEnabled: bool | None = None
 
 
 class StatusIn(BaseModel):
@@ -324,6 +327,12 @@ async def project_detail(
     names = await _user_names(session, {project.pm_id})
     data = _project_out(project, names.get(project.pm_id, ""))
     data["canManage"] = await is_project_manager(session, context, project)
+    # 项目周报只对项目经理与领导层开放，前端据此决定是否显示「周报」页签
+    from pms.weekly import service as weekly_service
+
+    data["canViewWeekly"] = await weekly_service.can_view_project_weekly(
+        session, context, project
+    )
 
     # 读取详情时顺带校准健康度：单项目计算开销小，避免列表长期停留在默认 GREEN
     from pms.report import service as report_service
@@ -342,7 +351,7 @@ async def update_project(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
 ) -> object:
-    """维护立项后仍需调整的基础信息：所属部门、合同金额、计划周期。
+    """维护立项后仍需调整的基础信息：所属部门、合同金额、计划周期、自动通知开关。
 
     改金额时草稿态会同步重算审批层级，避免提交审批时阈值与表单不一致；
     计划日期未出现在请求体里表示「不修改」，显式传 null 表示清空。
@@ -358,6 +367,7 @@ async def update_project(
         contract_amount=body.contractAmount,
         plan_start=body.planStart if "planStart" in provided else service.UNSET,
         plan_end=body.planEnd if "planEnd" in provided else service.UNSET,
+        notify_enabled=body.notifyEnabled,
         operator_id=context.user_id,
     )
     await session.commit()

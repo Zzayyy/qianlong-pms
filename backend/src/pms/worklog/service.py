@@ -787,6 +787,89 @@ async def count_worklogs(
     return int(result.scalar_one() or 0)
 
 
+async def team_summary(
+    session: AsyncSession,
+    *,
+    project_id: int,
+    user_ids: list[int] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    status: str = "",
+    keyword: str = "",
+    log_type: str = "",
+) -> dict[str, object]:
+    """项目团队日志汇总（不分页）：条数、工时、参与人、按人 / 按天聚合。
+
+    供项目周报详情里的「团队日志」页签展示，口径与列表筛选完全一致。
+    """
+    conditions = _worklog_filters(
+        user_ids=user_ids,
+        project_id=project_id,
+        date_from=date_from,
+        date_to=date_to,
+        status=status,
+        keyword=keyword,
+        log_type=log_type,
+    )
+    member_rows = (
+        await session.execute(
+            select(
+                WlWorklog.user_id,
+                func.count(WlWorklog.id),
+                func.sum(WlWorklog.total_hours),
+            )
+            .where(*conditions)
+            .group_by(WlWorklog.user_id)
+        )
+    ).all()
+    day_rows = (
+        await session.execute(
+            select(
+                WlWorklog.log_date,
+                func.count(WlWorklog.id),
+                func.sum(WlWorklog.total_hours),
+            )
+            .where(*conditions)
+            .group_by(WlWorklog.log_date)
+            .order_by(WlWorklog.log_date)
+        )
+    ).all()
+
+    names = await user_names(session, {int(row[0]) for row in member_rows})
+    members = [
+        {
+            "userId": int(user_id),
+            "name": _display_name(names.get(int(user_id), ("", "")), int(user_id)),
+            "logCount": int(count),
+            "hours": round_hours(float(hours or 0)),
+        }
+        for user_id, count, hours in sorted(
+            member_rows, key=lambda row: float(row[2] or 0), reverse=True
+        )
+    ]
+    by_day = [
+        {
+            "date": log_date.isoformat() if hasattr(log_date, "isoformat") else str(log_date),
+            "count": int(count),
+            "hours": round_hours(float(hours or 0)),
+        }
+        for log_date, count, hours in day_rows
+    ]
+    return {
+        "logCount": sum(int(row[1]) for row in member_rows),
+        "totalHours": round_hours(sum(float(row[2] or 0) for row in member_rows)),
+        "memberCount": len(members),
+        "members": members,
+        "byDay": by_day,
+    }
+
+
+def _display_name(pair: tuple[str, str], user_id: int) -> str:
+    """取人员显示名：真实姓名优先，其次登录名，最后兜底。"""
+    username, real_name = pair
+    return real_name or username or f"用户{user_id}"
+
+
 async def can_view(
     session: AsyncSession, context: AuthContext, worklog: WlWorklog
 ) -> bool:
