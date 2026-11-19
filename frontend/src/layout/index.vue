@@ -73,8 +73,8 @@ const navSections: NavSection[] = [
     key: 'overview',
     label: '概览',
     items: [
-      { path: '/dashboard', label: '公司看板', icon: LayoutDashboard, permission: 'report:view' },
-      { path: '/dept-board', label: '部门看板', icon: BarChart3, permission: 'report:view' }
+      { path: '/dashboard', label: '公司看板', icon: LayoutDashboard, permission: 'report:company:view' },
+      { path: '/dept-board', label: '部门看板', icon: BarChart3, permission: 'report:dept:view' }
     ]
   },
   {
@@ -211,7 +211,7 @@ const iconOf = (path: string) => {
   return flatNav.value.find((item) => item.path === path)?.icon ?? LayoutDashboard
 }
 
-if (store.has('report:view')) {
+if (store.has('report:company:view')) {
   tabs.value.push({ path: '/dashboard', label: '公司看板', icon: LayoutDashboard })
 }
 syncCachedViews()

@@ -15,7 +15,7 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/layout/index.vue'),
     redirect: '/dashboard',
     children: [
-      { path: 'dashboard', name: 'dashboard', component: () => import('@/views/Dashboard.vue'), meta: { title: '公司看板', permission: 'report:view' } },
+      { path: 'dashboard', name: 'dashboard', component: () => import('@/views/Dashboard.vue'), meta: { title: '公司看板', permission: 'report:company:view' } },
       { path: 'users', name: 'users', component: () => import('@/views/Users.vue'), meta: { title: '人员管理', permission: 'org:user:view' } },
       { path: 'depts', name: 'depts', component: () => import('@/views/Depts.vue'), meta: { title: '部门架构', permission: 'org:dept:view' } },
       { path: 'roles', name: 'roles', component: () => import('@/views/Roles.vue'), meta: { title: '角色权限', permission: 'org:role:view' } },
@@ -23,7 +23,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'changes', name: 'changes', component: () => import('@/views/Changes.vue'), meta: { title: '变更管理', permission: 'change:view' } },
       { path: 'worklogs', name: 'worklogs', component: () => import('@/views/Worklogs.vue'), meta: { title: '工作日志', permission: 'worklog:view' } },
       { path: 'weeklies', name: 'weeklies', component: () => import('@/views/Weeklies.vue'), meta: { title: '周报总结', permission: 'worklog:view' } },
-      { path: 'dept-board', name: 'dept-board', component: () => import('@/views/Reports.vue'), meta: { title: '部门看板', permission: 'report:view' } },
+      { path: 'dept-board', name: 'dept-board', component: () => import('@/views/Reports.vue'), meta: { title: '部门看板', permission: 'report:dept:view' } },
       { path: 'reports', redirect: '/dept-board' },
       { path: 'crm', name: 'crm', component: () => import('@/views/Crm.vue'), meta: { title: '客户与商机', permission: 'crm:customer:view' } },
       { path: 'configs', name: 'configs', component: () => import('@/views/Configs.vue'), meta: { title: '规则参数', permission: 'sys:config' } },

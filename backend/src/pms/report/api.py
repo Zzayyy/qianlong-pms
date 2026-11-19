@@ -28,7 +28,9 @@ class AggregateIn(BaseModel):
 @router.get("/company", summary="公司看板")
 async def company(
     session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("report:view"))],
+    context: Annotated[
+        AuthContext, Depends(require_permissions("report:company:view"))
+    ],
     days: Annotated[int, Query(ge=7, le=180)] = 30,
 ) -> object:
     """全公司项目汇总、部门对比、近 N 天趋势与延期/风险 Top。"""
@@ -38,7 +40,7 @@ async def company(
 @router.get("/depts", summary="看板可选部门")
 async def depts(
     session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("report:view"))],
+    context: Annotated[AuthContext, Depends(require_permissions("report:dept:view"))],
 ) -> object:
     """返回当前用户数据范围内可查看的部门（部门看板筛选器数据源）。"""
     result = await session.execute(
@@ -110,7 +112,7 @@ async def _resolve_dept_ids(
 @router.get("/dept", summary="部门看板")
 async def dept(
     session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("report:view"))],
+    context: Annotated[AuthContext, Depends(require_permissions("report:dept:view"))],
     deptIds: Annotated[str, Query()] = "",
     includeSub: Annotated[bool, Query()] = False,
 ) -> object:
@@ -126,7 +128,7 @@ async def dept(
 @router.get("/dept/trend", summary="部门趋势")
 async def dept_trend(
     session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("report:view"))],
+    context: Annotated[AuthContext, Depends(require_permissions("report:dept:view"))],
     deptIds: Annotated[str, Query()] = "",
     includeSub: Annotated[bool, Query()] = False,
     days: Annotated[int, Query(ge=7, le=180)] = 30,
@@ -139,7 +141,7 @@ async def dept_trend(
 @router.get("/dept/members", summary="部门成员负载")
 async def dept_members(
     session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("report:view"))],
+    context: Annotated[AuthContext, Depends(require_permissions("report:dept:view"))],
     deptIds: Annotated[str, Query()] = "",
     includeSub: Annotated[bool, Query()] = False,
     days: Annotated[int, Query(ge=7, le=180)] = 30,
