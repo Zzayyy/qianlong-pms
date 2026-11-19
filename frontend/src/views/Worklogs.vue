@@ -1599,7 +1599,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </div>
         <div class="list-ops">
           <span class="list-total">
-            <template v-if="tab === 'team'">仅展示已生效日志 · </template>
+            <template v-if="tab === 'team'">
+              <el-tooltip
+                content="同一项目内按组内角色隔离：普通成员只看与自己角色相同的成员日志；项目经理、项目总监、部门领导、PMO / 公司领导可看全部"
+                placement="top"
+              >
+                <span style="border-bottom: 1px dashed currentColor; cursor: help">按角色可见</span>
+              </el-tooltip>
+              · 仅展示已生效日志 ·
+            </template>
             共 {{ total }} 条
           </span>
           <el-tooltip content="按周汇总日志，AI 生成周报 / 个人周总结" placement="top">

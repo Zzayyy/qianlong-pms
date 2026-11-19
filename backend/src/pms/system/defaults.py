@@ -27,6 +27,8 @@ DEFAULT_CONFIGS: Final[Mapping[str, ConfigValue]] = {
     "worklog.hours.step": "0.5",
     "worklog.project.visible": "true",
     "worklog.dept.visible": "false",
+    # 团队日志按组内角色隔离：普通成员只看同角色，负责人/领导看全部
+    "worklog.team.roleScope": "true",
     "worklog.confirm.required": "false",
     "worklog.remind.enabled": "true",
     # ---- 项目可见性（需求 3）----
@@ -101,6 +103,10 @@ CONFIG_REMARKS: Final[Mapping[str, str]] = {
     "worklog.hours.step": "工时填报的最小粒度（小时），如 0.5 表示半小时",
     "worklog.project.visible": "同项目组成员是否可互相查看工作日志；true=可见",
     "worklog.dept.visible": "同部门但不同项目的成员是否可互看日志；false=默认不可见",
+    "worklog.team.roleScope": (
+        "项目团队日志是否按组内角色隔离；true=普通成员只看到同角色成员的日志，"
+        "项目经理/项目总监/部门领导/PMO/公司领导可看全部"
+    ),
     "worklog.confirm.required": "日志提交后是否需要项目经理确认；false=提交即生效",
     "worklog.remind.enabled": "每日 09:00 未填日志提醒开关；仅提醒，不阻断其他流程",
     # 项目

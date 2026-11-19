@@ -43,6 +43,22 @@ from pms.worklog.rules import (
 )
 
 _STATUS_CONFIRMABLE: Final[frozenset[str]] = frozenset({WorklogStatus.SUBMITTED})
+
+#: 组内角色中文别名（历史数据兼容）：比较前统一映射回编码
+_MEMBER_ROLE_ALIASES: Final[dict[str, str]] = {
+    "成员": "MEMBER",
+    "开发": "DEV",
+    "测试": "TEST",
+    "运维": "OPS",
+    "实施": "IMPL",
+    "设计": "DESIGN",
+    "销售": "SALES",
+    "项目经理": "PM",
+    "总监": "DIRECTOR",
+}
+
+#: 项目内可见全部团队日志的组内角色（负责人 / 总监）
+_TEAM_MANAGER_ROLES: Final[frozenset[str]] = frozenset({"PM", "DIRECTOR"})
 _STATUS_EDITABLE: Final[frozenset[str]] = frozenset(
     {WorklogStatus.DRAFT, WorklogStatus.REJECTED}
 )
@@ -906,10 +922,13 @@ async def can_view(
     # 与项目可见性联动：项目不可见则其日志不可见
     dept_visible = await config.get_bool("project.dept.visible")
     public_visible = await config.get_bool("project.public.visible")
+    is_project_owner = False
     for project_id in project_ids:
         project = await session.get(PrjProject, project_id)
         if project is None:
             continue
+        if project.pm_id == context.user_id:
+            is_project_owner = True
         if not project_visible(
             secret_level=project.secret_level,
             is_member=await project_service.is_member(session, project_id, context.user_id),
@@ -920,7 +939,67 @@ async def can_view(
             public_visible=public_visible,
         ):
             return False
+
+    # 团队日志角色隔离：同项目组内，普通成员只看与自身组内角色有交集的日志；
+    # 本人 / 直属下级 / 项目负责人 / 部门领导 / PMO / 公司领导不受限制。
+    privileged = (
+        worklog.user_id == context.user_id
+        or is_subordinate
+        or is_project_owner
+        or context.is_dept_head
+        or context.is_privileged
+    )
+    if (
+        same_project
+        and not privileged
+        and await config.get_bool("worklog.team.roleScope")
+        and not await _same_project_role(session, context, project_ids, worklog.user_id)
+    ):
+        return False
     return True
+
+
+async def _same_project_role(
+    session: AsyncSession,
+    context: AuthContext,
+    project_ids: set[int],
+    author_id: int,
+) -> bool:
+    """作者与查看者在同一项目里是否有相同的组内角色。
+
+    组内角色取 `t_prj_member.role_in_project`（开发 / 测试 / 实施 / 运维 / 设计 / 销售 / 成员）。
+    查看者是组内 PM / 总监时放行全部；作者或查看者不在项目组内时视为无共同角色，
+    避免靠"补个成员身份"绕过隔离。
+    """
+    if not project_ids:
+        return False
+    rows = (
+        await session.execute(
+            select(PrjMember.project_id, PrjMember.user_id, PrjMember.role_in_project).where(
+                PrjMember.project_id.in_(project_ids),
+                PrjMember.user_id.in_({author_id, context.user_id}),
+                PrjMember.deleted == 0,
+            )
+        )
+    ).all()
+    roles: dict[int, dict[int, set[str]]] = {}
+    for project_id, user_id, role in rows:
+        roles.setdefault(int(project_id), {}).setdefault(int(user_id), set()).add(
+            _normalize_member_role(role)
+        )
+    viewer_roles = {role for members in roles.values() for role in members.get(context.user_id, set())}
+    if viewer_roles & _TEAM_MANAGER_ROLES:
+        return True
+    for members in roles.values():
+        if members.get(author_id, set()) & members.get(context.user_id, set()):
+            return True
+    return False
+
+
+def _normalize_member_role(value: object) -> str:
+    """组内角色归一化：历史数据里有中文值（如「成员」），统一映射回编码。"""
+    text = str(value or "").strip()
+    return _MEMBER_ROLE_ALIASES.get(text, text)
 
 
 async def stats(
