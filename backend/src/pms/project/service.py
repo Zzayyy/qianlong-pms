@@ -60,6 +60,109 @@ _PROJECT_STATUS_TEXT: Final[dict[str, str]] = {
 }
 
 
+def _value_text(value: object) -> str:
+    """字段值转留痕文本：空值写空串、布尔写是/否，其余直接转字符串。"""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    return str(value)
+
+
+def _money_text(value: object) -> str:
+    """金额统一两位小数，避免 `1000` 与 `1000.0` 被误判成前后不一致。"""
+    try:
+        return f"{float(value or 0):.2f}"
+    except (TypeError, ValueError):
+        return _value_text(value)
+
+
+def _date_text(value: object) -> str:
+    """日期统一 `YYYY-MM-DD`。"""
+    if not value:
+        return ""
+    return value.isoformat() if isinstance(value, date) else str(value)
+
+
+def _field_items(pairs: list[tuple[str, object, object]]) -> list[dict[str, object]]:
+    """把 (字段名, 旧值, 新值) 转成留痕明细，忽略没有变化的字段。"""
+    items: list[dict[str, object]] = []
+    for name, before, after in pairs:
+        old_text, new_text = _value_text(before), _value_text(after)
+        if old_text == new_text:
+            continue
+        items.append(
+            {"field_name": name, "before_value": old_text, "after_value": new_text}
+        )
+    return items
+
+
+async def _dept_label(session: AsyncSession, dept_id: int) -> str:
+    """部门名称（留痕里不展示雪花 ID）。"""
+    if not dept_id:
+        return ""
+    from pms.org.models import SysDept
+
+    row = await session.get(SysDept, dept_id)
+    return row.dept_name if row is not None else str(dept_id)
+
+
+async def _user_label(session: AsyncSession, user_id: int) -> str:
+    """人员姓名（留痕里不展示雪花 ID）。"""
+    if not user_id:
+        return ""
+    from pms.org.models import SysUser
+
+    row = await session.get(SysUser, user_id)
+    return (row.real_name or row.username) if row is not None else str(user_id)
+
+
+def _status_text(value: object) -> str:
+    """项目状态中文名（未收录的原样返回）。"""
+    text = str(value or "")
+    return _PROJECT_STATUS_TEXT.get(text, text)
+
+
+def _notify_text(value: object) -> str:
+    """自动通知开关文本；老数据（None）按开启处理。"""
+    return "是" if value is None or int(value) == 1 else "否"
+
+
+async def _log_inline(
+    session: AsyncSession,
+    *,
+    project_id: int,
+    title: str,
+    reason: str,
+    pairs: list[tuple[str, object, object]],
+    change_type: str = "OTHER",
+    biz_type: str = "PROJECT",
+    biz_id: int = 0,
+    operator_id: int = 0,
+) -> None:
+    """登记「详情页编辑」变更留痕。
+
+    实现说明：`change.service` 反向依赖本模块（审批通过要应用影响项），因此这里
+    延迟导入避免循环引用；没有实际字段变化时直接跳过，不要求填原因。
+    """
+    items = _field_items(pairs)
+    if not items:
+        return
+    from pms.change import service as change_service
+
+    await change_service.record_inline(
+        session,
+        project_id=project_id,
+        title=title,
+        reason=reason,
+        items=items,
+        change_type=change_type,
+        biz_type=biz_type,
+        biz_id=biz_id or project_id,
+        operator_id=operator_id,
+    )
+
+
 async def _notify_project(
     session: AsyncSession,
     event_code: str,
@@ -208,6 +311,7 @@ async def update_project_basic(
     plan_end: str | None | _UnsetType = UNSET,
     notify_enabled: bool | None = None,
     operator_id: int = 0,
+    reason: str = "",
 ) -> PrjProject:
     """编辑立项后仍可维护的基础信息（所属部门 / 合同金额 / 计划周期 / 自动通知）。
 
@@ -215,8 +319,15 @@ async def update_project_basic(
     `plan_start` / `plan_end` 用 `UNSET` 表示不修改、传 None 表示清空，便于前端把日期
     改回「未排期」。部门传 0 视为「未选择」，回落到总公司；合同金额变化时草稿态同步
     重算审批层级。
+
+    字段确有变化时写一条「编辑项目基础信息」变更留痕，`reason` 必填。
     """
     project = await _get_project(session, project_id)
+    before_dept = await _dept_label(session, project.dept_id)
+    before_amount = _money_text(project.contract_amount)
+    before_start = _date_text(project.plan_start)
+    before_end = _date_text(project.plan_end)
+    before_notify = _notify_text(project.notify_enabled)
     # 先按「本次要落库的值」校验日期，避免校验失败前已改动实体
     # 库里读出的 DATE 是 date 对象、本次传入的是字符串，统一按 ISO 文本比较
     next_start = project.plan_start if isinstance(plan_start, _UnsetType) else plan_start
@@ -237,6 +348,20 @@ async def update_project_basic(
         project.notify_enabled = 1 if notify_enabled else 0
     project.update_by = operator_id or project.create_by
     await session.flush()
+    await _log_inline(
+        session,
+        project_id=project_id,
+        title="编辑项目基础信息",
+        reason=reason,
+        operator_id=operator_id,
+        pairs=[
+            ("所属部门", before_dept, await _dept_label(session, project.dept_id)),
+            ("合同金额", before_amount, _money_text(project.contract_amount)),
+            ("计划开始", before_start, _date_text(project.plan_start)),
+            ("计划结束", before_end, _date_text(project.plan_end)),
+            ("自动通知", before_notify, _notify_text(project.notify_enabled)),
+        ],
+    )
     return project
 
 
@@ -340,12 +465,20 @@ async def add_members(
 
 
 async def change_project_pm(
-    session: AsyncSession, project_id: int, pm_id: int, operator_id: int = 0
+    session: AsyncSession,
+    project_id: int,
+    pm_id: int,
+    operator_id: int = 0,
+    reason: str = "",
 ) -> PrjProject:
-    """变更项目负责人，并自动把新负责人加入项目组（角色 PM）。"""
+    """变更项目负责人，并自动把新负责人加入项目组（角色 PM）。
+
+    负责人确有变化时写一条「变更项目经理」留痕，`reason` 必填。
+    """
     from pms.org.models import SysUser
 
     project = await _get_project(session, project_id)
+    before_pm = await _user_label(session, project.pm_id)
     if pm_id:
         user = await session.get(SysUser, pm_id)
         if user is None or user.deleted != 0:
@@ -370,6 +503,15 @@ async def change_project_pm(
         if member.role_in_project != "PM":
             member.role_in_project = "PM"
             await session.flush()
+    await _log_inline(
+        session,
+        project_id=project_id,
+        title="变更项目经理",
+        reason=reason,
+        operator_id=operator_id,
+        change_type="RESOURCE",
+        pairs=[("项目经理", before_pm, await _user_label(session, pm_id))],
+    )
     return project
 
 
@@ -432,8 +574,12 @@ async def reject_project(
 async def change_status(
     session: AsyncSession, project_id: int, target: str, operator_id: int, reason: str = ""
 ) -> PrjProject:
-    """通用状态流转（启动 / 挂起 / 完成 / 验收 / 关闭 / 终止）。"""
+    """通用状态流转（启动 / 挂起 / 完成 / 验收 / 关闭 / 终止）。
+
+    状态确有变化时写一条「变更项目状态」留痕，`reason` 必填。
+    """
     project = await _get_project(session, project_id)
+    before_status = project.status
     project.status = assert_transit(project.status, target)
     project.update_by = operator_id
     if project.status == ProjectStatus.IN_PROGRESS and project.actual_start is None:
@@ -444,6 +590,14 @@ async def change_status(
         # 终止必须留痕：原因写在项目上，前端详情可直接展示
         project.terminate_reason = (reason or "").strip()
     await session.flush()
+    await _log_inline(
+        session,
+        project_id=project_id,
+        title="变更项目状态",
+        reason=reason,
+        operator_id=operator_id,
+        pairs=[("项目状态", _status_text(before_status), _status_text(project.status))],
+    )
     await _notify_project(session, "PROJECT_STATUS_CHANGED", project, operator_id, reason)
     return project
 
@@ -589,8 +743,13 @@ async def create_stage(
     owner_id: int = 0,
     plan_start: str | None = None,
     plan_end: str | None = None,
+    operator_id: int = 0,
+    reason: str = "",
 ) -> PrjStage:
-    """创建阶段。"""
+    """创建阶段。
+
+    `operator_id` 为空表示系统批量创建（立项建初始阶段），此时不留变更记录。
+    """
     stage = PrjStage(
         project_id=project_id,
         stage_name=stage_name,
@@ -602,6 +761,24 @@ async def create_stage(
     )
     session.add(stage)
     await session.flush()
+    if operator_id:
+        await _log_inline(
+            session,
+            project_id=project_id,
+            title="新增阶段",
+            reason=reason,
+            operator_id=operator_id,
+            change_type="SCHEDULE",
+            biz_type="STAGE",
+            biz_id=stage.id,
+            pairs=[
+                ("阶段名称", "", stage.stage_name),
+                ("负责人", "", await _user_label(session, stage.owner_id)),
+                ("计划开始", "", _date_text(stage.plan_start)),
+                ("计划结束", "", _date_text(stage.plan_end)),
+                ("权重", "", f"{float(stage.weight or 0):.0f}"),
+            ],
+        )
     return stage
 
 
@@ -753,8 +930,10 @@ async def create_milestone(
     milestone_name: str,
     plan_date: str,
     owner_id: int = 0,
+    operator_id: int = 0,
+    reason: str = "",
 ) -> PrjMilestone:
-    """创建里程碑。"""
+    """创建里程碑；`operator_id` 非空时写「新增里程碑」留痕（`reason` 必填）。"""
     milestone = PrjMilestone(
         project_id=project_id,
         milestone_name=milestone_name,
@@ -763,6 +942,22 @@ async def create_milestone(
     )
     session.add(milestone)
     await session.flush()
+    if operator_id:
+        await _log_inline(
+            session,
+            project_id=project_id,
+            title="新增里程碑",
+            reason=reason,
+            operator_id=operator_id,
+            change_type="SCHEDULE",
+            biz_type="MILESTONE",
+            biz_id=milestone.id,
+            pairs=[
+                ("里程碑名称", "", milestone.milestone_name),
+                ("计划日期", "", _date_text(milestone.plan_date)),
+                ("负责人", "", await _user_label(session, milestone.owner_id)),
+            ],
+        )
     return milestone
 
 
@@ -789,9 +984,18 @@ async def update_stage(
     plan_end: str | None,
     owner_id: int = 0,
     operator_id: int = 0,
+    reason: str = "",
 ) -> PrjStage:
-    """编辑阶段（名称/权重/序号/负责人/计划起止）。"""
+    """编辑阶段（名称/权重/序号/负责人/计划起止）。
+
+    字段确有变化时写一条「编辑阶段」留痕，`reason` 必填。
+    """
     stage = await _get_stage(session, project_id, stage_id)
+    before_name = stage.stage_name
+    before_owner = await _user_label(session, stage.owner_id)
+    before_start = _date_text(stage.plan_start)
+    before_end = _date_text(stage.plan_end)
+    before_weight = f"{float(stage.weight or 0):.0f}"
     stage.stage_name = stage_name
     stage.weight = weight
     stage.seq = seq
@@ -803,13 +1007,34 @@ async def update_stage(
     stage.update_by = operator_id
     await session.flush()
     await recalc_progress(session, project_id)
+    await _log_inline(
+        session,
+        project_id=project_id,
+        title="编辑阶段",
+        reason=reason,
+        operator_id=operator_id,
+        change_type="SCHEDULE",
+        biz_type="STAGE",
+        biz_id=stage.id,
+        pairs=[
+            ("阶段名称", before_name, stage.stage_name),
+            ("负责人", before_owner, await _user_label(session, stage.owner_id)),
+            ("计划开始", before_start, _date_text(stage.plan_start)),
+            ("计划结束", before_end, _date_text(stage.plan_end)),
+            ("权重", before_weight, f"{float(stage.weight or 0):.0f}"),
+        ],
+    )
     return stage
 
 
 async def delete_stage(
-    session: AsyncSession, project_id: int, stage_id: int, operator_id: int = 0
+    session: AsyncSession,
+    project_id: int,
+    stage_id: int,
+    operator_id: int = 0,
+    reason: str = "",
 ) -> None:
-    """删除阶段（存在关联任务时拒绝，避免任务悬挂）。"""
+    """删除阶段（存在关联任务时拒绝，避免任务悬挂）；`reason` 必填。"""
     stage = await _get_stage(session, project_id, stage_id)
     count_stmt = select(func.count(PrjTask.id)).where(
         PrjTask.project_id == project_id,
@@ -818,10 +1043,22 @@ async def delete_stage(
     )
     if int((await session.execute(count_stmt)).scalar_one()) > 0:
         raise ConflictError("该阶段下仍有任务，请先移出或删除任务")
+    stage_name = stage.stage_name
     stage.deleted = 1
     stage.update_by = operator_id
     await session.flush()
     await recalc_progress(session, project_id)
+    await _log_inline(
+        session,
+        project_id=project_id,
+        title="删除阶段",
+        reason=reason,
+        operator_id=operator_id,
+        change_type="SCHEDULE",
+        biz_type="STAGE",
+        biz_id=stage_id,
+        pairs=[("阶段", stage_name, "已删除")],
+    )
 
 
 async def change_stage_status(
@@ -830,9 +1067,11 @@ async def change_stage_status(
     stage_id: int,
     target: str,
     operator_id: int = 0,
+    reason: str = "",
 ) -> PrjStage:
-    """推进阶段状态；完成前按参数校验节点交付文档（R-PRJ-06）。"""
+    """推进阶段状态；完成前按参数校验节点交付文档（R-PRJ-06）；`reason` 必填。"""
     stage = await _get_stage(session, project_id, stage_id)
+    before_status = stage.status
     status = assert_task_transit(stage.status, target)
     if status is TaskStatus.DONE:
         config = ConfigService(session)
@@ -850,6 +1089,17 @@ async def change_stage_status(
     stage.update_by = operator_id
     await session.flush()
     await recalc_progress(session, project_id)
+    await _log_inline(
+        session,
+        project_id=project_id,
+        title="变更阶段状态",
+        reason=reason,
+        operator_id=operator_id,
+        change_type="SCHEDULE",
+        biz_type="STAGE",
+        biz_id=stage_id,
+        pairs=[("阶段状态", str(before_status), str(stage.status))],
+    )
     return stage
 
 
@@ -862,25 +1112,60 @@ async def update_milestone(
     plan_date: str,
     owner_id: int = 0,
     operator_id: int = 0,
+    reason: str = "",
 ) -> PrjMilestone:
-    """编辑里程碑。"""
+    """编辑里程碑；字段确有变化时写「编辑里程碑」留痕（`reason` 必填）。"""
     milestone = await _get_milestone(session, project_id, milestone_id)
+    before_name = milestone.milestone_name
+    before_date = _date_text(milestone.plan_date)
+    before_owner = await _user_label(session, milestone.owner_id)
     milestone.milestone_name = milestone_name
     milestone.plan_date = plan_date
     milestone.owner_id = owner_id
     milestone.update_by = operator_id
     await session.flush()
+    await _log_inline(
+        session,
+        project_id=project_id,
+        title="编辑里程碑",
+        reason=reason,
+        operator_id=operator_id,
+        change_type="SCHEDULE",
+        biz_type="MILESTONE",
+        biz_id=milestone_id,
+        pairs=[
+            ("里程碑名称", before_name, milestone.milestone_name),
+            ("计划日期", before_date, _date_text(milestone.plan_date)),
+            ("负责人", before_owner, await _user_label(session, milestone.owner_id)),
+        ],
+    )
     return milestone
 
 
 async def delete_milestone(
-    session: AsyncSession, project_id: int, milestone_id: int, operator_id: int = 0
+    session: AsyncSession,
+    project_id: int,
+    milestone_id: int,
+    operator_id: int = 0,
+    reason: str = "",
 ) -> None:
-    """删除里程碑（软删）。"""
+    """删除里程碑（软删）；`reason` 必填。"""
     milestone = await _get_milestone(session, project_id, milestone_id)
+    milestone_name = milestone.milestone_name
     milestone.deleted = 1
     milestone.update_by = operator_id
     await session.flush()
+    await _log_inline(
+        session,
+        project_id=project_id,
+        title="删除里程碑",
+        reason=reason,
+        operator_id=operator_id,
+        change_type="SCHEDULE",
+        biz_type="MILESTONE",
+        biz_id=milestone_id,
+        pairs=[("里程碑", milestone_name, "已删除")],
+    )
 
 
 async def change_milestone_status(
@@ -889,9 +1174,11 @@ async def change_milestone_status(
     milestone_id: int,
     target: str,
     operator_id: int = 0,
+    reason: str = "",
 ) -> PrjMilestone:
-    """里程碑达成/延期/取消登记。"""
+    """里程碑达成/延期/取消登记；状态变化写留痕（`reason` 必填）。"""
     milestone = await _get_milestone(session, project_id, milestone_id)
+    before_status = milestone.status
     status = MilestoneStatus(target)
     if status is MilestoneStatus.PENDING and milestone.status not in {
         MilestoneStatus.DELAYED,
@@ -907,6 +1194,17 @@ async def change_milestone_status(
         milestone.delay_days = 0
     milestone.update_by = operator_id
     await session.flush()
+    await _log_inline(
+        session,
+        project_id=project_id,
+        title="变更里程碑状态",
+        reason=reason,
+        operator_id=operator_id,
+        change_type="SCHEDULE",
+        biz_type="MILESTONE",
+        biz_id=milestone_id,
+        pairs=[("里程碑状态", str(before_status), str(milestone.status))],
+    )
     return milestone
 
 

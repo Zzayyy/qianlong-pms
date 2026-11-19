@@ -19,8 +19,20 @@ from pms.change.rules import (
     build_chain,
     evaluate_level,
 )
-from pms.change.state import ApprovalStatus, ChangeNode, ChangeStatus, assert_transit
-from pms.common.exceptions import BizRuleError, ConflictError, ForbiddenError, NotFoundError
+from pms.change.state import (
+    ORIGIN_INLINE,
+    ApprovalStatus,
+    ChangeNode,
+    ChangeStatus,
+    assert_transit,
+)
+from pms.common.exceptions import (
+    BizRuleError,
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ParamError,
+)
 from pms.common.logging import get_logger
 from pms.core.context import AuthContext
 from pms.notice import mail as mail_service
@@ -123,6 +135,81 @@ async def next_change_code(session: AsyncSession, when: date | None = None) -> s
     )
     result = await session.execute(stmt)
     return f"{_CODE_PREFIX}-{year}-{int(result.scalar_one()) + 1:04d}"
+
+
+async def record_inline(
+    session: AsyncSession,
+    *,
+    project_id: int,
+    title: str,
+    reason: str,
+    items: list[dict[str, object]],
+    change_type: str = "OTHER",
+    biz_type: str = "PROJECT",
+    biz_id: int = 0,
+    operator_id: int = 0,
+) -> ChgRequest | None:
+    """记录一次「详情页编辑直接生效」的变更留痕（不阻断、不审批）。
+
+    实现要点：
+    - `items` 每项为 `{field_name, before_value, after_value}`；没有实际字段变化时
+      直接返回 None，既不落库也不校验原因，避免"打开弹窗点保存"也要求填理由；
+    - `reason` 必填：改了东西却说不出为什么改，台账就没有价值；
+    - 主单 `origin=INLINE`、`status=EFFECTIVE`，明细写 `t_chg_item`（`applied=1`），
+      与审批变更共用一张表，前端台账与项目详情一次查询即可看到全部记录。
+    """
+    changes = [
+        item
+        for item in items
+        if str(item.get("before_value") or "") != str(item.get("after_value") or "")
+    ]
+    if not changes:
+        return None
+    text = (reason or "").strip()
+    if not text:
+        raise ParamError("请填写变更原因")
+    project = await session.get(PrjProject, project_id)
+    if project is None or project.deleted:
+        raise NotFoundError("项目不存在")
+
+    content = "\n".join(
+        f"{item.get('field_name') or ''}：{item.get('before_value') or '空'} → "
+        f"{item.get('after_value') or '空'}"
+        for item in changes
+    )
+    request = ChgRequest(
+        request_code=await next_change_code(session),
+        project_id=project_id,
+        change_type=change_type,
+        title=(title or "编辑项目信息")[:200],
+        reason=text[:2000],
+        content=content[:4000],
+        origin=ORIGIN_INLINE,
+        status=ChangeStatus.EFFECTIVE,
+        submitter_id=operator_id,
+        pm_id=project.pm_id,
+        submit_time=date.today().isoformat(),
+        close_time=date.today().isoformat(),
+        create_by=operator_id,
+    )
+    session.add(request)
+    await session.flush()
+    for item in changes:
+        session.add(
+            ChgItem(
+                request_id=request.id,
+                item_type=biz_type,
+                action=str(item.get("action") or "UPDATE"),
+                biz_id=int(item.get("biz_id") or biz_id or 0),
+                field_name=str(item.get("field_name") or "")[:32],
+                before_value=str(item.get("before_value") or "")[:500],
+                after_value=str(item.get("after_value") or "")[:500],
+                applied=1,
+            )
+        )
+    await session.flush()
+    logger.info("内联变更已留痕：%s %s", request.request_code, request.title)
+    return request
 
 
 async def create_request(
@@ -469,11 +556,14 @@ def _request_filters(
     level: str = "",
     keyword: str = "",
     only_emergency: bool = False,
+    origin: str = "",
 ) -> list[object]:
     """变更台账查询条件（列表与计数共用，避免口径不一致）。"""
     clauses: list[object] = []
     if project_id:
         clauses.append(ChgRequest.project_id == project_id)
+    if origin:
+        clauses.append(ChgRequest.origin == origin)
     if status:
         # 支持逗号分组，便于前端用一段式页签表达「待审批 = SUBMITTED+ASSESSED」
         values = [item.strip() for item in status.split(",") if item.strip()]
@@ -504,11 +594,14 @@ async def list_requests(
     level: str = "",
     keyword: str = "",
     only_emergency: bool = False,
+    origin: str = "",
 ) -> list[ChgRequest]:
-    """变更台账列表（可按项目/状态/类型/级别/关键字过滤）。"""
+    """变更台账列表（可按项目/状态/类型/级别/关键字/来源过滤）。"""
     stmt = select(ChgRequest).where(
         ChgRequest.deleted == 0,
-        *_request_filters(project_id, status, change_type, level, keyword, only_emergency),
+        *_request_filters(
+            project_id, status, change_type, level, keyword, only_emergency, origin
+        ),
     )
     stmt = stmt.order_by(ChgRequest.id.desc()).offset(offset).limit(limit)
     result = await session.execute(stmt)
@@ -524,11 +617,14 @@ async def count_requests(
     level: str = "",
     keyword: str = "",
     only_emergency: bool = False,
+    origin: str = "",
 ) -> int:
     """变更台账总数（过滤条件与列表一致）。"""
     stmt = select(func.count(ChgRequest.id)).where(
         ChgRequest.deleted == 0,
-        *_request_filters(project_id, status, change_type, level, keyword, only_emergency),
+        *_request_filters(
+            project_id, status, change_type, level, keyword, only_emergency, origin
+        ),
     )
     result = await session.execute(stmt)
     return int(result.scalar_one())

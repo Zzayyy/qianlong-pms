@@ -78,11 +78,15 @@ export const createStage = (id: string, data: Record<string, unknown>) =>
 export const updateStage = (id: string, stageId: string, data: Record<string, unknown>) =>
   put<{ id: string }>(`/projects/${id}/stages/${stageId}`, data)
 
-export const deleteStage = (id: string, stageId: string) =>
-  del<unknown>(`/projects/${id}/stages/${stageId}`)
+/** 删除阶段：`reason` 必填，写入项目变更记录（DELETE 走查询串）。 */
+export const deleteStage = (id: string, stageId: string, reason = '') =>
+  del<unknown>(`/projects/${id}/stages/${stageId}`, reason ? { reason } : undefined)
 
-export const stageStatus = (id: string, stageId: string, target: string) =>
-  put<{ id: string; status: string }>(`/projects/${id}/stages/${stageId}/status`, { target })
+export const stageStatus = (id: string, stageId: string, target: string, reason = '') =>
+  put<{ id: string; status: string }>(`/projects/${id}/stages/${stageId}/status`, {
+    target,
+    ...(reason ? { reason } : {})
+  })
 
 export const listTasks = (id: string) => get<Record<string, unknown>[]>(`/projects/${id}/tasks`)
 
@@ -109,12 +113,14 @@ export const createMilestone = (id: string, data: Record<string, unknown>) =>
 export const updateMilestone = (id: string, milestoneId: string, data: Record<string, unknown>) =>
   put<{ id: string }>(`/projects/${id}/milestones/${milestoneId}`, data)
 
-export const deleteMilestone = (id: string, milestoneId: string) =>
-  del<unknown>(`/projects/${id}/milestones/${milestoneId}`)
+/** 删除里程碑：`reason` 必填，写入项目变更记录（DELETE 走查询串）。 */
+export const deleteMilestone = (id: string, milestoneId: string, reason = '') =>
+  del<unknown>(`/projects/${id}/milestones/${milestoneId}`, reason ? { reason } : undefined)
 
-export const milestoneStatus = (id: string, milestoneId: string, target: string) =>
+export const milestoneStatus = (id: string, milestoneId: string, target: string, reason = '') =>
   put<{ id: string; status: string }>(`/projects/${id}/milestones/${milestoneId}/status`, {
     target,
+    ...(reason ? { reason } : {})
   })
 
 /** 项目总监（可多人，变更审批会签）。 */
@@ -167,8 +173,12 @@ export const addMember = (id: string, data: Record<string, unknown>) =>
 export const removeMember = (id: string, memberId: string) =>
   del<null>(`/projects/${id}/members/${memberId}`)
 
-export const changeProjectPm = (id: string, pmId: string) =>
-  put<{ id: string; pmId: string }>(`/projects/${id}/pm`, { pmId })
+/** 变更项目负责人：`reason` 必填，写入项目变更记录。 */
+export const changeProjectPm = (id: string, pmId: string, reason = '') =>
+  put<{ id: string; pmId: string }>(`/projects/${id}/pm`, {
+    pmId,
+    ...(reason ? { reason } : {})
+  })
 
 /* ------------------------------ 变更 ------------------------------ */
 

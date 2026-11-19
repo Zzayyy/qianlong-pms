@@ -21,7 +21,10 @@ class ChgRequest(Base, CommonMixin):
     reason: Mapped[str] = mapped_column(Text, default="")
     content: Mapped[str] = mapped_column(Text, default="")
     expect_result: Mapped[str] = mapped_column(Text, default="")
+    #: 变更来源渠道：INTERNAL / EXTERNAL（申请单自带的业务来源，与 `origin` 不同）
     source: Mapped[str] = mapped_column(String(16), default="INTERNAL")
+    #: 记录类型：APPROVAL=走审批链的变更申请；INLINE=详情页编辑直接生效的留痕
+    origin: Mapped[str] = mapped_column(String(16), default="APPROVAL")
     level: Mapped[str] = mapped_column(String(8), default="")
     status: Mapped[str] = mapped_column(String(32), default=ChangeStatus.DRAFT)
     is_emergency: Mapped[int] = mapped_column(Integer, default=0)

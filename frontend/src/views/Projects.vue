@@ -595,6 +595,29 @@ const applySuggestedStart = () => {
   ElMessage.success(`已填入建议开始日 ${suggest}`)
 }
 
+/**
+ * 详情页编辑统一收集「变更原因」：原因必填，写入项目变更记录便于追溯。
+ * 返回空串表示用户取消，调用方直接 return。
+ */
+const askChangeReason = async (title: string): Promise<string> => {
+  try {
+    const result = await ElMessageBox.prompt(
+      '原因会记入本项目的变更记录，便于后续追溯',
+      title,
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        inputType: 'textarea',
+        inputPlaceholder: '变更原因（必填）',
+        inputValidator: (value: string) => (value && value.trim() ? true : '请填写变更原因')
+      }
+    )
+    return String(result.value || '').trim()
+  } catch {
+    return ''
+  }
+}
+
 const saveStage = async () => {
   if (!stageForm.value.stageName.trim()) {
     ElMessage.warning('请填写阶段名称')
@@ -604,13 +627,16 @@ const saveStage = async () => {
     ElMessage.warning('计划结束不能早于计划开始')
     return
   }
+  const reason = await askChangeReason(stageForm.value.id ? '编辑阶段' : '新增阶段')
+  if (!reason) return
   const payload = {
     stageName: stageForm.value.stageName,
     ownerId: stageForm.value.ownerId || 0,
     weight: Number(stageForm.value.weight || 0),
     seq: Number(stageForm.value.seq || 1),
     planStart: stageForm.value.planStart || null,
-    planEnd: stageForm.value.planEnd || null
+    planEnd: stageForm.value.planEnd || null,
+    reason
   }
   if (stageForm.value.id) {
     await updateStage(detail.value.id, stageForm.value.id, payload)
@@ -623,32 +649,50 @@ const saveStage = async () => {
 }
 
 const startStage = async (row: any) => {
-  await stageStatus(detail.value.id, row.id, 'IN_PROGRESS')
+  const reason = await askChangeReason(`开始阶段「${row.stageName}」`)
+  if (!reason) return
+  await stageStatus(detail.value.id, row.id, 'IN_PROGRESS', reason)
   stages.value = await listStages(detail.value.id)
 }
 
 const finishStage = async (row: any) => {
-  await stageStatus(detail.value.id, row.id, 'DONE')
+  const reason = await askChangeReason(`完成阶段「${row.stageName}」`)
+  if (!reason) return
+  await stageStatus(detail.value.id, row.id, 'DONE', reason)
   ElMessage.success('阶段已完成')
   stages.value = await listStages(detail.value.id)
   detail.value = await projectDetail(detail.value.id)
 }
 
 const removeStage = async (row: any) => {
-  await ElMessageBox.confirm(`确认删除阶段「${row.stageName}」？`, '提示', { type: 'warning' })
-  await deleteStage(detail.value.id, row.id)
+  try {
+    await ElMessageBox.confirm(`确认删除阶段「${row.stageName}」？`, '提示', { type: 'warning' })
+  } catch {
+    return
+  }
+  const reason = await askChangeReason(`删除阶段「${row.stageName}」`)
+  if (!reason) return
+  await deleteStage(detail.value.id, row.id, reason)
   ElMessage.success('阶段已删除')
   stages.value = await listStages(detail.value.id)
 }
 
 const achieveMilestone = async (row: any) => {
-  await milestoneStatus(detail.value.id, row.id, 'REACHED')
+  const reason = await askChangeReason(`里程碑达成「${row.milestoneName}」`)
+  if (!reason) return
+  await milestoneStatus(detail.value.id, row.id, 'REACHED', reason)
   milestones.value = await listMilestones(detail.value.id)
 }
 
 const removeMilestone = async (row: any) => {
-  await ElMessageBox.confirm(`确认删除里程碑「${row.milestoneName}」？`, '提示', { type: 'warning' })
-  await deleteMilestone(detail.value.id, row.id)
+  try {
+    await ElMessageBox.confirm(`确认删除里程碑「${row.milestoneName}」？`, '提示', { type: 'warning' })
+  } catch {
+    return
+  }
+  const reason = await askChangeReason(`删除里程碑「${row.milestoneName}」`)
+  if (!reason) return
+  await deleteMilestone(detail.value.id, row.id, reason)
   milestones.value = await listMilestones(detail.value.id)
 }
 
@@ -917,7 +961,17 @@ const refreshDetail = async () => {
 }
 
 const doChangePm = async () => {
-  await changeProjectPm(detail.value.id, newPmId.value)
+  if (!newPmId.value) {
+    ElMessage.warning('请选择新的项目经理')
+    return
+  }
+  if (String(newPmId.value) === String(detail.value.pmId || '')) {
+    ElMessage.info('项目经理未变化')
+    return
+  }
+  const reason = await askChangeReason('变更项目经理')
+  if (!reason) return
+  await changeProjectPm(detail.value.id, newPmId.value, reason)
   ElMessage.success('项目经理已变更，原项目经理已转为普通成员')
   await refreshDetail()
   await load()
@@ -941,9 +995,11 @@ const basicForm = ref<{
 const notifySaving = ref(false)
 const toggleNotify = async (value: any) => {
   const enabled = Boolean(value)
+  const reason = await askChangeReason(enabled ? '开启自动通知' : '关闭自动通知')
+  if (!reason) return
   notifySaving.value = true
   try {
-    await updateProject(detail.value.id, { notifyEnabled: enabled })
+    await updateProject(detail.value.id, { notifyEnabled: enabled, reason })
     detail.value.notifyEnabled = enabled
     ElMessage.success(
       enabled ? '已开启本项目自动通知' : '已关闭本项目自动通知，之后不再发送该项目邮件'
@@ -970,6 +1026,8 @@ const saveBasic = async () => {
     ElMessage.warning('计划开始日期不能晚于计划结束日期')
     return
   }
+  const reason = await askChangeReason('编辑项目基础信息')
+  if (!reason) return
   basicSaving.value = true
   try {
     await updateProject(detail.value.id, {
@@ -977,7 +1035,8 @@ const saveBasic = async () => {
       contractAmount: Number(contractAmount || 0),
       // 显式传 null 表示清空计划日期，让项目回到「未排期」
       planStart: planStart || null,
-      planEnd: planEnd || null
+      planEnd: planEnd || null,
+      reason
     })
     ElMessage.success('项目信息已更新')
     basicVisible.value = false
@@ -2720,7 +2779,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             </el-table>
           </el-tab-pane>
 
-          <el-tab-pane v-if="store.has('change:view')" label="周期变更" name="changes" lazy>
+          <el-tab-pane v-if="store.has('change:view')" label="变更记录" name="changes" lazy>
             <ChangeBoard
               :project-id="String(detail.id || '')"
               :project-name="String(detail.projectName || '')"

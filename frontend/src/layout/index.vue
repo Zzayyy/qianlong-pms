@@ -82,7 +82,7 @@ const navSections: NavSection[] = [
     label: '项目',
     items: [
       { path: '/projects', label: '项目周期', icon: FolderKanban, permission: 'project:view' },
-      { path: '/changes', label: '变更管理', icon: GitPullRequest, permission: 'change:view' }
+      { path: '/changes', label: '变更记录', icon: GitPullRequest, permission: 'change:view' }
     ]
   },
   {

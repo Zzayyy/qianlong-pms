@@ -109,6 +109,7 @@ class ProjectBasicIn(BaseModel):
     """项目基础信息维护入参（立项后仍可调整的字段，只传需要改的项）。
 
     `planStart` / `planEnd` 传 `null` 表示清空计划日期（改回「未排期」）。
+    `reason` 为必填的变更原因（字段确有变化时校验），用于生成变更留痕。
     """
 
     deptId: int | None = Field(default=None, ge=0)
@@ -117,6 +118,7 @@ class ProjectBasicIn(BaseModel):
     planEnd: str | None = None
     # 项目级「自动通知」开关：false 关闭该项目所有业务邮件
     notifyEnabled: bool | None = None
+    reason: str = Field(default="", max_length=500)
 
 
 class StatusIn(BaseModel):
@@ -135,12 +137,15 @@ class StageIn(BaseModel):
     seq: int = 1
     planStart: str | None = None
     planEnd: str | None = None
+    # 变更原因（新增/编辑阶段必填，写入变更记录）
+    reason: str = Field(default="", max_length=500)
 
 
 class StageStatusIn(BaseModel):
     """阶段状态入参（NOT_STARTED / IN_PROGRESS / DONE）。"""
 
     target: str = Field(min_length=3, max_length=16)
+    reason: str = Field(default="", max_length=500)
 
 
 class TaskIn(BaseModel):
@@ -169,6 +174,8 @@ class MilestoneIn(BaseModel):
     milestoneName: str = Field(min_length=1, max_length=128)
     planDate: str
     ownerId: int = 0
+    # 变更原因（新增/编辑里程碑必填，写入变更记录）
+    reason: str = Field(default="", max_length=500)
 
 
 class MilestoneUpdateIn(MilestoneIn):
@@ -179,6 +186,7 @@ class MilestoneStatusIn(BaseModel):
     """里程碑状态入参。"""
 
     target: str = Field(min_length=3, max_length=16)
+    reason: str = Field(default="", max_length=500)
 
 
 class DirectorsIn(BaseModel):
@@ -200,6 +208,7 @@ class PmIn(BaseModel):
     """变更负责人入参。"""
 
     pmId: int
+    reason: str = Field(default="", max_length=500)
 
 
 @router.post("", summary="创建项目")
@@ -369,6 +378,7 @@ async def update_project(
         plan_end=body.planEnd if "planEnd" in provided else service.UNSET,
         notify_enabled=body.notifyEnabled,
         operator_id=context.user_id,
+        reason=body.reason,
     )
     await session.commit()
     names = await _user_names(session, {updated.pm_id})
@@ -483,6 +493,8 @@ async def create_stage(
         owner_id=body.ownerId,
         plan_start=body.planStart,
         plan_end=body.planEnd,
+        operator_id=context.user_id,
+        reason=body.reason,
     )
     await session.commit()
     return ok({"id": stage.id})
@@ -510,6 +522,7 @@ async def update_stage(
         plan_start=body.planStart,
         plan_end=body.planEnd,
         operator_id=context.user_id,
+        reason=body.reason,
     )
     await session.commit()
     return ok({"id": stage.id, "status": stage.status})
@@ -521,11 +534,14 @@ async def delete_stage(
     stage_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:stage:edit"))],
+    reason: Annotated[str, Query(max_length=500)] = "",
 ) -> object:
-    """删除阶段；阶段下仍有任务时拒绝。"""
+    """删除阶段；阶段下仍有任务时拒绝；`reason` 必填（写入变更记录）。"""
     project = await service.get_project(session, project_id)
     await ensure_project_manager(session, context, project)
-    await service.delete_stage(session, project_id, stage_id, context.user_id)
+    await service.delete_stage(
+        session, project_id, stage_id, context.user_id, reason=reason
+    )
     await session.commit()
     return ok(message="阶段已删除")
 
@@ -542,7 +558,7 @@ async def change_stage_status(
     project = await service.get_project(session, project_id)
     await ensure_project_manager(session, context, project)
     stage = await service.change_stage_status(
-        session, project_id, stage_id, body.target, context.user_id
+        session, project_id, stage_id, body.target, context.user_id, reason=body.reason
     )
     await session.commit()
     return ok({"id": stage.id, "status": stage.status})
@@ -723,7 +739,13 @@ async def create_milestone(
     project = await service.get_project(session, project_id)
     await ensure_project_manager(session, context, project)
     milestone = await service.create_milestone(
-        session, project_id, body.milestoneName, body.planDate, owner_id=body.ownerId
+        session,
+        project_id,
+        body.milestoneName,
+        body.planDate,
+        owner_id=body.ownerId,
+        operator_id=context.user_id,
+        reason=body.reason,
     )
     await session.commit()
     return ok({"id": milestone.id})
@@ -748,6 +770,7 @@ async def update_milestone(
         plan_date=body.planDate,
         owner_id=body.ownerId,
         operator_id=context.user_id,
+        reason=body.reason,
     )
     await session.commit()
     return ok({"id": milestone.id, "status": milestone.status})
@@ -759,11 +782,14 @@ async def delete_milestone(
     milestone_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:stage:edit"))],
+    reason: Annotated[str, Query(max_length=500)] = "",
 ) -> object:
-    """删除里程碑（软删）。"""
+    """删除里程碑（软删）；`reason` 必填（写入变更记录）。"""
     project = await service.get_project(session, project_id)
     await ensure_project_manager(session, context, project)
-    await service.delete_milestone(session, project_id, milestone_id, context.user_id)
+    await service.delete_milestone(
+        session, project_id, milestone_id, context.user_id, reason=reason
+    )
     await session.commit()
     return ok(message="里程碑已删除")
 
@@ -780,7 +806,7 @@ async def change_milestone_status(
     project = await service.get_project(session, project_id)
     await ensure_project_manager(session, context, project)
     milestone = await service.change_milestone_status(
-        session, project_id, milestone_id, body.target, context.user_id
+        session, project_id, milestone_id, body.target, context.user_id, reason=body.reason
     )
     await session.commit()
     return ok({"id": milestone.id, "status": milestone.status})
@@ -865,7 +891,7 @@ async def change_pm(
     if not (can_edit or is_owner) and body.pmId != context.user_id:
         raise ForbiddenError("成员仅可将项目认领给自己")
     updated = await service.change_project_pm(
-        session, project_id, body.pmId, operator_id=context.user_id
+        session, project_id, body.pmId, operator_id=context.user_id, reason=body.reason
     )
     await session.commit()
     return ok({"id": updated.id, "pmId": updated.pm_id})

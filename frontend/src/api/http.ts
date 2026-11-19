@@ -90,9 +90,9 @@ export async function put<T>(url: string, data?: unknown): Promise<T> {
   return response.data.data
 }
 
-/** DELETE 并返回 `data`。 */
-export async function del<T>(url: string): Promise<T> {
-  const response = await http.delete<ApiEnvelope<T>>(url)
+/** DELETE 并返回 `data`（`params` 走查询串，用于删除原因等）。 */
+export async function del<T>(url: string, params?: Record<string, unknown>): Promise<T> {
+  const response = await http.delete<ApiEnvelope<T>>(url, { params })
   return response.data.data
 }
 

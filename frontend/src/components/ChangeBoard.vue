@@ -92,7 +92,8 @@ const statusLabels: Record<string, string> = {
   VERIFIED: '已验证',
   CLOSED: '已关闭',
   REJECTED: '已驳回',
-  WITHDRAWN: '已撤回'
+  WITHDRAWN: '已撤回',
+  EFFECTIVE: '已生效'
 }
 const statusTags: Record<string, TagType> = {
   DRAFT: 'info',
@@ -103,8 +104,11 @@ const statusTags: Record<string, TagType> = {
   VERIFIED: 'success',
   CLOSED: 'info',
   REJECTED: 'danger',
-  WITHDRAWN: 'info'
+  WITHDRAWN: 'info',
+  EFFECTIVE: 'success'
 }
+/** 记录类型：审批变更（走审批链） / 编辑留痕（详情页编辑直接生效）。 */
+const originLabels: Record<string, string> = { APPROVAL: '审批变更', INLINE: '编辑留痕' }
 const levelTags: Record<string, TagType> = { L1: 'info', L2: 'warning', L3: 'danger' }
 const levelLabels: Record<string, string> = { L1: 'L1 一般', L2: 'L2 重要', L3: 'L3 重大' }
 const nodeLabels: Record<string, string> = {
@@ -137,6 +141,7 @@ const approvalLabels: Record<string, string> = {
 
 const typeText = (value: string) => typeLabels[value] || value || '—'
 const statusText = (value: string) => statusLabels[value] || value || '—'
+const originText = (value: string) => originLabels[value] || '审批变更'
 const nodeText = (value: string) => nodeLabels[value] || value || '—'
 const userName = (id: string | number) => {
   const hit = users.value.find((item) => String(item.id) === String(id))
@@ -345,6 +350,8 @@ const opinion = ref('')
 
 const status = computed(() => String(detail.value?.request?.status || ''))
 const request = computed(() => detail.value?.request || {})
+/** 编辑留痕：详情页编辑直接生效，没有审批链与影响评估。 */
+const isInline = computed(() => String(request.value?.origin || '') === 'INLINE')
 const canEditSchedule = computed(
   () => canCreate.value && ['DRAFT', 'SUBMITTED'].includes(status.value)
 )
@@ -597,7 +604,7 @@ const waitApprove = computed(
 )
 
 const canMarkEmergency = computed(
-  () => !closed.value && canExecute.value && !request.value.isEmergency
+  () => !isInline.value && !closed.value && canExecute.value && !request.value.isEmergency
 )
 
 const emergencyText = computed(() => {
@@ -607,7 +614,7 @@ const emergencyText = computed(() => {
 })
 
 /* ------------------------------ 入口与路由参数 ------------------------------ */
-/** 内嵌时不提供新建入口，统一跳回变更管理（避免同一功能两个创建入口）。 */
+/** 内嵌时不提供新建入口，统一跳回变更记录（避免同一功能两个创建入口）。 */
 const goCreateInChanges = () => {
   if (!props.projectId) return
   router.push({ path: '/changes', query: { projectId: props.projectId, create: '1' } })
@@ -707,7 +714,7 @@ watch(
             class="pms-create-btn"
             @click="openCreate"
           >
-            新建变更
+            发起审批变更
           </el-button>
           <el-button
             v-if="canCreate && embedded"
@@ -716,7 +723,7 @@ watch(
             class="pms-create-btn"
             @click="goCreateInChanges"
           >
-            去变更管理新建
+            去变更记录发起
           </el-button>
         </div>
       </div>
@@ -765,6 +772,7 @@ watch(
             <div class="cell-sub">
               {{ row.requestCode }}
               <template v-if="!embedded && row.projectName"> · {{ row.projectName }}</template>
+              · {{ originText(row.origin) }}
             </div>
           </template>
         </el-table-column>
@@ -815,7 +823,7 @@ watch(
         <template #empty>
           <el-empty
             :description="
-              embedded ? '本项目还没有变更申请，可前往变更管理发起' : '当前筛选下没有变更单'
+              embedded ? '本项目还没有变更记录；详情页编辑会自动留痕，重大变更可发起审批' : '当前筛选下没有变更记录'
             "
             :image-size="76"
           >
@@ -826,7 +834,7 @@ watch(
               class="pms-create-btn"
               @click="goCreateInChanges"
             >
-              去变更管理新建
+              去变更记录发起
             </el-button>
           </el-empty>
         </template>
@@ -1010,14 +1018,14 @@ watch(
             </div>
             <div class="detail-tags">
               <el-tag v-if="request.isEmergency" type="danger" effect="plain">紧急</el-tag>
-              <el-tag :type="levelTags[request.level] || 'info'" effect="plain">
+              <el-tag v-if="!isInline" :type="levelTags[request.level] || 'info'" effect="plain">
                 {{ levelLabels[request.level] || '未定级' }}
               </el-tag>
               <el-tag :type="statusTags[request.status] || 'info'">{{ statusText(request.status) }}</el-tag>
             </div>
           </div>
 
-          <div class="metrics">
+          <div v-if="!isInline" class="metrics">
             <div class="metric">
               <span>工期影响</span>
               <b>{{ Number(request.scheduleImpactDays || 0) }} 天</b>
@@ -1059,7 +1067,7 @@ watch(
             </div>
           </section>
 
-          <section class="detail-section">
+          <section v-if="!isInline" class="detail-section">
             <div class="section-head">
               <h4>周期排期</h4>
               <el-button v-if="canEditSchedule" link type="primary" @click="scheduleEditing = !scheduleEditing">
@@ -1135,7 +1143,10 @@ watch(
             </div>
           </section>
 
-          <section v-if="status === 'SUBMITTED' || status === 'DRAFT'" class="detail-section">
+          <section
+            v-if="!isInline && (status === 'SUBMITTED' || status === 'DRAFT')"
+            class="detail-section"
+          >
             <div class="section-head">
               <h4>六维影响评估</h4>
             </div>
@@ -1183,7 +1194,7 @@ watch(
             </div>
           </section>
 
-          <section class="detail-section">
+          <section v-if="!isInline" class="detail-section">
             <div class="section-head">
               <h4>审批意见</h4>
             </div>
@@ -1197,7 +1208,7 @@ watch(
             />
           </section>
 
-          <section class="detail-section">
+          <section v-if="!isInline" class="detail-section">
             <div class="section-head">
               <h4>审批链</h4>
               <span class="section-hint inline">第一节点为项目总监会签，全部通过才进入 PMO；L3 再经公司领导</span>
@@ -1227,7 +1238,7 @@ watch(
             </el-table>
           </section>
 
-          <section class="detail-section">
+          <section v-if="!isInline" class="detail-section">
             <div class="section-head">
               <h4>影响评估明细</h4>
             </div>
@@ -1253,10 +1264,16 @@ watch(
 
           <section class="detail-section">
             <div class="section-head">
-              <h4>影响项</h4>
-              <span class="section-hint inline">审批通过后自动落库，记录前后值</span>
+              <h4>{{ isInline ? '变更明细' : '影响项' }}</h4>
+              <span class="section-hint inline">
+                {{ isInline ? '编辑时自动记录字段前后值' : '审批通过后自动落库，记录前后值' }}
+              </span>
             </div>
-            <el-table :data="detail.items || []" size="small" empty-text="无影响项">
+            <el-table
+              :data="detail.items || []"
+              size="small"
+              :empty-text="isInline ? '无字段变化' : '无影响项'"
+            >
               <el-table-column prop="itemType" label="对象" width="100" />
               <el-table-column prop="fieldName" label="字段" width="100" />
               <el-table-column prop="beforeValue" label="原值" min-width="120" />

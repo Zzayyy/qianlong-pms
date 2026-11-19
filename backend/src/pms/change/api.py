@@ -19,7 +19,7 @@ from pms.org.models import SysUser
 from pms.project.models import PrjProject
 from pms.system.config_service import ConfigService
 
-router = APIRouter(prefix="/api/v1/changes", tags=["变更管理"])
+router = APIRouter(prefix="/api/v1/changes", tags=["变更记录"])
 
 #: 周期排期角色（如开发 / 测试）默认值，可在「规则参数」中调整 `change.schedule.roles`
 _DEFAULT_SCHEDULE_ROLES: tuple[str, ...] = ("开发", "测试", "实施", "运维")
@@ -97,6 +97,8 @@ def _request_out(
         "projectName": project_name,
         "scheduleRoles": schedule_roles,
         "changeType": request.change_type,
+        # APPROVAL=走审批链；INLINE=详情页编辑直接生效的留痕
+        "origin": request.origin,
         "title": request.title,
         "reason": request.reason,
         "content": request.content,
@@ -200,13 +202,15 @@ async def list_changes(
     level: Annotated[str, Query()] = "",
     keyword: Annotated[str, Query()] = "",
     emergency: Annotated[bool, Query()] = False,
+    origin: Annotated[str, Query(pattern="^(APPROVAL|INLINE)$")] = "",
 ) -> object:
-    """分页查询变更台账；支持项目 / 状态 / 类型 / 级别 / 关键字 / 紧急筛选。"""
+    """分页查询变更记录；支持项目 / 状态 / 类型 / 级别 / 关键字 / 紧急 / 来源筛选。"""
     filters = {
         "change_type": changeType,
         "level": level,
         "keyword": keyword,
         "only_emergency": emergency,
+        "origin": origin,
     }
     total = await service.count_requests(session, projectId, status, **filters)
     items = await service.list_requests(

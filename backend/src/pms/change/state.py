@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Final
 
 from pms.common.exceptions import StateInvalidError
 
@@ -22,6 +23,8 @@ class ChangeStatus(StrEnum):
     CLOSED = "CLOSED"
     REJECTED = "REJECTED"
     WITHDRAWN = "WITHDRAWN"
+    #: 详情页编辑直接生效的留痕记录（无审批链）
+    EFFECTIVE = "EFFECTIVE"
 
 
 class ApprovalStatus(StrEnum):
@@ -65,7 +68,13 @@ CHANGE_TRANSITIONS: dict[ChangeStatus, tuple[ChangeStatus, ...]] = {
     ChangeStatus.CLOSED: (),
     ChangeStatus.REJECTED: (),
     ChangeStatus.WITHDRAWN: (),
+    # 编辑留痕是「已生效」的终态，不再流转
+    ChangeStatus.EFFECTIVE: (),
 }
+
+#: 记录类型（`ChgRequest.origin`）
+ORIGIN_APPROVAL: Final[str] = "APPROVAL"
+ORIGIN_INLINE: Final[str] = "INLINE"
 
 
 def can_transit(current: ChangeStatus | str, target: ChangeStatus | str) -> bool:
