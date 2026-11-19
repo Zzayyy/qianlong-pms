@@ -56,6 +56,8 @@ const syncWidth = () => {
 const projects = ref<any[]>([])
 const users = ref<any[]>([])
 const scheduleRoles = ref<string[]>(['开发', '测试'])
+/** 是否开放「发起变更申请」：关闭时本页只做台账（详情页修改自动留痕） */
+const approvalEnabled = ref(false)
 
 /** 可发起变更的项目状态（后端下发 R-CHG-02 口径，前端只用于过滤下拉）。 */
 const projectStatuses = ref<string[]>(['APPROVED', 'IN_PROGRESS', 'SUSPENDED'])
@@ -171,6 +173,7 @@ const loadOptions = async () => {
     const data: ChangeOptions = await changeOptions()
     scheduleRoles.value = data.scheduleRoles?.length ? data.scheduleRoles : scheduleRoles.value
     if (data.projectStatuses?.length) projectStatuses.value = data.projectStatuses
+    approvalEnabled.value = data.approvalEnabled === true
   } catch {
     /* 选项失败不阻断主流程，保留默认角色 */
   }
@@ -706,9 +709,10 @@ watch(
           <span class="list-total">
             <template v-if="embedded && projectName">{{ projectName }} · </template>共 {{ total }} 条
           </span>
+          <span v-if="!approvalEnabled" class="list-total">仅记录项目修改（审批变更未启用）</span>
           <el-button size="small" :loading="loading" @click="load">刷新</el-button>
           <el-button
-            v-if="canCreate && !embedded"
+            v-if="approvalEnabled && canCreate && !embedded"
             type="primary"
             :icon="Plus"
             class="pms-create-btn"
@@ -717,7 +721,7 @@ watch(
             发起审批变更
           </el-button>
           <el-button
-            v-if="canCreate && embedded"
+            v-if="approvalEnabled && canCreate && embedded"
             type="primary"
             :icon="Plus"
             class="pms-create-btn"
@@ -828,7 +832,7 @@ watch(
             :image-size="76"
           >
             <el-button
-              v-if="embedded && canCreate"
+              v-if="approvalEnabled && embedded && canCreate"
               type="primary"
               :icon="Plus"
               class="pms-create-btn"

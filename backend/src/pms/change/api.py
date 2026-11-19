@@ -244,7 +244,8 @@ async def change_options(
     角色可在「规则参数」中调整；`projectStatuses` 供前端过滤「新建变更」的
     项目下拉，避免用户填完表单才发现项目处于草稿等不可变更状态（R-CHG-02）。
     """
-    raw = await ConfigService(session).get_str("change.schedule.roles")
+    config = ConfigService(session)
+    raw = await config.get_str("change.schedule.roles")
     roles = [item.strip() for item in (raw or "").split(",") if item.strip()]
     return ok(
         {
@@ -253,6 +254,8 @@ async def change_options(
             "dimensions": [item.value for item in ImpactDimension],
             "statuses": [item.value for item in ChangeStatus],
             "projectStatuses": service.allowed_project_statuses(),
+            # false=只做变更台账（详情页修改自动留痕），前端隐藏「发起变更申请」入口
+            "approvalEnabled": await config.get_bool("change.approval.enabled"),
         }
     )
 

@@ -212,6 +212,8 @@ export interface ChangeOptions {
   statuses: string[]
   /** 可发起变更的项目状态（R-CHG-02，后端下发，避免前端硬编码漂移）。 */
   projectStatuses: string[]
+  /** 是否开放「发起变更申请」入口；false 时变更记录页只做台账 */
+  approvalEnabled?: boolean
 }
 
 export const listChanges = (params: Record<string, unknown>) =>
