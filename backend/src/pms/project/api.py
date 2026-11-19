@@ -68,6 +68,9 @@ def _project_out(project: PrjProject, pm_name: str = "") -> dict[str, object]:
         "planStart": project.plan_start,
         "planEnd": project.plan_end,
         "approvalLevel": project.approval_level,
+        # 补审批状态：0 不涉及，1 待补审批，2 补审批被驳回（项目仍在执行）
+        "retroApproval": int(project.retro_approval or 0),
+        "retroDue": project.retro_due,
         "terminateReason": project.terminate_reason,
         "notifyEnabled": project.notify_enabled is None or int(project.notify_enabled) == 1,
     }
@@ -103,9 +106,12 @@ class ProjectIn(BaseModel):
     members: list[MemberIn] = Field(default_factory=list)
     stages: list[ProjectStageIn] = Field(default_factory=list)
     directorIds: list[int] = Field(default_factory=list)
-    # None=沿用系统参数；显式传入时按项目决定（false 即「直接立项、审批前可动手」）
+    # 创建方式：NONE=直接立项（不审批）、RETRO=先开工后补审批、PRE=先审批后开工
+    # 不传则回落到 needApproval（兼容旧前端）/ 系统参数
+    approvalMode: str | None = Field(default=None, pattern="^(NONE|RETRO|PRE)$")
+    # None=沿用系统参数；显式传入时按项目决定
     needApproval: bool | None = None
-    # 立项通过后立即进入 IN_PROGRESS（仅 needApproval 判定为不审批时生效）
+    # 立项通过后立即进入 IN_PROGRESS（仅 NONE 模式生效；RETRO 模式必然立即开工）
     startNow: bool = False
 
 
@@ -225,12 +231,19 @@ async def create_project(
 ) -> object:
     """创建项目（手工立项；商机转化走 `/crm/opportunities/{id}/convert`）。
 
-    审批开关关闭时直接立项通过并冻结基线；开启时先建草稿，审批前也可排期。
+    三种创建方式：
+    - `NONE`：直接立项通过并冻结基线，按 `startNow` 决定是否立即开工；
+    - `RETRO`：先开工后补审批，创建即进入执行，另记补审批期限；
+    - `PRE`：先审批后开工，创建即提交审批（`APPROVING`），通过后才可启动。
     """
     config = ConfigService(session)
-    need_approval = body.needApproval
-    if need_approval is None:
-        need_approval = await config.get_bool("approval.project.enabled")
+    mode = body.approvalMode
+    if mode is None:
+        need_approval = body.needApproval
+        if need_approval is None:
+            need_approval = await config.get_bool("approval.project.enabled")
+        mode = "PRE" if need_approval else "NONE"
+    retro = mode == "RETRO"
     project = await service.create_project(
         session,
         context,
@@ -248,8 +261,10 @@ async def create_project(
         members=[item.model_dump() for item in body.members],
         stages=[item.model_dump() for item in body.stages],
         director_ids=body.directorIds,
-        auto_approve=not need_approval,
+        auto_approve=mode != "PRE",
         start_now=body.startNow,
+        retro=retro,
+        submit_now=mode == "PRE",
     )
     await session.commit()
     return ok({"id": project.id, "projectCode": project.project_code, "status": project.status})
@@ -311,7 +326,7 @@ async def project_options(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
 ) -> object:
-    """新建项目所需的轻量配置：审批开关与默认部门（总公司）。"""
+    """新建项目所需的轻量配置：审批开关、补审批期限与默认部门（总公司）。"""
     config = ConfigService(session)
     default_dept = await session.execute(
         select(SysDept.id).where(SysDept.dept_code == "ROOT", SysDept.deleted == 0)
@@ -319,6 +334,7 @@ async def project_options(
     return ok(
         {
             "approvalEnabled": await config.get_bool("approval.project.enabled"),
+            "retroDays": await config.get_int("project.retro.days"),
             "defaultDeptId": default_dept.scalar_one_or_none() or 0,
         }
     )

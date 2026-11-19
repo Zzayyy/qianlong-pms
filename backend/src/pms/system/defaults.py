@@ -53,6 +53,8 @@ DEFAULT_CONFIGS: Final[Mapping[str, ConfigValue]] = {
     "approval.project.enabled": "false",
     "approval.project.amountL2": "500000",
     "approval.project.amountL3": "2000000",
+    # 先开工后补审批的补办期限（自然日），逾期在列表/详情提示，不阻断业务
+    "project.retro.days": "7",
     # ---- 健康度（08 §2.4）----
     "health.spi.red": "0.8",
     "health.spi.yellow": "0.9",
@@ -129,6 +131,7 @@ CONFIG_REMARKS: Final[Mapping[str, str]] = {
     "approval.project.enabled": "新建项目是否走立项审批；false=直接通过并可立即开展，true=需提交领导确认/驳回",
     "approval.project.amountL2": "立项金额达到该值（元）需部门负责人审批（L2）",
     "approval.project.amountL3": "立项金额达到该值（元）需公司领导审批（L3）",
+    "project.retro.days": "先开工后补审批的补办期限（自然日）；逾期仅高亮提示，不阻断执行",
     # 健康度
     "health.spi.red": "进度绩效指数 SPI 低于该值时健康度标红",
     "health.spi.yellow": "进度绩效指数 SPI 低于该值时健康度标黄",

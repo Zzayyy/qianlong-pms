@@ -35,6 +35,10 @@ class PrjProject(Base, CommonMixin):
     health: Mapped[str] = mapped_column(String(16), default="GREEN")
     status: Mapped[str] = mapped_column(String(32), default=ProjectStatus.DRAFT)
     approval_level: Mapped[int] = mapped_column(Integer, default=1)
+    # 补审批标记：0=不涉及，1=待补审批（已开工，等领导确认），2=补审批被驳回（项目仍继续执行）
+    retro_approval: Mapped[int] = mapped_column(Integer, default=0)
+    # 补审批期限（自然日）：逾期在列表/详情高亮提示，不阻断业务
+    retro_due: Mapped[str | None] = mapped_column(Date, default=None)
     version: Mapped[int] = mapped_column(Integer, default=0)
     remark: Mapped[str] = mapped_column(Text, default="")
     terminate_reason: Mapped[str] = mapped_column(Text, default="")

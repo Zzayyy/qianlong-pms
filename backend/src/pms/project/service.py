@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from typing import Final
 
 from sqlalchemy import func, select
@@ -38,6 +38,9 @@ from pms.system.config_service import ConfigService
 
 _DEFAULT_PREFIX: Final[str] = "PRJ"
 _BASELINE_VERSION: Final[str] = "V1.0"
+#: 补审批标记（`t_prj_project.retro_approval`）：待审批 / 已被驳回（项目继续执行）
+_RETRO_PENDING: Final[int] = 1
+_RETRO_REJECTED: Final[int] = 2
 
 logger = get_logger(__name__)
 
@@ -257,6 +260,8 @@ async def create_project(
     director_ids: list[int] | None = None,
     auto_approve: bool = False,
     start_now: bool = False,
+    retro: bool = False,
+    submit_now: bool = False,
 ) -> PrjProject:
     """创建项目（立项来源：手工或商机转化），可同时带入成员与初始阶段。
 
@@ -301,15 +306,26 @@ async def create_project(
         project.status = ProjectStatus.APPROVED
         await session.flush()
         await freeze_baseline(session, project.id, context.user_id)
-        if start_now:
+        if retro:
+            # 先开工后补审批：立即进入执行，另记「补审批期限」，逾期只在界面高亮
+            days = await ConfigService(session).get_int("project.retro.days")
+            project.retro_approval = 1
+            project.retro_due = date.today() + timedelta(days=max(days, 1))
+            await session.flush()
+        if start_now or retro:
             # 复用状态流转：变更留痕与通知和详情页「启动项目」保持同一条路径
             project = await change_status(
                 session,
                 project.id,
                 ProjectStatus.IN_PROGRESS,
                 context.user_id,
-                reason="创建项目时直接启动",
+                reason=(
+                    "先开工后补审批：创建即启动" if retro else "创建项目时直接启动"
+                ),
             )
+    elif submit_now:
+        # 先审批后开工：创建即提交，省掉「建草稿 → 再点一次提交」的往返
+        project = await submit_for_approval(session, project.id, context.user_id)
     return project
 
 
@@ -546,11 +562,36 @@ async def remove_member(
 async def submit_for_approval(
     session: AsyncSession, project_id: int, operator_id: int = 0
 ) -> PrjProject:
-    """提交立项审批：按金额确定审批层级并进入 APPROVING。"""
+    """提交立项审批：按金额确定审批层级并进入 APPROVING。
+
+    「先开工后补审批」的项目走回溯通道：`IN_PROGRESS → APPROVING`，
+    无论后面通过还是驳回都回到 `IN_PROGRESS`，不打断已开始的交付。
+    """
     project = await _get_project(session, project_id)
-    assert_transit(project.status, ProjectStatus.APPROVING)
+    retro = int(project.retro_approval or 0)
+    if project.status == ProjectStatus.IN_PROGRESS:
+        if retro not in {_RETRO_PENDING, _RETRO_REJECTED}:
+            raise BizRuleError("该项目未设置「先开工后补审批」，无需补审批")
+        project.status = assert_transit(project.status, ProjectStatus.APPROVING)
+        project.retro_approval = _RETRO_PENDING
+        await _log_inline(
+            session,
+            project_id=project.id,
+            title="提交补审批",
+            reason="先开工后补审批",
+            operator_id=operator_id,
+            change_type="SCHEDULE",
+            pairs=[
+                (
+                    "项目状态",
+                    _status_text(ProjectStatus.IN_PROGRESS),
+                    _status_text(ProjectStatus.APPROVING),
+                )
+            ],
+        )
+    else:
+        project.status = assert_transit(project.status, ProjectStatus.APPROVING)
     project.approval_level = await resolve_approval_level(session, float(project.contract_amount))
-    project.status = ProjectStatus.APPROVING
     project.update_by = operator_id or project.create_by
     await session.flush()
     await _notify_project(session, "PROJECT_SUBMITTED", project, operator_id)
@@ -558,8 +599,35 @@ async def submit_for_approval(
 
 
 async def approve_project(session: AsyncSession, project_id: int, operator_id: int) -> PrjProject:
-    """立项审批通过：进入 APPROVED 并冻结初始基线。"""
+    """立项审批通过：进入 APPROVED 并冻结初始基线。
+
+    补审批（先开工后补审批）走另一条路：回到 `IN_PROGRESS`、清除标记，
+    基线在创建时已冻结，这里不重复冻结，避免覆盖执行中的实际进度基线。
+    """
     project = await _get_project(session, project_id)
+    if int(project.retro_approval or 0) == _RETRO_PENDING:
+        project.status = assert_transit(project.status, ProjectStatus.IN_PROGRESS)
+        project.retro_approval = 0
+        project.retro_due = None
+        project.update_by = operator_id
+        await session.flush()
+        await _log_inline(
+            session,
+            project_id=project.id,
+            title="补审批通过",
+            reason="补审批通过，项目继续执行",
+            operator_id=operator_id,
+            change_type="SCHEDULE",
+            pairs=[
+                (
+                    "项目状态",
+                    _status_text(ProjectStatus.APPROVING),
+                    _status_text(ProjectStatus.IN_PROGRESS),
+                )
+            ],
+        )
+        await _notify_project(session, "PROJECT_APPROVED", project, operator_id)
+        return project
     assert_transit(project.status, ProjectStatus.APPROVED)
     project.status = ProjectStatus.APPROVED
     project.update_by = operator_id
@@ -572,8 +640,33 @@ async def approve_project(session: AsyncSession, project_id: int, operator_id: i
 async def reject_project(
     session: AsyncSession, project_id: int, operator_id: int, reason: str = ""
 ) -> PrjProject:
-    """立项驳回：回到 DRAFT。"""
+    """立项驳回：草稿项目回到 DRAFT；补审批项目保持执行中，仅记录驳回原因。"""
     project = await _get_project(session, project_id)
+    if int(project.retro_approval or 0) == _RETRO_PENDING:
+        # 已开工的项目不因审批驳回而停摆：状态回执行中，标记「审批未通过」待整改重报
+        project.status = assert_transit(project.status, ProjectStatus.IN_PROGRESS)
+        project.retro_approval = _RETRO_REJECTED
+        project.update_by = operator_id
+        if reason:
+            project.remark = reason
+        await session.flush()
+        await _log_inline(
+            session,
+            project_id=project.id,
+            title="补审批驳回",
+            reason=reason,
+            operator_id=operator_id,
+            change_type="SCHEDULE",
+            pairs=[
+                (
+                    "项目状态",
+                    _status_text(ProjectStatus.APPROVING),
+                    _status_text(ProjectStatus.IN_PROGRESS),
+                )
+            ],
+        )
+        await _notify_project(session, "PROJECT_REJECTED", project, operator_id, reason)
+        return project
     assert_transit(project.status, ProjectStatus.DRAFT)
     project.status = ProjectStatus.DRAFT
     project.update_by = operator_id

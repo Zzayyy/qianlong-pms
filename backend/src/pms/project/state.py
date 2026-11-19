@@ -47,10 +47,14 @@ PROJECT_TRANSITIONS: dict[ProjectStatus, tuple[ProjectStatus, ...]] = {
     ProjectStatus.APPROVING: (
         ProjectStatus.APPROVED,
         ProjectStatus.DRAFT,
+        # 补审批（先开工后补审批）：通过/驳回都回到执行中，不打断交付
+        ProjectStatus.IN_PROGRESS,
         ProjectStatus.TERMINATED,
     ),
     ProjectStatus.APPROVED: (ProjectStatus.IN_PROGRESS, ProjectStatus.TERMINATED),
     ProjectStatus.IN_PROGRESS: (
+        # 补审批：已开工项目可回溯进入审批中
+        ProjectStatus.APPROVING,
         ProjectStatus.SUSPENDED,
         ProjectStatus.COMPLETED,
         ProjectStatus.TERMINATED,

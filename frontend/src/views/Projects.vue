@@ -3,7 +3,7 @@ defineOptions({ name: 'ProjectsPage' })
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, ClipboardCheck, Info, Plus, Zap } from 'lucide-vue-next'
+import { Check, ClipboardCheck, Info, Plus, Timer, Zap } from 'lucide-vue-next'
 import {
   addMember,
   approveProject,
@@ -164,7 +164,7 @@ const activeStatus = computed(() => TABS.find((item) => item.key === tab.value)?
 const createVisible = ref(false)
 /** 立项即按这四段建立阶段；阶段负责人默认取项目经理，可在同一界面改。 */
 const DEFAULT_STAGES = ['设计', '开发', '测试', '交付']
-const createOptions = ref({ approvalEnabled: false, defaultDeptId: '' })
+const createOptions = ref({ approvalEnabled: false, retroDays: 7, defaultDeptId: '' })
 const buildStageDrafts = (ownerId: string) =>
   DEFAULT_STAGES.map((stageName, index) => ({
     stageName,
@@ -183,7 +183,8 @@ const createForm = ref<any>({
   planEnd: '',
   memberIds: [] as string[],
   directorIds: [] as string[],
-  needApproval: false,
+  // 创建方式：NONE=直接立项 / RETRO=先开工后补审批 / PRE=先审批后开工
+  approvalMode: 'NONE' as 'NONE' | 'RETRO' | 'PRE',
   stages: [] as any[]
 })
 /** 项目经理改选时，仍指向原项目经理的阶段跟着调整；已单独指定的阶段保持不变。 */
@@ -200,6 +201,12 @@ watch(
 
 const detailVisible = ref(false)
 const detail = ref<any>({})
+/** 补审批是否已逾期：只做提示，不阻断执行。 */
+const retroDuePassed = computed(() => {
+  const due = String(detail.value.retroDue || '')
+  if (!due) return false
+  return overdueDays({ planDate: due, status: 'PENDING' }) > 0
+})
 /** 详情页签（打开时重置为「成员」，便于新建项目后连续补人、补节点）。 */
 const activeTab = ref('team')
 const stages = ref<any[]>([])
@@ -818,6 +825,7 @@ const loadBase = async () => {
     const options = await projectOptions()
     createOptions.value = {
       approvalEnabled: Boolean(options?.approvalEnabled),
+      retroDays: Number(options?.retroDays || 7),
       defaultDeptId: String(options?.defaultDeptId || '')
     }
   } catch {
@@ -837,25 +845,31 @@ const openCreate = () => {
     planEnd: '',
     memberIds: store.profile?.id ? [store.profile.id] : [],
     directorIds: [],
-    needApproval: createOptions.value.approvalEnabled,
+    approvalMode: createOptions.value.approvalEnabled ? 'PRE' : 'NONE',
     stages: buildStageDrafts(me)
   }
   createVisible.value = true
 }
 
-/** 立项方式说明文案：直接立项 / 提交审批 两种模式各一句。 */
-const createModeTip = computed(() =>
-  createForm.value.needApproval
-    ? '创建后即可排期、分配任务；领导后续确认或驳回，不耽误开工。'
-    : '保存即立项通过，可直接启动开展工作，无需等待审批。'
-)
+/** 立项方式说明文案：三种创建方式各一句，避免「审批前到底能不能干活」的歧义。 */
+const createModeTip = computed(() => {
+  const mode = createForm.value.approvalMode
+  if (mode === 'RETRO') {
+    return `创建即开工，需在 ${createOptions.value.retroDays || 7} 天内提交补审批；逾期只在列表和详情提示，不阻断执行。`
+  }
+  if (mode === 'PRE') {
+    return '创建即提交审批，审批通过后才能启动；驳回会回到草稿，改完可重新提交。'
+  }
+  return '保存即立项通过，可直接启动开展工作，无需等待审批。'
+})
 
 /**
- * 创建项目。`startNow=true` 对应「创建并启动」：跳过审批直接立项并进入执行阶段，
- * 因此强制 needApproval=false，否则后端只建草稿，启动会落空。
+ * 创建项目。`startNow=true` 对应「创建并启动」，仅在「直接立项」下生效：
+ * 「先审批后开工」必须等审批通过，「先开工后补审批」创建即进入执行，都不需要该开关。
  */
 const doCreate = async (startNow = false) => {
-  const needApproval = startNow ? false : createForm.value.needApproval
+  const mode = createForm.value.approvalMode
+  const effectiveStart = mode === 'NONE' && startNow
   if (!createForm.value.projectName.trim()) {
     ElMessage.warning('请填写项目名称')
     return
@@ -915,8 +929,8 @@ const doCreate = async (startNow = false) => {
     // 立项即带入项目组成员；项目经理和阶段负责人会自动入组，重复会被忽略
     members: memberIds.map((userId) => ({ userId, roleInProject: 'MEMBER' })),
     directorIds: createForm.value.directorIds || [],
-    needApproval,
-    startNow,
+    approvalMode: mode,
+    startNow: effectiveStart,
     stages: stages.map((stage, index) => ({
       stageName: stage.stageName,
       ownerId: stage.ownerId,
@@ -937,14 +951,16 @@ const doCreate = async (startNow = false) => {
     }
   }
   ElMessage.success(
-    needApproval
-      ? `项目已创建：${result.projectCode}，可先排期开工，后续提交领导确认或驳回`
-      : startNow
-        ? `项目已创建并启动：${result.projectCode}`
-        : `项目已创建并立项：${result.projectCode}`
+    mode === 'RETRO'
+      ? `项目已创建并开工：${result.projectCode}，请在 ${createOptions.value.retroDays || 7} 天内提交补审批`
+      : mode === 'PRE'
+        ? `项目已创建并提交审批：${result.projectCode}，审批通过后即可启动`
+        : effectiveStart
+          ? `项目已创建并启动：${result.projectCode}`
+          : `项目已创建并立项：${result.projectCode}`
   )
   // 切到新项目所在分组，避免创建后列表里看不到
-  tab.value = needApproval ? 'APPROVING' : 'RUNNING'
+  tab.value = mode === 'PRE' ? 'APPROVING' : 'RUNNING'
   page.value.pageNum = 1
   await load()
 }
@@ -1400,52 +1416,82 @@ const doRemoveMember = async (row: any) => {
 }
 
 const doSubmit = async () => {
+  // 补审批：项目已开工，提交后仍在执行，只把状态切到「审批中」等领导确认
+  const retro = Boolean(detail.value.retroApproval)
   try {
-    await ElMessageBox.confirm('提交后进入立项审批，审批期间仍可补充成员与节点。确认提交？', '提交立项审批', {
-      type: 'info',
-      confirmButtonText: '提交',
-      cancelButtonText: '取消'
-    })
+    await ElMessageBox.confirm(
+      retro
+        ? '提交后进入补审批，项目按原计划继续执行，审批结果不影响交付。确认提交？'
+        : '提交后进入立项审批，审批期间仍可补充成员与节点。确认提交？',
+      retro ? '提交补审批' : '提交立项审批',
+      { type: 'info', confirmButtonText: '提交', cancelButtonText: '取消' }
+    )
   } catch {
     return
   }
   await submitProject(detail.value.id)
-  ElMessage.success('已提交立项审批')
+  ElMessage.success(retro ? '已提交补审批' : '已提交立项审批')
+  if (retro) {
+    await refreshDetail()
+    await load()
+    return
+  }
   detailVisible.value = false
   await load()
 }
 
 const doApprove = async () => {
+  // 补审批：项目已开工，通过后回到执行中，不再重复冻结基线
+  const retro = Boolean(detail.value.retroApproval)
   try {
-    await ElMessageBox.confirm('通过后项目立项并冻结初始基线，后续调整需走变更流程。确认通过？', '审批通过', {
-      type: 'warning',
-      confirmButtonText: '通过',
-      cancelButtonText: '取消'
-    })
+    await ElMessageBox.confirm(
+      retro
+        ? '通过后补审批完成，项目继续按原计划执行。确认通过？'
+        : '通过后项目立项并冻结初始基线，后续调整需走变更流程。确认通过？',
+      retro ? '补审批通过' : '审批通过',
+      { type: 'warning', confirmButtonText: '通过', cancelButtonText: '取消' }
+    )
   } catch {
     return
   }
   await approveProject(detail.value.id)
-  ElMessage.success('立项已通过并冻结基线')
+  ElMessage.success(retro ? '补审批已通过，项目继续执行' : '立项已通过并冻结基线')
+  if (retro) {
+    await refreshDetail()
+    await load()
+    return
+  }
   detailVisible.value = false
   await load()
 }
 
 const doReject = async () => {
+  const retro = Boolean(detail.value.retroApproval)
   let reason = ''
   try {
-    const result = await ElMessageBox.prompt('请填写驳回原因，便于申请人修改后重新提交', '驳回立项', {
-      confirmButtonText: '驳回',
-      cancelButtonText: '取消',
-      inputPlaceholder: '驳回原因（必填）',
-      inputValidator: (value: string) => (value && value.trim() ? true : '请填写驳回原因')
-    })
+    const result = await ElMessageBox.prompt(
+      retro
+        ? '驳回后项目仍继续执行，原因会记入项目变更记录，整改后可重新提交补审批'
+        : '请填写驳回原因，便于申请人修改后重新提交',
+      retro ? '驳回补审批' : '驳回立项',
+      {
+        confirmButtonText: '驳回',
+        cancelButtonText: '取消',
+        inputPlaceholder: '驳回原因（必填）',
+        inputValidator: (value: string) => (value && value.trim() ? true : '请填写驳回原因')
+      }
+    )
     reason = String(result.value || '').trim()
   } catch {
     return
   }
   await rejectProject(detail.value.id, reason)
-  ElMessage.success('已驳回')
+  ElMessage.success(retro ? '补审批已驳回，项目继续执行' : '已驳回')
+  if (retro) {
+    await refreshDetail()
+    await load()
+    return
+  }
   detailVisible.value = false
   await load()
 }
@@ -1941,30 +1987,44 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <button
               type="button"
               class="mode-card"
-              :class="{ 'is-active': !createForm.needApproval }"
-              :aria-pressed="!createForm.needApproval"
-              @click="createForm.needApproval = false"
+              :class="{ 'is-active': createForm.approvalMode === 'NONE' }"
+              :aria-pressed="createForm.approvalMode === 'NONE'"
+              @click="createForm.approvalMode = 'NONE'"
             >
               <span class="mode-icon"><el-icon><Zap /></el-icon></span>
               <span class="mode-body">
                 <b>直接立项</b>
-                <small>保存即通过，可立即启动开展工作</small>
+                <small>不审批，创建即通过，可直接开工</small>
               </span>
-              <el-icon v-if="!createForm.needApproval" class="mode-check"><Check /></el-icon>
+              <el-icon v-if="createForm.approvalMode === 'NONE'" class="mode-check"><Check /></el-icon>
             </button>
             <button
               type="button"
               class="mode-card"
-              :class="{ 'is-active': createForm.needApproval }"
-              :aria-pressed="createForm.needApproval"
-              @click="createForm.needApproval = true"
+              :class="{ 'is-active': createForm.approvalMode === 'RETRO' }"
+              :aria-pressed="createForm.approvalMode === 'RETRO'"
+              @click="createForm.approvalMode = 'RETRO'"
+            >
+              <span class="mode-icon is-approval"><el-icon><Timer /></el-icon></span>
+              <span class="mode-body">
+                <b>先开工后补审批</b>
+                <small>立即执行，{{ createOptions.retroDays || 7 }} 天内补办审批</small>
+              </span>
+              <el-icon v-if="createForm.approvalMode === 'RETRO'" class="mode-check"><Check /></el-icon>
+            </button>
+            <button
+              type="button"
+              class="mode-card"
+              :class="{ 'is-active': createForm.approvalMode === 'PRE' }"
+              :aria-pressed="createForm.approvalMode === 'PRE'"
+              @click="createForm.approvalMode = 'PRE'"
             >
               <span class="mode-icon is-approval"><el-icon><ClipboardCheck /></el-icon></span>
               <span class="mode-body">
-                <b>提交审批</b>
-                <small>审批前可动手，后续由领导确认或驳回</small>
+                <b>先审批后开工</b>
+                <small>创建即提交审批，通过后才能启动</small>
               </span>
-              <el-icon v-if="createForm.needApproval" class="mode-check"><Check /></el-icon>
+              <el-icon v-if="createForm.approvalMode === 'PRE'" class="mode-check"><Check /></el-icon>
             </button>
           </div>
           <p class="mode-tip">
@@ -2089,7 +2149,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-button type="primary" @click="doCreate()">创建项目</el-button>
           <el-button
             type="success"
-            title="跳过审批，创建后立即进入执行阶段"
+            :disabled="createForm.approvalMode === 'PRE'"
+            :title="
+              createForm.approvalMode === 'PRE'
+                ? '先审批后开工：需审批通过后才能启动'
+                : '创建后立即进入执行阶段'
+            "
             @click="doCreate(true)"
           >
             创建并启动项目
@@ -2325,6 +2390,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </div>
           <div class="detail-tags">
             <el-tag :type="statusMeta(detail.status).type">{{ statusMeta(detail.status).label }}</el-tag>
+            <el-tag v-if="detail.retroApproval === 1" :type="retroDuePassed ? 'danger' : 'warning'">
+              待补审批{{ detail.retroDue ? ` · 截止 ${detail.retroDue}` : '' }}
+            </el-tag>
+            <el-tag v-else-if="detail.retroApproval === 2" type="danger">补审批被驳回</el-tag>
             <span class="health" :class="`is-${healthMeta(detail.health).key}`">
               <i></i>{{ healthMeta(detail.health).label }}
             </span>
@@ -3087,6 +3156,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <span class="footer-spacer"></span>
           <el-button v-if="detail.status === 'DRAFT' && canCreateProject" type="primary" @click="doSubmit">
             提交审批
+          </el-button>
+          <!-- 先开工后补审批：已开工项目在期限内提交补审批，逾期仅提示 -->
+          <el-button
+            v-if="detail.status === 'IN_PROGRESS' && detail.retroApproval && canCreateProject"
+            :type="retroDuePassed ? 'warning' : 'primary'"
+            plain
+            @click="doSubmit"
+          >
+            {{ detail.retroApproval === 2 ? '重新提交补审批' : '提交补审批' }}
           </el-button>
           <el-button v-if="detail.status === 'APPROVING' && canApproveProject" type="success" @click="doApprove">
             审批通过

@@ -48,6 +48,8 @@ export const createProject = (data: Record<string, unknown>) =>
 
 export interface ProjectFormOptions {
   approvalEnabled: boolean
+  /** 先开工后补审批的补办期限（自然日） */
+  retroDays: number
   defaultDeptId: string
 }
 
