@@ -82,6 +82,8 @@ class ProjectStageIn(BaseModel):
     seq: int = 1
     planStart: str | None = None
     planEnd: str | None = None
+    # 阶段参与人（负责人之外的多人分工），会自动补进项目组
+    memberIds: list[int] = Field(default_factory=list)
 
 
 class ProjectIn(BaseModel):
@@ -103,6 +105,8 @@ class ProjectIn(BaseModel):
     directorIds: list[int] = Field(default_factory=list)
     # None=沿用系统参数；显式传入时按项目决定（false 即「直接立项、审批前可动手」）
     needApproval: bool | None = None
+    # 立项通过后立即进入 IN_PROGRESS（仅 needApproval 判定为不审批时生效）
+    startNow: bool = False
 
 
 class ProjectBasicIn(BaseModel):
@@ -137,6 +141,8 @@ class StageIn(BaseModel):
     seq: int = 1
     planStart: str | None = None
     planEnd: str | None = None
+    # 阶段参与人（负责人之外的多人分工）；传空数组表示清空，仅新增时生效
+    memberIds: list[int] | None = None
     # 变更原因（新增/编辑阶段必填，写入变更记录）
     reason: str = Field(default="", max_length=500)
 
@@ -243,6 +249,7 @@ async def create_project(
         stages=[item.model_dump() for item in body.stages],
         director_ids=body.directorIds,
         auto_approve=not need_approval,
+        start_now=body.startNow,
     )
     await session.commit()
     return ok({"id": project.id, "projectCode": project.project_code, "status": project.status})
@@ -437,7 +444,8 @@ async def change_status(
 ) -> object:
     """启动 / 挂起 / 完成 / 验收 / 关闭 / 终止（状态机拦截非法流转）。
 
-    `reason` 仅在终止时记录，用于追溯「为什么废弃这个项目」。
+    `reason` 必填：状态变化会写一条变更留痕，终止时还额外写入
+    `t_prj_project.terminate_reason`，用于追溯「为什么废弃这个项目」。
     """
     project = await service.change_status(
         session, project_id, body.target, context.user_id, reason=body.reason
@@ -452,9 +460,13 @@ async def stages(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
 ) -> object:
-    """阶段列表（含负责人、权重与进度）。"""
+    """阶段列表（含负责人、参与人、权重与进度）。"""
     items = await service.list_stages(session, project_id)
-    names = await _user_names(session, {item.owner_id for item in items})
+    member_map = await service.list_stage_members(session, [item.id for item in items])
+    user_ids = {item.owner_id for item in items} | {
+        uid for ids in member_map.values() for uid in ids
+    }
+    names = await _user_names(session, user_ids)
     return ok(
         [
             {
@@ -462,6 +474,8 @@ async def stages(
                 "stageName": item.stage_name,
                 "ownerId": item.owner_id,
                 "ownerName": names.get(item.owner_id, ""),
+                "memberIds": member_map.get(item.id, []),
+                "memberNames": [names.get(uid, "") for uid in member_map.get(item.id, [])],
                 "seq": item.seq,
                 "weight": float(item.weight),
                 "progress": float(item.progress),
@@ -495,6 +509,7 @@ async def create_stage(
         plan_end=body.planEnd,
         operator_id=context.user_id,
         reason=body.reason,
+        member_ids=body.memberIds or [],
     )
     await session.commit()
     return ok({"id": stage.id})
@@ -508,7 +523,7 @@ async def update_stage(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:stage:edit"))],
 ) -> object:
-    """编辑阶段名称/权重/顺序/负责人/计划起止。"""
+    """编辑阶段名称/权重/顺序/负责人/计划起止/参与人。"""
     project = await service.get_project(session, project_id)
     await ensure_project_manager(session, context, project)
     stage = await service.update_stage(
@@ -523,6 +538,7 @@ async def update_stage(
         plan_end=body.planEnd,
         operator_id=context.user_id,
         reason=body.reason,
+        member_ids=body.memberIds,
     )
     await session.commit()
     return ok({"id": stage.id, "status": stage.status})

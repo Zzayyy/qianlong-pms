@@ -66,7 +66,7 @@ export const approveProject = (id: string) => post<{ status: string }>(`/project
 export const rejectProject = (id: string, reason: string) =>
   post<{ status: string }>(`/projects/${id}/reject`, { reason })
 
-/** 项目状态流转：后端字段为 `target`（非 status）；`reason` 仅终止时使用。 */
+/** 项目状态流转：后端字段为 `target`（非 status）；`reason` 必填（写入变更记录）。 */
 export const changeProjectStatus = (id: string, target: string, reason = '') =>
   put<{ status: string }>(`/projects/${id}/status`, reason ? { target, reason } : { target })
 

@@ -14,7 +14,14 @@ const props = withDefaults(
     size?: 'default' | 'small'
     disabled?: boolean
   }>(),
-  { title: '选择人员', placeholder: '点击选择人员', size: 'default', disabled: false }
+  {
+    title: '选择人员',
+    placeholder: '点击选择人员',
+    size: 'default',
+    disabled: false,
+    // 兜底空数组：调用方漏初始化时也不至于整块渲染崩溃
+    modelValue: () => []
+  }
 )
 
 const emit = defineEmits<{ 'update:modelValue': [value: string[]] }>()

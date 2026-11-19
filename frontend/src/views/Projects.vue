@@ -169,6 +169,8 @@ const buildStageDrafts = (ownerId: string) =>
   DEFAULT_STAGES.map((stageName, index) => ({
     stageName,
     ownerId,
+    // 阶段参与人（负责人之外的多人分工），立项时一并带入
+    memberIds: [] as string[],
     weight: 25,
     seq: index + 1,
     planStart: '',
@@ -229,6 +231,7 @@ const stageForm = ref<any>({
   id: '',
   stageName: '',
   ownerId: '',
+  memberIds: [] as string[],
   weight: 1,
   seq: 1,
   planStart: '',
@@ -559,6 +562,7 @@ const openStage = (row?: any) => {
       id: '',
       stageName: '',
       ownerId: String(detail.value.pmId || ''),
+      memberIds: [],
       weight: 1,
       seq: stages.value.length + 1,
       planStart: prev?.planEnd ? nextDayText(prev.planEnd) : detail.value.planStart || '',
@@ -632,6 +636,7 @@ const saveStage = async () => {
   const payload = {
     stageName: stageForm.value.stageName,
     ownerId: stageForm.value.ownerId || 0,
+    memberIds: (stageForm.value.memberIds || []).map(String),
     weight: Number(stageForm.value.weight || 0),
     seq: Number(stageForm.value.seq || 1),
     planStart: stageForm.value.planStart || null,
@@ -843,7 +848,19 @@ const openCreate = () => {
   createVisible.value = true
 }
 
-const doCreate = async () => {
+/** 立项方式说明文案：直接立项 / 提交审批 两种模式各一句。 */
+const createModeTip = computed(() =>
+  createForm.value.needApproval
+    ? '创建后即可排期、分配任务；领导后续确认或驳回，不耽误开工。'
+    : '保存即立项通过，可直接启动开展工作，无需等待审批。'
+)
+
+/**
+ * 创建项目。`startNow=true` 对应「创建并启动」：跳过审批直接立项并进入执行阶段，
+ * 因此强制 needApproval=false，否则后端只建草稿，启动会落空。
+ */
+const doCreate = async (startNow = false) => {
+  const needApproval = startNow ? false : createForm.value.needApproval
   if (!createForm.value.projectName.trim()) {
     ElMessage.warning('请填写项目名称')
     return
@@ -903,10 +920,12 @@ const doCreate = async () => {
     // 立项即带入项目组成员；项目经理和阶段负责人会自动入组，重复会被忽略
     members: memberIds.map((userId) => ({ userId, roleInProject: 'MEMBER' })),
     directorIds: createForm.value.directorIds || [],
-    needApproval: createForm.value.needApproval,
+    needApproval,
+    startNow,
     stages: stages.map((stage, index) => ({
       stageName: stage.stageName,
       ownerId: stage.ownerId,
+      memberIds: (stage.memberIds || []).map(String),
       weight: Number(stage.weight || 0),
       seq: index + 1,
       planStart: stage.planStart || null,
@@ -924,12 +943,14 @@ const doCreate = async () => {
     }
   }
   ElMessage.success(
-    createForm.value.needApproval
+    needApproval
       ? `项目已创建：${result.projectCode}，可先排期开工，后续提交领导确认或驳回`
-      : `项目已创建并立项：${result.projectCode}`
+      : startNow
+        ? `项目已创建并启动：${result.projectCode}`
+        : `项目已创建并立项：${result.projectCode}`
   )
   // 切到新项目所在分组，避免创建后列表里看不到
-  tab.value = createForm.value.needApproval ? 'APPROVING' : 'RUNNING'
+  tab.value = needApproval ? 'APPROVING' : 'RUNNING'
   page.value.pageNum = 1
   await load()
 }
@@ -1490,7 +1511,9 @@ const doStatus = async (status: string) => {
       return
     }
   }
-  await changeProjectStatus(detail.value.id, status)
+  const reason = await askChangeReason(action ? action.title : '变更项目状态')
+  if (!reason) return
+  await changeProjectStatus(detail.value.id, status, reason)
   ElMessage.success(`状态已变更为 ${statusMeta(status).label}`)
   await refreshDetail()
   await load()
@@ -1539,6 +1562,17 @@ const taskForm = ref<any>({
   planStart: '',
   planEnd: '',
   priority: 'MEDIUM'
+})
+
+/** 任务负责人候选：当前阶段的成员与负责人排前面，其余人员在后。 */
+const taskOwnerOptions = computed(() => {
+  const stage = stages.value.find((item) => String(item.id) === String(taskForm.value.stageId))
+  const preferred = new Set<string>((stage?.memberIds || []).map(String))
+  if (stage?.ownerId) preferred.add(String(stage.ownerId))
+  return {
+    picked: users.value.filter((user) => preferred.has(String(user.id))),
+    rest: users.value.filter((user) => !preferred.has(String(user.id)))
+  }
 })
 
 /** 某阶段下的任务（`unassigned` 表示未分阶段）。 */
@@ -1942,11 +1976,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </div>
           <p class="mode-tip">
             <el-icon><Info /></el-icon>
-            {{
-              createForm.needApproval
-                ? '创建后即可排期、分配任务；领导后续确认或驳回，不耽误开工。'
-                : '保存即立项通过，可直接启动开展工作，无需等待审批。'
-            }}
+            {{ createModeTip }}
           </p>
         </section>
 
@@ -2055,6 +2085,16 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 class="stage-date"
                 placeholder="结束（可选）"
               />
+              <div class="stage-members">
+                <PersonPicker
+                  v-model="stage.memberIds"
+                  :users="users"
+                  :depts="depts"
+                  title="选择阶段参与人"
+                  placeholder="参与人"
+                  size="small"
+                />
+              </div>
             </div>
           </div>
         </section>
@@ -2063,7 +2103,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="drawer-footer">
           <span class="footer-spacer"></span>
           <el-button @click="createVisible = false">取消</el-button>
-          <el-button type="primary" @click="doCreate">创建项目</el-button>
+          <el-button type="primary" @click="doCreate()">创建项目</el-button>
+          <el-button
+            type="success"
+            title="跳过审批，创建后立即进入执行阶段"
+            @click="doCreate(true)"
+          >
+            创建并启动项目
+          </el-button>
         </div>
       </template>
     </el-dialog>
@@ -2518,6 +2565,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                         <template v-if="row.__kind === 'stage'">
                           <template v-if="row.ownerId">
                             负责人 {{ row.ownerName || userName(row.ownerId) }} ·
+                          </template>
+                          <template v-if="(row.memberNames || []).length">
+                            参与 {{ row.memberNames.join('、') }} ·
                           </template>
                           权重 {{ row.weight }} · 文档 {{ docCount(row.id) }} ·
                           {{ tasksOfStage(row.id).length }} 个任务
@@ -3123,6 +3173,18 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             />
           </el-select>
         </div>
+        <div class="field span-2">
+          <label>
+            阶段参与人<span class="optional">可选，新建任务时优先从这里选负责人</span>
+          </label>
+          <PersonPicker
+            v-model="stageForm.memberIds"
+            :users="users"
+            :depts="depts"
+            title="选择阶段参与人"
+            placeholder="点击选择参与人（可多人）"
+          />
+        </div>
         <div class="field">
           <label>权重</label>
           <el-input-number v-model="stageForm.weight" :min="0" :step="0.1" />
@@ -3180,12 +3242,22 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="field">
           <label>负责人</label>
           <el-select v-model="taskForm.ownerId" filterable clearable placeholder="选择负责人">
-            <el-option
-              v-for="user in users"
-              :key="user.id"
-              :label="`${user.realName}（${user.username}）`"
-              :value="String(user.id)"
-            />
+            <el-option-group v-if="taskOwnerOptions.picked.length" label="本阶段成员">
+              <el-option
+                v-for="user in taskOwnerOptions.picked"
+                :key="user.id"
+                :label="`${user.realName}（${user.username}）`"
+                :value="String(user.id)"
+              />
+            </el-option-group>
+            <el-option-group label="其他人员">
+              <el-option
+                v-for="user in taskOwnerOptions.rest"
+                :key="user.id"
+                :label="`${user.realName}（${user.username}）`"
+                :value="String(user.id)"
+              />
+            </el-option-group>
           </el-select>
         </div>
         <div class="field">
@@ -3871,7 +3943,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
 .mode-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 12px;
 }
 
@@ -4003,13 +4075,22 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 .stage-owner {
-  flex: 1 1 190px;
-  min-width: 150px;
+  flex: 1 1 200px;
+  min-width: 170px;
 }
 
 .stage-date {
-  flex: 1 1 160px;
-  min-width: 140px;
+  flex: 1 1 140px;
+  min-width: 120px;
+}
+
+.stage-members {
+  flex: 1 1 140px;
+  min-width: 120px;
+}
+
+.stage-members :deep(.person-picker) {
+  width: 100%;
 }
 
 .stage-draft-sep {

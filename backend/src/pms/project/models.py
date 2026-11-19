@@ -89,6 +89,20 @@ class PrjStage(Base, CommonMixin):
     status: Mapped[str] = mapped_column(String(32), default=TaskStatus.NOT_STARTED)
 
 
+class PrjStageMember(Base, CommonMixin):
+    """阶段参与人 `t_prj_stage_member`。
+
+    负责人仍是 `t_prj_stage.owner_id`（单人），本表只存参与人（可多人），
+    构成「负责人 + 参与人」两层分工；新建任务时优先从所属阶段成员里选负责人。
+    """
+
+    __tablename__ = "t_prj_stage_member"
+
+    stage_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    user_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    role_in_stage: Mapped[str] = mapped_column(String(32), default="MEMBER")
+
+
 class PrjMilestone(Base, CommonMixin):
     """里程碑 `t_prj_milestone`。"""
 

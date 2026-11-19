@@ -23,6 +23,7 @@ from pms.project.models import (
     PrjProject,
     PrjRisk,
     PrjStage,
+    PrjStageMember,
     PrjTask,
 )
 from pms.project.progress import StageProgress, TaskProgress, project_progress, stage_progress
@@ -255,6 +256,7 @@ async def create_project(
     stages: list[dict[str, object]] | None = None,
     director_ids: list[int] | None = None,
     auto_approve: bool = False,
+    start_now: bool = False,
 ) -> PrjProject:
     """创建项目（立项来源：手工或商机转化），可同时带入成员与初始阶段。
 
@@ -263,7 +265,8 @@ async def create_project(
     重复的成员自动跳过，不因重复而失败。
     `stages` 每项形如 `{"stageName": "设计", "ownerId": 1, "planStart": ..., "planEnd": ...}`；
     阶段负责人同样自动入组，便于其后续上报进度。
-    `auto_approve=True` 时跳过审批直接置为 APPROVED 并冻结立项基线。
+    `auto_approve=True` 时跳过审批直接置为 APPROVED 并冻结立项基线；
+    `start_now=True` 时在立项通过后继续流转到 IN_PROGRESS（审批模式下忽略）。
     部门传 0 时回落到「总公司」。
     """
     project = PrjProject(
@@ -298,6 +301,15 @@ async def create_project(
         project.status = ProjectStatus.APPROVED
         await session.flush()
         await freeze_baseline(session, project.id, context.user_id)
+        if start_now:
+            # 复用状态流转：变更留痕与通知和详情页「启动项目」保持同一条路径
+            project = await change_status(
+                session,
+                project.id,
+                ProjectStatus.IN_PROGRESS,
+                context.user_id,
+                reason="创建项目时直接启动",
+            )
     return project
 
 
@@ -378,7 +390,7 @@ async def default_dept_id(session: AsyncSession) -> int:
 async def create_initial_stages(
     session: AsyncSession, project_id: int, stages: list[dict[str, object]]
 ) -> list[PrjStage]:
-    """立项时一次性建立阶段，并把阶段负责人加入项目组。"""
+    """立项时一次性建立阶段，并把阶段负责人与参与人加入项目组。"""
     created: list[PrjStage] = []
     for index, item in enumerate(stages, start=1):
         name = str(item.get("stageName") or "").strip()
@@ -397,6 +409,7 @@ async def create_initial_stages(
                 owner_id=owner_id,
                 plan_start=str(item["planStart"]) if item.get("planStart") else None,
                 plan_end=str(item["planEnd"]) if item.get("planEnd") else None,
+                member_ids=[int(uid) for uid in (item.get("memberIds") or [])],
             )
         )
     return created
@@ -734,6 +747,74 @@ async def is_member(session: AsyncSession, project_id: int, user_id: int) -> boo
     return result.scalar_one_or_none() is not None
 
 
+async def set_stage_members(
+    session: AsyncSession,
+    project_id: int,
+    stage_id: int,
+    user_ids: list[int],
+    operator_id: int = 0,
+) -> list[int]:
+    """覆盖式设置阶段参与人，并把这些人补进项目组（幂等）。
+
+    返回最终生效的 user_id 列表（去重保序、剔除 0）。负责人不在此表，
+    仍记在 `t_prj_stage.owner_id`。
+    """
+    final: list[int] = []
+    for raw in user_ids:
+        uid = int(raw or 0)
+        if uid > 0 and uid not in final:
+            final.append(uid)
+
+    rows = (
+        await session.execute(
+            select(PrjStageMember)
+            .where(PrjStageMember.stage_id == stage_id)
+            .order_by(PrjStageMember.id)
+        )
+    ).scalars()
+    keep: dict[int, PrjStageMember] = {}
+    for row in rows:
+        uid = int(row.user_id)
+        if uid in keep:
+            # 历史重复行合并，只保留最早一条
+            row.deleted = 1
+            row.update_by = operator_id
+            continue
+        keep[uid] = row
+    for uid, row in keep.items():
+        row.deleted = 0 if uid in final else 1
+        row.update_by = operator_id
+    for uid in final:
+        if uid in keep:
+            continue
+        session.add(
+            PrjStageMember(stage_id=stage_id, user_id=uid, create_by=operator_id)
+        )
+        await ensure_member(session, project_id, uid, 0, role_in_project="MEMBER")
+    await session.flush()
+    return final
+
+
+async def list_stage_members(
+    session: AsyncSession, stage_ids: list[int]
+) -> dict[int, list[int]]:
+    """批量查阶段参与人，返回 `{stage_id: [user_id, ...]}`。"""
+    if not stage_ids:
+        return {}
+    result = await session.execute(
+        select(PrjStageMember.stage_id, PrjStageMember.user_id)
+        .where(
+            PrjStageMember.stage_id.in_(stage_ids),
+            PrjStageMember.deleted == 0,
+        )
+        .order_by(PrjStageMember.id)
+    )
+    mapping: dict[int, list[int]] = {}
+    for stage_id, user_id in result.all():
+        mapping.setdefault(int(stage_id), []).append(int(user_id))
+    return mapping
+
+
 async def create_stage(
     session: AsyncSession,
     project_id: int,
@@ -745,6 +826,7 @@ async def create_stage(
     plan_end: str | None = None,
     operator_id: int = 0,
     reason: str = "",
+    member_ids: list[int] | None = None,
 ) -> PrjStage:
     """创建阶段。
 
@@ -761,6 +843,8 @@ async def create_stage(
     )
     session.add(stage)
     await session.flush()
+    if member_ids:
+        await set_stage_members(session, project_id, stage.id, member_ids, operator_id)
     if operator_id:
         await _log_inline(
             session,
@@ -985,8 +1069,11 @@ async def update_stage(
     owner_id: int = 0,
     operator_id: int = 0,
     reason: str = "",
+    member_ids: list[int] | None = None,
 ) -> PrjStage:
-    """编辑阶段（名称/权重/序号/负责人/计划起止）。
+    """编辑阶段（名称/权重/序号/负责人/计划起止/参与人）。
+
+    `member_ids` 为 None 表示本次不改参与人，传空列表则清空。
 
     字段确有变化时写一条「编辑阶段」留痕，`reason` 必填。
     """
@@ -1006,6 +1093,8 @@ async def update_stage(
     stage.plan_end = plan_end
     stage.update_by = operator_id
     await session.flush()
+    if member_ids is not None:
+        await set_stage_members(session, project_id, stage.id, member_ids, operator_id)
     await recalc_progress(session, project_id)
     await _log_inline(
         session,
