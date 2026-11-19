@@ -164,7 +164,12 @@ const activeStatus = computed(() => TABS.find((item) => item.key === tab.value)?
 const createVisible = ref(false)
 /** 立项即按这四段建立阶段；阶段负责人默认取项目经理，可在同一界面改。 */
 const DEFAULT_STAGES = ['设计', '开发', '测试', '交付']
-const createOptions = ref({ approvalEnabled: false, retroDays: 7, defaultDeptId: '' })
+const createOptions = ref({
+  approvalEnabled: false,
+  retroDays: 7,
+  stageDocRequired: true,
+  defaultDeptId: ''
+})
 const buildStageDrafts = (ownerId: string) =>
   DEFAULT_STAGES.map((stageName, index) => ({
     stageName,
@@ -655,17 +660,59 @@ const saveStage = async () => {
   stages.value = await listStages(detail.value.id)
 }
 
-const startStage = async (row: any) => {
-  const reason = await askChangeReason(`开始阶段「${row.stageName}」`)
-  if (!reason) return
-  await stageStatus(detail.value.id, row.id, 'IN_PROGRESS', reason)
-  stages.value = await listStages(detail.value.id)
+/** 切到「文档」页签并预选该阶段，用户上传后回来再点完成。 */
+const goUploadStageDoc = (row: any) => {
+  activeTab.value = 'docs'
+  docFilter.value = 'STAGE'
+  docUploadTarget.value = 'STAGE'
+  docUploadBizId.value = String(row.id)
+  docKeyword.value = ''
+  ElMessage.info(`已定位到「${row.stageName}」的文档上传，选择文件上传后即可标记完成`)
+}
+
+/** 取后端业务错误文案（`AxiosError.response.data.message` 或 `Error.message`）。 */
+const errorText = (err: unknown) => {
+  const data = (err as { response?: { data?: { message?: string } } })?.response?.data
+  return String(data?.message || (err as Error)?.message || '')
+}
+
+/** 缺交付文档时的引导弹窗：确认后跳到「文档」页签并预选该阶段。 */
+const promptUploadDoc = async (row: any) => {
+  try {
+    await ElMessageBox.confirm(
+      `阶段「${row.stageName}」还没有交付文档，按系统规则不能标记完成。现在去上传？`,
+      '需要交付文档',
+      { type: 'warning', confirmButtonText: '去上传', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  goUploadStageDoc(row)
 }
 
 const finishStage = async (row: any) => {
+  // 先校验交付文档：避免用户填完变更原因才被后端拒绝
+  if (createOptions.value.stageDocRequired && docCount(row.id) === 0) {
+    if (!canUploadDoc.value) {
+      ElMessage.warning(
+        `阶段「${row.stageName}」需先上传交付文档才能完成，当前账号无文档上传权限，请联系项目经理或 PMO 上传`
+      )
+      return
+    }
+    await promptUploadDoc(row)
+    return
+  }
   const reason = await askChangeReason(`完成阶段「${row.stageName}」`)
   if (!reason) return
-  await stageStatus(detail.value.id, row.id, 'DONE', reason)
+  try {
+    await stageStatus(detail.value.id, row.id, 'DONE', reason)
+  } catch (err) {
+    // 兜底：参数刚打开、或文档被删时后端仍会拦截，同样给出上传入口
+    if (errorText(err).includes('交付文档') && canUploadDoc.value) {
+      await promptUploadDoc(row)
+    }
+    return
+  }
   ElMessage.success('阶段已完成')
   stages.value = await listStages(detail.value.id)
   detail.value = await projectDetail(detail.value.id)
@@ -826,6 +873,8 @@ const loadBase = async () => {
     createOptions.value = {
       approvalEnabled: Boolean(options?.approvalEnabled),
       retroDays: Number(options?.retroDays || 7),
+      // 后端未下发该字段（旧版本）时按「必填」处理，避免静默跳过校验
+      stageDocRequired: options?.stageDocRequired !== false,
       defaultDeptId: String(options?.defaultDeptId || '')
     }
   } catch {
@@ -1652,6 +1701,13 @@ const stageHours = (row: any) => {
   }
 }
 
+/** 工时文案：实际为 0（还没有工作日志）时只显示计划，避免「8h / 0h」的噪音。 */
+const hoursText = (plan: unknown, actual: unknown) => {
+  const planned = Math.round(Number(plan || 0))
+  const real = Math.round(Number(actual || 0))
+  return real > 0 ? `${planned}h / ${real}h` : `${planned}h`
+}
+
 /** 树形行斑马区分：阶段行深一档，任务行浅一档。 */
 const planRowClass = ({ row }: any) => (row.__kind === 'task' ? 'plan-row-task' : 'plan-row-stage')
 
@@ -1705,8 +1761,9 @@ const openTask = (row?: any, presetStageId?: string) => {
         ownerId: String(store.profile?.id || ''),
         weight: 1,
         planHours: 8,
-        planStart: detail.value.planStart || '',
-        planEnd: detail.value.planEnd || '',
+        // 任务不再要求排期：工期由阶段承载，任务只填名称/负责人/工时
+        planStart: '',
+        planEnd: '',
         priority: 'MEDIUM'
       }
   taskVisible.value = true
@@ -1723,8 +1780,9 @@ const saveTask = async () => {
     ownerId: taskForm.value.ownerId || 0,
     weight: Number(taskForm.value.weight || 0),
     planHours: Number(taskForm.value.planHours || 0),
-    planStart: taskForm.value.planStart || '',
-    planEnd: taskForm.value.planEnd || '',
+    // 未排期一律传 null：MySQL DATE 列不接受空串
+    planStart: taskForm.value.planStart || null,
+    planEnd: taskForm.value.planEnd || null,
     priority: taskForm.value.priority
   }
   if (taskForm.value.id) {
@@ -2377,7 +2435,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       </template>
     </el-dialog>
 
-    <el-drawer v-model="detailVisible" title="项目详情" size="min(1180px, 96vw)">
+    <el-drawer v-model="detailVisible" title="项目详情" size="min(1320px, 96vw)">
       <div class="detail">
         <div class="detail-head">
           <div>
@@ -2584,7 +2642,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 >
                   {{ allExpanded ? '收起全部' : '展开全部' }}
                 </el-button>
-                <el-button size="small" :disabled="!canEdit" @click="openTask()">新增任务</el-button>
                 <el-button size="small" type="primary" :disabled="!canManageNode" @click="openStage()">
                   新增阶段
                 </el-button>
@@ -2618,8 +2675,11 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                           <template v-if="row.ownerId">
                             负责人 {{ row.ownerName || userName(row.ownerId) }} ·
                           </template>
-                          权重 {{ row.weight }} · 文档 {{ docCount(row.id) }} ·
-                          {{ tasksOfStage(row.id).length }} 个任务
+                          权重 {{ row.weight }} ·
+                          <span :class="{ 'doc-missing': createOptions.stageDocRequired && !docCount(row.id) }">
+                            文档 {{ docCount(row.id) }}
+                          </span>
+                          · {{ tasksOfStage(row.id).length }} 个任务
                         </template>
                         <template v-else-if="row.__kind === 'pseudo'">未绑定阶段的任务</template>
                         <template v-else>
@@ -2631,7 +2691,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column label="计划起止" width="230">
+              <el-table-column label="计划起止" width="214">
                 <template #default="{ row }">
                   <div v-if="row.planStart || row.planEnd" class="cell-main num-cell date-range">
                     {{ row.planStart || '—' }} ~ {{ row.planEnd || '—' }}
@@ -2642,18 +2702,26 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                   <span v-else class="muted">{{ row.__pseudo ? '—' : '未排期' }}</span>
                 </template>
               </el-table-column>
-              <el-table-column label="工时(计划/实际)" width="130" align="right">
+              <el-table-column width="104" align="center">
+                <template #header>
+                  <el-tooltip
+                    content="计划 = 任务计划工时合计；实际来自工作日志（日志里选中该任务后自动累计），未填报时只显示计划"
+                    placement="top"
+                  >
+                    <span class="col-help">工时</span>
+                  </el-tooltip>
+                </template>
                 <template #default="{ row }">
                   <span v-if="row.__kind === 'task'" class="num-cell">
-                    {{ Number(row.planHours || 0) }}h / {{ Number(row.actualHours || 0) }}h
+                    {{ hoursText(row.planHours, row.actualHours) }}
                   </span>
                   <span v-else-if="row.__kind === 'stage'" class="num-cell">
-                    {{ stageHours(row).plan }}h / {{ stageHours(row).actual }}h
+                    {{ hoursText(stageHours(row).plan, stageHours(row).actual) }}
                   </span>
                   <span v-else class="muted">—</span>
                 </template>
               </el-table-column>
-              <el-table-column label="进度" width="160">
+              <el-table-column label="进度" width="140">
                 <template #default="{ row }">
                   <el-input-number
                     v-if="row.__kind === 'task'"
@@ -2675,7 +2743,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                   <span v-else class="muted">—</span>
                 </template>
               </el-table-column>
-              <el-table-column label="状态" width="100">
+              <el-table-column label="状态" width="88">
                 <template #default="{ row }">
                   <el-tag
                     v-if="row.__kind !== 'pseudo'"
@@ -2688,17 +2756,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                   <span v-else class="muted">—</span>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="196">
+              <el-table-column label="操作" width="190">
                 <template #default="{ row }">
                   <span v-if="row.__kind === 'pseudo'" class="muted">—</span>
                   <div v-else-if="row.__kind === 'stage'" class="ops-cell">
-                    <el-button
-                      link
-                      type="primary"
-                      :disabled="!canManageNode || ['IN_PROGRESS', 'DONE'].includes(row.status)"
-                      @click="startStage(row)"
-                    >
-                      开始
+                    <el-button link type="primary" :disabled="!canEdit" @click="openTask(undefined, String(row.id))">
+                      新建任务
                     </el-button>
                     <el-button
                       link
@@ -3322,27 +3385,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <el-option label="低" value="LOW" />
           </el-select>
         </div>
-        <div class="field">
-          <label>计划开始</label>
-          <el-date-picker
-            v-model="taskForm.planStart"
-            type="date"
-            value-format="YYYY-MM-DD"
-            placeholder="选择日期"
-            :default-value="toDate(taskForm.planStart)"
-          />
-        </div>
-        <div class="field">
-          <label>计划结束</label>
-          <el-date-picker
-            v-model="taskForm.planEnd"
-            type="date"
-            value-format="YYYY-MM-DD"
-            placeholder="选择日期"
-            :default-value="toDate(taskForm.planStart) || toDate(taskForm.planEnd)"
-          />
-        </div>
       </div>
+      <p class="form-hint">任务的排期由所属阶段承载，无需单独填写起止日期。</p>
       <template #footer>
         <el-button @click="taskVisible = false">取消</el-button>
         <el-button type="primary" @click="saveTask">保存</el-button>
@@ -4303,6 +4347,18 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   padding: 6px 0;
 }
 
+/* 带口径说明的表头：虚线下划线提示可 hover 查看 */
+.col-help {
+  border-bottom: 1px dashed var(--pms-line, #dcdfe6);
+  cursor: help;
+}
+
+/* 阶段缺交付文档：完成前会被拦截，提前用红色提示 */
+.doc-missing {
+  color: var(--el-color-danger);
+  font-weight: 600;
+}
+
 .date-range {
   font-size: 12.5px;
 }
@@ -4438,7 +4494,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .plan-table :deep(.ops-cell) {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
 }
 
 .plan-table :deep(.ops-cell .el-button) {

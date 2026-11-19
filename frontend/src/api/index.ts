@@ -50,6 +50,8 @@ export interface ProjectFormOptions {
   approvalEnabled: boolean
   /** 先开工后补审批的补办期限（自然日） */
   retroDays: number
+  /** 阶段标记完成前是否必须上传交付文档 */
+  stageDocRequired: boolean
   defaultDeptId: string
 }
 

@@ -784,6 +784,9 @@ async def recalc_progress(session: AsyncSession, project_id: int) -> float:
             # 任务有了进度，阶段自动进入「进行中」；完成阶段仍需人工点击（要校验交付文档）
             if stage.progress > 0 and stage.status == "NOT_STARTED":
                 stage.status = "IN_PROGRESS"
+                if stage.actual_start is None:
+                    # 自动开工同样记录实际开始日，避免报表/基线里这一列为空
+                    stage.actual_start = date.today().isoformat()
     await session.flush()
     return value
 
@@ -1262,7 +1265,9 @@ async def change_stage_status(
                 session, project_id, biz_type="STAGE", biz_id=stage_id
             )
             if docs <= 0:
-                raise BizRuleError("阶段完成前需上传该节点的交付文档")
+                raise BizRuleError(
+                    f"阶段「{stage.stage_name}」还没有交付文档：请到「文档」页签选择该阶段上传后再标记完成"
+                )
         stage.progress = 100
         stage.actual_end = date.today().isoformat()
     elif status is TaskStatus.IN_PROGRESS and stage.actual_start is None:

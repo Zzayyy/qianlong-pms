@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -152,12 +152,29 @@ class StageIn(BaseModel):
     # 变更原因（新增/编辑阶段必填，写入变更记录）
     reason: str = Field(default="", max_length=500)
 
+    @field_validator("planStart", "planEnd", mode="before")
+    @classmethod
+    def _normalize_dates(cls, value: object) -> object:
+        """空串 → None（未排期）。"""
+        return _blank_date_to_none(value)
+
 
 class StageStatusIn(BaseModel):
     """阶段状态入参（NOT_STARTED / IN_PROGRESS / DONE）。"""
 
     target: str = Field(min_length=3, max_length=16)
     reason: str = Field(default="", max_length=500)
+
+
+def _blank_date_to_none(value: object) -> object:
+    """空串统一按「未排期」处理。
+
+    MySQL 的 DATE 列不接受空串（`Incorrect date value: ''`），前端日期选择器
+    清空后常以 `""` 提交，这里统一归一为空值，避免落到 500。
+    """
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
 
 
 class TaskIn(BaseModel):
@@ -172,6 +189,12 @@ class TaskIn(BaseModel):
     planStart: str | None = None
     planEnd: str | None = None
     priority: str = "MEDIUM"
+
+    @field_validator("planStart", "planEnd", mode="before")
+    @classmethod
+    def _normalize_dates(cls, value: object) -> object:
+        """空串 → None（未排期）。"""
+        return _blank_date_to_none(value)
 
 
 class ProgressIn(BaseModel):
@@ -335,6 +358,8 @@ async def project_options(
         {
             "approvalEnabled": await config.get_bool("approval.project.enabled"),
             "retroDays": await config.get_int("project.retro.days"),
+            # 阶段完成前是否强制交付文档：前端提前拦截，避免填完原因才被拒
+            "stageDocRequired": await config.get_bool("project.stage.docRequired"),
             "defaultDeptId": default_dept.scalar_one_or_none() or 0,
         }
     )
