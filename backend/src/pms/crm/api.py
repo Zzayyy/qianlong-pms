@@ -106,6 +106,8 @@ class CustomerIn(BaseModel):
     source: str = ""
     status: str = "POTENTIAL"
     remark: str = ""
+    #: 客户关注的产品（关联 `t_crm_customer_product`）
+    productIds: list[int] = Field(default_factory=list)
 
 
 class CustomerUpdateIn(BaseModel):
@@ -125,6 +127,8 @@ class CustomerUpdateIn(BaseModel):
     source: str | None = None
     status: str | None = None
     remark: str | None = None
+    #: 关注产品；`None` 表示不修改，传空数组表示清空
+    productIds: list[int] | None = None
 
 
 class CustomerStatusIn(BaseModel):
@@ -377,8 +381,16 @@ async def customers(
         owner_id=ownerId,
     )
     names = await _user_names(session, {item.owner_user_id for item in items})
+    counts = await service.customer_product_counts(session, {item.id for item in items})
     return paged(
-        [_customer_out(item, context, names.get(item.owner_user_id, "")) for item in items],
+        [
+            {
+                **_customer_out(item, context, names.get(item.owner_user_id, "")),
+                # 关注产品数量：列表一眼看出客户是否已挂产品，详情里看具体清单
+                "productCount": counts.get(item.id, 0),
+            }
+            for item in items
+        ],
         total,
         pagination.page_num,
         pagination.page_size,
@@ -411,6 +423,10 @@ async def create_customer(
         status=body.status,
         remark=body.remark,
     )
+    if body.productIds:
+        await service.replace_customer_products(
+            session, context, customer.id, body.productIds
+        )
     await session.commit()
     return ok({"id": customer.id, "customerCode": customer.customer_code})
 
@@ -424,7 +440,21 @@ async def customer_detail(
     """客户详情（含地址、来源、备注与时间字段，按数据范围校验可见性）。"""
     customer = await ensure_customer_access(session, context, customer_id)
     names = await _user_names(session, {customer.owner_user_id})
-    return ok(_customer_out(customer, context, names.get(customer.owner_user_id, "")))
+    data = _customer_out(customer, context, names.get(customer.owner_user_id, ""))
+    products = await service.list_customer_products(session, customer_id)
+    data["products"] = [
+        {
+            "id": item.id,
+            "productCode": item.product_code,
+            "productName": item.product_name,
+            "category": item.category,
+            "unit": item.unit,
+            "price": float(item.price),
+            "status": item.status,
+        }
+        for item in products
+    ]
+    return ok(data)
 
 
 @router.put("/customers/{customer_id}", summary="编辑客户")
@@ -456,6 +486,11 @@ async def update_customer(
         status=body.status,
         remark=body.remark,
     )
+    # `productIds` 未出现在请求体表示不修改；显式传空数组表示清空关注产品
+    if "productIds" in body.model_fields_set and body.productIds is not None:
+        await service.replace_customer_products(
+            session, context, customer_id, body.productIds
+        )
     await session.commit()
     return ok({"id": customer.id})
 

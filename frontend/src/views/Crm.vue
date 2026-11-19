@@ -23,6 +23,7 @@ import {
   dictItems,
   listCustomers,
   listOpportunities,
+  listProducts,
   oppFollows,
   opportunityDetail,
   pushOppStage,
@@ -65,6 +66,22 @@ const dicts = ref<Record<string, any[]>>({})
 const staff = ref<any[]>([])
 const summary = ref<any>({ customers: {}, opportunities: {} })
 const customerOptions = ref<any[]>([])
+
+/* 产品档案：客户「关注产品」多选的数据源；无产品查看权限时不请求、也不显示该字段 */
+const productOptions = ref<any[]>([])
+const canViewProducts = computed(() => store.has('crm:product:view'))
+const loadProductOptions = async () => {
+  if (!canViewProducts.value) {
+    productOptions.value = []
+    return
+  }
+  try {
+    const data = await listProducts({ pageNum: 1, pageSize: 200 })
+    productOptions.value = data.list || []
+  } catch {
+    productOptions.value = []
+  }
+}
 
 const customerStatusFallback = [
   { value: 'POTENTIAL', label: '潜在客户' },
@@ -364,13 +381,21 @@ const emptyCustomer = () => ({
   address: '',
   source: '',
   status: 'POTENTIAL',
-  remark: ''
+  remark: '',
+  productIds: [] as string[]
 })
 
 const openCustomer = async (row?: any) => {
   customerEditingId.value = row ? String(row.id) : ''
   if (row) {
-    customerForm.value = { ...emptyCustomer(), ...(await customerDetail(String(row.id))) }
+    const detail = await customerDetail(String(row.id))
+    // 详情返回的是产品对象数组，表单里只维护 id 列表
+    const products = (detail.products || []) as any[]
+    customerForm.value = {
+      ...emptyCustomer(),
+      ...detail,
+      productIds: products.map((item) => String(item.id))
+    }
   } else {
     customerForm.value = emptyCustomer()
   }
@@ -401,7 +426,11 @@ const saveCustomer = async () => {
     address: customerForm.value.address,
     source: customerForm.value.source,
     status: customerForm.value.status,
-    remark: customerForm.value.remark
+    remark: customerForm.value.remark,
+    // 无产品查看权限时不带该字段，避免把已有产品关联误清空
+    ...(canViewProducts.value
+      ? { productIds: (customerForm.value.productIds || []).map(String) }
+      : {})
   })
   if (customerEditingId.value) {
     await updateCustomer(customerEditingId.value, payload)
@@ -819,7 +848,7 @@ const onOppCommand = (command: string, row: any) => {
 onMounted(async () => {
   syncWidth()
   window.addEventListener('resize', syncWidth)
-  await Promise.all([loadDicts(), loadStaff(), loadOptions()])
+  await Promise.all([loadDicts(), loadStaff(), loadOptions(), loadProductOptions()])
   await refreshAll()
 })
 
@@ -1063,6 +1092,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <span class="cell-main">{{ row.contactName || '—' }}</span>
               <span v-if="row.contactMobile" class="cell-sub">{{ row.contactMobile }}</span>
             </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="产品" width="86" align="center" class-name="pms-mobile-hide">
+          <template #default="{ row }">
+            <el-tag v-if="row.productCount" size="small" effect="plain">
+              {{ row.productCount }} 个
+            </el-tag>
+            <span v-else class="cell-muted">—</span>
           </template>
         </el-table-column>
         <el-table-column label="负责人" width="96" class-name="pms-mobile-hide">
@@ -1356,6 +1393,23 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </el-form-item>
         <el-form-item label="来源">
           <el-input v-model="customerForm.source" placeholder="如 官网 / 转介绍 / 展会" />
+        </el-form-item>
+        <el-form-item v-if="canViewProducts" label="关注产品" class="span-2">
+          <el-select
+            v-model="customerForm.productIds"
+            multiple
+            filterable
+            collapse-tags
+            collapse-tags-tooltip
+            placeholder="选择客户关注 / 在用的产品（可多选）"
+          >
+            <el-option
+              v-for="item in productOptions"
+              :key="item.id"
+              :label="`${item.productName}${item.spec ? ` · ${item.spec}` : ''}`"
+              :value="String(item.id)"
+            />
+          </el-select>
         </el-form-item>
       </el-form>
 

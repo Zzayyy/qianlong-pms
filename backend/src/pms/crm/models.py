@@ -137,3 +137,15 @@ class CrmProduct(Base, CommonMixin):
     price: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
     status: Mapped[str] = mapped_column(String(16), default=ProductStatus.ACTIVE)
     remark: Mapped[str] = mapped_column(Text, default="")
+
+
+class CrmCustomerProduct(Base, CommonMixin):
+    """客户关注产品 `t_crm_customer_product`（客户与产品的多对多）。
+
+    只表达"这个客户关注/在用哪些产品"，数量与报价走商机明细，避免两处口径打架。
+    """
+
+    __tablename__ = "t_crm_customer_product"
+
+    customer_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    product_id: Mapped[int] = mapped_column(BigInteger, default=0)

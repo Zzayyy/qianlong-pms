@@ -13,6 +13,7 @@ from pms.core.context import AuthContext
 from pms.crm.models import (
     CrmContact,
     CrmCustomer,
+    CrmCustomerProduct,
     CrmFollow,
     CrmOpportunity,
     CrmProduct,
@@ -1115,4 +1116,96 @@ async def delete_product(
     product = await get_product(session, product_id)
     product.deleted = 1
     product.update_by = context.user_id
+    await session.flush()
+
+
+# ---------------------------------------------------------------- 客户关注产品
+
+
+async def list_customer_products(
+    session: AsyncSession, customer_id: int
+) -> list[CrmProduct]:
+    """客户关注的产品（按产品编码排序，已删除产品不再返回）。"""
+    stmt = (
+        select(CrmProduct)
+        .join(CrmCustomerProduct, CrmCustomerProduct.product_id == CrmProduct.id)
+        .where(
+            CrmCustomerProduct.customer_id == customer_id,
+            CrmCustomerProduct.deleted == 0,
+            CrmProduct.deleted == 0,
+        )
+        .order_by(CrmProduct.product_code)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def customer_product_counts(
+    session: AsyncSession, customer_ids: set[int]
+) -> dict[int, int]:
+    """客户关注产品数量（列表批量统计，避免逐行查询）。"""
+    ids = {item for item in customer_ids if item}
+    if not ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(CrmCustomerProduct.customer_id, func.count(CrmCustomerProduct.id))
+            .where(
+                CrmCustomerProduct.customer_id.in_(ids),
+                CrmCustomerProduct.deleted == 0,
+            )
+            .group_by(CrmCustomerProduct.customer_id)
+        )
+    ).all()
+    return {int(customer_id): int(count) for customer_id, count in rows}
+
+
+async def replace_customer_products(
+    session: AsyncSession,
+    context: AuthContext,
+    customer_id: int,
+    product_ids: list[int],
+) -> None:
+    """整体覆盖客户关注的产品：去掉未选中的关联，补充新选的产品。
+
+    产品必须真实存在，避免前端传脏 ID 后留一条查不到产品的关联。
+    """
+    await get_customer(session, customer_id)
+    wanted = {int(item) for item in product_ids if item}
+    existing = (
+        await session.execute(
+            select(CrmCustomerProduct).where(
+                CrmCustomerProduct.customer_id == customer_id,
+                CrmCustomerProduct.deleted == 0,
+            )
+        )
+    ).scalars().all()
+    current = {int(row.product_id) for row in existing}
+    for row in existing:
+        if int(row.product_id) not in wanted:
+            row.deleted = 1
+            row.update_by = context.user_id
+
+    missing = wanted - current
+    if missing:
+        found = {
+            int(item)
+            for item in (
+                await session.execute(
+                    select(CrmProduct.id).where(
+                        CrmProduct.id.in_(missing), CrmProduct.deleted == 0
+                    )
+                )
+            ).scalars().all()
+        }
+        if found != missing:
+            raise BizRuleError("选择的产品不存在或已删除")
+        for product_id in sorted(found):
+            session.add(
+                CrmCustomerProduct(
+                    customer_id=customer_id,
+                    product_id=product_id,
+                    create_by=context.user_id,
+                )
+            )
     await session.flush()
