@@ -2,7 +2,14 @@
 defineOptions({ name: 'CrmPage' })
 import { computed, nextTick, onMounted, onUnmounted, ref, type Component } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Building2, CircleDollarSign, Handshake, Plus, TrendingUp } from 'lucide-vue-next'
+import {
+  Building2,
+  CircleDollarSign,
+  Handshake,
+  Plus,
+  Search,
+  TrendingUp
+} from 'lucide-vue-next'
 import {
   addOppFollow,
   changeCustomerStatus,
@@ -47,7 +54,8 @@ interface KpiItem {
 }
 
 const store = useUserStore()
-const tab = ref<TabKey>('customers')
+/** 默认落在「商机」：日常跟进按商机维度走，客户档案作为基础数据。 */
+const tab = ref<TabKey>('opportunities')
 const canCustomer = computed(() => store.has('crm:customer:manage'))
 const canOpp = computed(() => store.has('crm:opp:manage'))
 
@@ -402,11 +410,6 @@ const openCustomer = async (row?: any) => {
   customerDialog.value = true
 }
 
-const syncCustomerOwner = (userId: any) => {
-  const hit = staff.value.find((item) => String(item.id) === String(userId))
-  if (hit) customerForm.value.ownerDeptId = idText(hit.deptId)
-}
-
 const saveCustomer = async () => {
   if (!customerForm.value.customerName?.trim()) {
     ElMessage.warning('请填写客户名称')
@@ -416,8 +419,7 @@ const saveCustomer = async () => {
     customerName: customerForm.value.customerName.trim(),
     customerLevel: customerForm.value.customerLevel,
     industry: customerForm.value.industry,
-    ownerUserId: idOrZero(customerForm.value.ownerUserId),
-    ownerDeptId: idOrZero(customerForm.value.ownerDeptId),
+    // 负责人不再手选：新增由后端取当前登录账号，编辑不传则保持原负责人
     contactName: customerForm.value.contactName,
     contactMobile: customerForm.value.contactMobile,
     contactEmail: customerForm.value.contactEmail,
@@ -583,6 +585,21 @@ const oppDialog = ref(false)
 const oppEditingId = ref('')
 const oppForm = ref<any>({})
 
+/** 产品线候选（可自由输入，列表仅作快捷选择）。 */
+const PRODUCT_LINE_OPTIONS = [
+  '信贷管理',
+  '风险管控',
+  '监管报送',
+  '支付结算',
+  '资金交易',
+  '反洗钱',
+  '理财资管',
+  '数据中台',
+  '核心系统',
+  '其他'
+]
+const productLineOptions = PRODUCT_LINE_OPTIONS
+
 const emptyOpp = () => ({
   oppName: '',
   customerId: null,
@@ -591,6 +608,11 @@ const emptyOpp = () => ({
   stage: 'LEAD',
   winRate: 0,
   source: '',
+  competitor: '',
+  bidDate: '',
+  launchDate: '',
+  advantage: '',
+  productLines: [] as string[],
   status: 'OPEN',
   lostReason: '',
   ownerUserId: idText(store.profile?.id),
@@ -603,7 +625,15 @@ const openOpp = async (row?: any) => {
   oppEditingId.value = row ? String(row.id) : ''
   if (row) {
     const detail = await opportunityDetail(String(row.id))
-    oppForm.value = { ...emptyOpp(), ...detail }
+    oppForm.value = {
+      ...emptyOpp(),
+      ...detail,
+      // 产品线在库里是逗号分隔的字符串，表单用多选数组
+      productLines: String(detail.productLine || '')
+        .split(',')
+        .map((item: string) => item.trim())
+        .filter(Boolean)
+    }
     // 客户 / 负责人 ID 保持字符串（雪花 ID 转数字会改写末位）
     const customerId = idText(oppForm.value.customerId)
     oppForm.value.customerId = customerId && customerId !== '0' ? customerId : null
@@ -612,15 +642,13 @@ const openOpp = async (row?: any) => {
     oppForm.value.expectAmount = toNumber(oppForm.value.expectAmount)
     oppForm.value.winRate = toNumber(oppForm.value.winRate)
     oppForm.value.expectSignDate = oppForm.value.expectSignDate || ''
+    oppForm.value.bidDate = oppForm.value.bidDate || ''
+    oppForm.value.launchDate = oppForm.value.launchDate || ''
+    oppForm.value.advantage = oppForm.value.advantage || ''
   } else {
     oppForm.value = emptyOpp()
   }
   oppDialog.value = true
-}
-
-const syncOppOwner = (userId: any) => {
-  const hit = staff.value.find((item) => String(item.id) === String(userId))
-  if (hit) oppForm.value.ownerDeptId = idText(hit.deptId)
 }
 
 const saveOpp = async () => {
@@ -640,8 +668,12 @@ const saveOpp = async () => {
     stage: oppForm.value.stage,
     winRate: Number(oppForm.value.winRate || 0),
     source: oppForm.value.source,
-    ownerUserId: idOrZero(oppForm.value.ownerUserId),
-    ownerDeptId: idOrZero(oppForm.value.ownerDeptId),
+    competitor: oppForm.value.competitor || '',
+    bidDate: oppForm.value.bidDate || null,
+    launchDate: oppForm.value.launchDate || null,
+    advantage: oppForm.value.advantage || '',
+    productLine: (oppForm.value.productLines || []).join(','),
+    // 负责人不再手选：新增由后端取当前登录账号，编辑不传则保持原负责人
     remark: oppForm.value.remark
   }
   if (oppEditingId.value) {
@@ -657,6 +689,28 @@ const saveOpp = async () => {
   }
   oppDialog.value = false
   await Promise.all([loadOpps(), loadSummary()])
+}
+
+/** 商机弹窗内快捷建客户：只收名称，创建后刷新下拉并自动选中。 */
+const quickCreateCustomer = async () => {
+  try {
+    const result = await ElMessageBox.prompt('输入客户名称，创建后自动选中', '新建客户', {
+      confirmButtonText: '创建',
+      cancelButtonText: '取消',
+      inputPlaceholder: '客户公司全称',
+      inputValidator: (value: string) => (value && value.trim() ? true : '请填写客户名称')
+    })
+    const name = String(result.value || '').trim()
+    if (!name) return
+    const created = await createCustomer({ customerName: name })
+    await loadCustomerOptions()
+    await loadSummary()
+    oppForm.value.customerId = String(created.id)
+    oppForm.value.customerName = name
+    ElMessage.success('客户已创建并选中')
+  } catch {
+    /* 取消或创建失败：错误提示由请求拦截器统一弹出 */
+  }
 }
 
 const quickOppStage = async (row: any, stage: string) => {
@@ -723,16 +777,6 @@ const withSelectedOption = (
   return [{ value: key, label: label || fallbackLabel }, ...options]
 }
 
-const customerOwnerOptions = computed(() =>
-  withSelectedOption(
-    staffSelectOptions.value,
-    customerForm.value.ownerUserId,
-    customerForm.value.ownerName
-  )
-)
-const oppOwnerOptions = computed(() =>
-  withSelectedOption(staffSelectOptions.value, oppForm.value.ownerUserId, oppForm.value.ownerName)
-)
 const oppCustomerOptions = computed(() =>
   withSelectedOption(
     customerSelectOptions.value,
@@ -878,17 +922,17 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="seg">
           <button
             type="button"
-            :class="{ 'is-active': tab === 'customers' }"
-            @click="switchTab('customers')"
-          >
-            客户
-          </button>
-          <button
-            type="button"
             :class="{ 'is-active': tab === 'opportunities' }"
             @click="switchTab('opportunities')"
           >
             商机
+          </button>
+          <button
+            type="button"
+            :class="{ 'is-active': tab === 'customers' }"
+            @click="switchTab('customers')"
+          >
+            客户
           </button>
         </div>
         <div class="list-side">
@@ -1163,7 +1207,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <template #default="{ row }">
             <div class="cell-stack">
               <span class="cell-main" :title="row.oppName">{{ row.oppName }}</span>
-              <span class="cell-sub">{{ row.oppCode || '—' }}</span>
+              <span class="cell-sub" :title="row.productLine || ''">
+                {{ row.oppCode || '—' }}
+                <template v-if="row.productLine"> · {{ row.productLine }}</template>
+              </span>
             </div>
           </template>
         </el-table-column>
@@ -1207,7 +1254,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="预计金额" width="132" align="right">
+        <el-table-column label="招标金额" width="132" align="right">
           <template #default="{ row }">
             <span class="amount-cell">¥{{ money(row.expectAmount) }}</span>
           </template>
@@ -1217,11 +1264,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <span class="cell-muted">{{ Number(row.winRate || 0) }}%</span>
           </template>
         </el-table-column>
-        <el-table-column label="预计签约" width="116" class-name="pms-mobile-hide">
+        <el-table-column label="招标 / 上线" width="150" class-name="pms-mobile-hide">
           <template #default="{ row }">
-            <span :class="{ 'cell-muted': !row.expectSignDate }">
-              {{ row.expectSignDate || '—' }}
-            </span>
+            <div class="cell-stack">
+              <span :class="{ 'cell-muted': !row.bidDate }">{{ row.bidDate || '—' }}</span>
+              <span class="cell-sub" :class="{ 'cell-muted': !row.launchDate }">
+                上线 {{ row.launchDate || '—' }}
+              </span>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="116">
@@ -1383,14 +1433,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="负责人">
-          <el-select-v2
-            v-model="customerForm.ownerUserId"
-            :options="customerOwnerOptions"
-            filterable
-            @change="syncCustomerOwner"
-          />
-        </el-form-item>
         <el-form-item label="来源">
           <el-input v-model="customerForm.source" placeholder="如 官网 / 转介绍 / 展会" />
         </el-form-item>
@@ -1440,7 +1482,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
       <template #footer>
         <div class="dialog-footer">
-          <span class="form-tip">客户名称必填；负责人决定该客户的数据可见范围。</span>
+          <span class="form-tip">客户名称必填；新增客户默认归属当前登录账号，数据可见范围按你所在部门判断。</span>
           <div class="dialog-actions">
             <el-button @click="customerDialog = false">取消</el-button>
             <el-button type="primary" @click="saveCustomer">保存</el-button>
@@ -1640,43 +1682,83 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-input v-model="oppForm.oppName" placeholder="如 XX 公司 PMS 实施" />
         </el-form-item>
         <el-form-item label="所属客户">
-          <el-select-v2
-            v-model="oppForm.customerId"
-            :options="oppCustomerOptions"
-            filterable
-            placeholder="选择客户"
-          />
-        </el-form-item>
-        <el-form-item label="负责人">
-          <el-select-v2
-            v-model="oppForm.ownerUserId"
-            :options="oppOwnerOptions"
-            filterable
-            @change="syncOppOwner"
-          />
+          <div class="customer-picker">
+            <el-select
+              v-model="oppForm.customerId"
+              class="customer-picker-select"
+              filterable
+              clearable
+              placeholder="搜索客户名称"
+            >
+              <template #prefix>
+                <el-icon><Search :size="14" /></el-icon>
+              </template>
+              <el-option
+                v-for="item in oppCustomerOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+            <el-button
+              v-if="canCustomer"
+              link
+              type="primary"
+              :icon="Plus"
+              class="customer-picker-create"
+              @click="quickCreateCustomer"
+            >
+              新建
+            </el-button>
+          </div>
         </el-form-item>
         <el-form-item label="来源">
           <el-input v-model="oppForm.source" placeholder="如 官网 / 转介绍 / 展会" />
         </el-form-item>
+        <el-form-item label="竞争对手">
+          <el-input
+            v-model="oppForm.competitor"
+            maxlength="200"
+            placeholder="如 A 公司、B 公司（可写多家）"
+          />
+        </el-form-item>
+        <el-form-item label="备注" class="span-2">
+          <el-input
+            v-model="oppForm.remark"
+            type="textarea"
+            :rows="3"
+            maxlength="500"
+            show-word-limit
+            placeholder="难点、需要协助的事项、关键决策人态度…"
+          />
+        </el-form-item>
       </el-form>
 
-      <div class="form-section-title">金额与阶段</div>
+      <div class="form-section-title">招标与产品</div>
       <el-form :model="oppForm" label-width="92px" class="form-grid">
-        <el-form-item label="预计金额">
+        <el-form-item label="招标时间">
+          <el-date-picker
+            v-model="oppForm.bidDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="选择招标日期"
+          />
+        </el-form-item>
+        <el-form-item label="上线时间">
+          <el-date-picker
+            v-model="oppForm.launchDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="计划上线日期"
+          />
+        </el-form-item>
+        <el-form-item label="招标金额">
           <el-input-number
             v-model="oppForm.expectAmount"
             :min="0"
             :precision="2"
             :step="10000"
             controls-position="right"
-          />
-        </el-form-item>
-        <el-form-item label="预计签约">
-          <el-date-picker
-            v-model="oppForm.expectSignDate"
-            type="date"
-            value-format="YYYY-MM-DD"
-            placeholder="选择日期"
           />
         </el-form-item>
         <el-form-item label="赢率(%)">
@@ -1708,11 +1790,41 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             />
           </el-select>
         </el-form-item>
-        <el-form-item v-if="oppEditingId && oppForm.status === 'LOST'" label="输单原因">
-          <el-input v-model="oppForm.lostReason" placeholder="记录丢单原因，便于复盘" />
+        <el-form-item label="产品线" class="span-2">
+          <el-select
+            v-model="oppForm.productLines"
+            multiple
+            filterable
+            allow-create
+            default-first-option
+            collapse-tags
+            collapse-tags-tooltip
+            placeholder="选择或输入产品线（可多选）"
+          >
+            <el-option
+              v-for="item in productLineOptions"
+              :key="item"
+              :label="item"
+              :value="item"
+            />
+          </el-select>
         </el-form-item>
-        <el-form-item label="备注" class="span-2">
-          <el-input v-model="oppForm.remark" type="textarea" :rows="2" maxlength="500" />
+        <el-form-item label="钱龙优势" class="span-2">
+          <el-input
+            v-model="oppForm.advantage"
+            type="textarea"
+            :rows="2"
+            maxlength="1000"
+            show-word-limit
+            placeholder="相对竞品的差异化优势、客户认可点、可复用的标杆案例…"
+          />
+        </el-form-item>
+        <el-form-item
+          v-if="oppEditingId && oppForm.status === 'LOST'"
+          label="输单原因"
+          class="span-2"
+        >
+          <el-input v-model="oppForm.lostReason" placeholder="记录丢单原因，便于复盘" />
         </el-form-item>
       </el-form>
 
@@ -1805,7 +1917,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
         <div class="metrics">
           <div class="metric">
-            <span>预计金额</span>
+            <span>招标金额</span>
             <b>¥{{ money(followOpp.expectAmount) }}</b>
           </div>
           <div class="metric">
@@ -1813,8 +1925,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <b>{{ Number(followOpp.winRate || 0) }}%</b>
           </div>
           <div class="metric">
-            <span>预计签约</span>
-            <b>{{ followOpp.expectSignDate || '未设置' }}</b>
+            <span>上线时间</span>
+            <b>{{ followOpp.launchDate || '未设置' }}</b>
           </div>
           <div class="metric">
             <span>负责人</span>
@@ -2176,6 +2288,23 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
 .form-grid .span-2 {
   grid-column: 1 / -1;
+}
+
+/* 商机弹窗的客户选择：搜索图标走 el-select 的 prefix 插槽，右侧放快捷新建 */
+.customer-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.customer-picker-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.customer-picker-create {
+  flex: none;
 }
 
 .form-grid :deep(.el-form-item) {

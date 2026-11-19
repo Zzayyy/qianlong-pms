@@ -91,6 +91,16 @@ class CrmOpportunity(Base, CommonMixin):
     stage: Mapped[str] = mapped_column(String(32), default=OpportunityStage.LEAD)
     win_rate: Mapped[float] = mapped_column(Numeric(5, 2), default=0)
     source: Mapped[str] = mapped_column(String(32), default="")
+    #: 竞争对手（可写多家，仅作信息记录，不参与统计）
+    competitor: Mapped[str] = mapped_column(String(200), default="")
+    #: 招标时间 / 计划上线时间（金融类项目常见节点）
+    bid_date: Mapped[str | None] = mapped_column(Date, default=None)
+    launch_date: Mapped[str | None] = mapped_column(Date, default=None)
+    #: 钱龙优势（相对竞品的差异化说明，投标/汇报时直接引用）
+    #: 注：MySQL 的 TEXT 列不支持默认值，这里用 VARCHAR 承载，长度足够写几条卖点
+    advantage: Mapped[str] = mapped_column(String(2000), default="")
+    #: 产品线（多选，逗号分隔存库，前端按标签拆分展示）
+    product_line: Mapped[str] = mapped_column(String(500), default="")
     status: Mapped[str] = mapped_column(String(16), default=OpportunityStatus.OPEN)
     converted_project_id: Mapped[int | None] = mapped_column(BigInteger, default=None)
     converted_time: Mapped[str | None] = mapped_column(Date, default=None)

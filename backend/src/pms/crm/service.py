@@ -610,6 +610,11 @@ async def create_opportunity(
     stage: str = "LEAD",
     win_rate: float = 0,
     source: str = "",
+    competitor: str = "",
+    bid_date: str | None = None,
+    launch_date: str | None = None,
+    advantage: str = "",
+    product_line: str = "",
     owner_user_id: int = 0,
     owner_dept_id: int = 0,
     remark: str = "",
@@ -633,6 +638,11 @@ async def create_opportunity(
         stage=normalized_stage,
         win_rate=max(0, min(100, float(win_rate))),
         source=source,
+        competitor=(competitor or "").strip()[:200],
+        bid_date=bid_date or None,
+        launch_date=launch_date or None,
+        advantage=advantage or "",
+        product_line=(product_line or "").strip()[:500],
         status=status,
         remark=remark,
         create_by=context.user_id,
@@ -654,6 +664,11 @@ async def update_opportunity(
     stage: str | None = None,
     win_rate: float | None = None,
     source: str | None = None,
+    competitor: str | None = None,
+    bid_date: str | None = None,
+    launch_date: str | None = None,
+    advantage: str | None = None,
+    product_line: str | None = None,
     status: str | None = None,
     lost_reason: str | None = None,
     owner_user_id: int | None = None,
@@ -677,6 +692,16 @@ async def update_opportunity(
         opportunity.win_rate = max(0, min(100, float(win_rate)))
     if source is not None:
         opportunity.source = source
+    if competitor is not None:
+        opportunity.competitor = (competitor or "").strip()[:200]
+    if bid_date is not None:
+        opportunity.bid_date = bid_date or None
+    if launch_date is not None:
+        opportunity.launch_date = launch_date or None
+    if advantage is not None:
+        opportunity.advantage = advantage
+    if product_line is not None:
+        opportunity.product_line = (product_line or "").strip()[:500]
     if status is not None:
         opportunity.status = _enum_value(status, _OPP_STATUS_VALUES, "商机状态")
     if lost_reason is not None:

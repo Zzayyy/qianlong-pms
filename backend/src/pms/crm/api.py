@@ -171,6 +171,15 @@ class OpportunityIn(BaseModel):
     stage: str = "LEAD"
     winRate: float = 0
     source: str = ""
+    #: 竞争对手（自由文本，可写多家）
+    competitor: str = Field(default="", max_length=200)
+    #: 招标时间 / 计划上线时间
+    bidDate: str | None = None
+    launchDate: str | None = None
+    #: 钱龙优势（差异化说明）
+    advantage: str = ""
+    #: 产品线（多选，前端以逗号拼接后传入）
+    productLine: str = Field(default="", max_length=500)
     ownerUserId: int = 0
     ownerDeptId: int = 0
     remark: str = ""
@@ -186,6 +195,11 @@ class OpportunityUpdateIn(BaseModel):
     stage: str | None = None
     winRate: float | None = None
     source: str | None = None
+    competitor: str | None = Field(default=None, max_length=200)
+    bidDate: str | None = None
+    launchDate: str | None = None
+    advantage: str | None = None
+    productLine: str | None = Field(default=None, max_length=500)
     status: str | None = None
     lostReason: str | None = None
     ownerUserId: int | None = None
@@ -292,6 +306,11 @@ def _opportunity_out(
         "stage": item.stage,
         "winRate": float(item.win_rate),
         "source": item.source,
+        "competitor": item.competitor,
+        "bidDate": _date_text(item.bid_date),
+        "launchDate": _date_text(item.launch_date),
+        "advantage": item.advantage,
+        "productLine": item.product_line,
         "status": item.status,
         "convertedProjectId": item.converted_project_id,
         "convertedTime": _date_text(item.converted_time),
@@ -668,6 +687,11 @@ async def create_opportunity(
         stage=body.stage,
         win_rate=body.winRate,
         source=body.source,
+        competitor=body.competitor,
+        bid_date=body.bidDate,
+        launch_date=body.launchDate,
+        advantage=body.advantage,
+        product_line=body.productLine,
         owner_user_id=body.ownerUserId,
         owner_dept_id=body.ownerDeptId,
         remark=body.remark,
@@ -719,6 +743,11 @@ async def update_opportunity(
         stage=body.stage,
         win_rate=body.winRate,
         source=body.source,
+        competitor=body.competitor,
+        bid_date=body.bidDate,
+        launch_date=body.launchDate,
+        advantage=body.advantage,
+        product_line=body.productLine,
         status=body.status,
         lost_reason=body.lostReason,
         owner_user_id=body.ownerUserId,
