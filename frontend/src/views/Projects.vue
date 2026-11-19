@@ -1653,14 +1653,24 @@ const taskForm = ref<any>({
   priority: 'MEDIUM'
 })
 
-/** 任务负责人候选：本项目组成员（含项目经理）排前面，其余人员在后。 */
-const taskOwnerOptions = computed(() => {
+/** 人员候选分组：给定「优先人员」后拆成两组，供下拉分组展示。 */
+const groupUsers = (preferred: Set<string>) => ({
+  picked: users.value.filter((user) => preferred.has(String(user.id))),
+  rest: users.value.filter((user) => !preferred.has(String(user.id)))
+})
+
+/** 项目内负责人候选（任务 / 里程碑 / 阶段通用）：项目组成员与项目经理排前面。 */
+const ownerOptions = computed(() => {
   const preferred = new Set<string>(members.value.map((item: any) => String(item.userId)))
   if (detail.value.pmId) preferred.add(String(detail.value.pmId))
-  return {
-    picked: users.value.filter((user) => preferred.has(String(user.id))),
-    rest: users.value.filter((user) => !preferred.has(String(user.id)))
-  }
+  return groupUsers(preferred)
+})
+
+/** 立项阶段负责人候选：本次已勾选的项目成员与项目经理排前面。 */
+const draftOwnerOptions = computed(() => {
+  const preferred = new Set<string>((createForm.value.memberIds || []).map(String))
+  if (createForm.value.pmId) preferred.add(String(createForm.value.pmId))
+  return groupUsers(preferred)
 })
 
 /** 某阶段下的任务（`unassigned` 表示未分阶段）。 */
@@ -1845,10 +1855,14 @@ const saveMilestone = async () => {
     ElMessage.warning('请选择计划日期')
     return
   }
+  // 里程碑结论/日期变更会计入项目变更记录，原因必填（与阶段一致）
+  const reason = await askChangeReason(milestoneForm.value.id ? '编辑里程碑' : '新增里程碑')
+  if (!reason) return
   const payload = {
     milestoneName: milestoneForm.value.milestoneName.trim(),
     planDate: milestoneForm.value.planDate,
-    ownerId: milestoneForm.value.ownerId || 0
+    ownerId: milestoneForm.value.ownerId || 0,
+    reason
   }
   if (milestoneForm.value.id) {
     await updateMilestone(detail.value.id, milestoneForm.value.id, payload)
@@ -2174,12 +2188,22 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <span class="stage-draft-index">{{ index + 1 }}</span>
               <span class="stage-draft-name">{{ stage.stageName }} <em>*</em></span>
               <el-select v-model="stage.ownerId" filterable class="stage-owner" placeholder="阶段负责人">
-                <el-option
-                  v-for="user in users"
-                  :key="user.id"
-                  :label="`${user.realName}（${user.username}）`"
-                  :value="user.id"
-                />
+                <el-option-group v-if="draftOwnerOptions.picked.length" label="项目成员">
+                  <el-option
+                    v-for="user in draftOwnerOptions.picked"
+                    :key="user.id"
+                    :label="`${user.realName}（${user.username}）`"
+                    :value="user.id"
+                  />
+                </el-option-group>
+                <el-option-group label="其他人员">
+                  <el-option
+                    v-for="user in draftOwnerOptions.rest"
+                    :key="user.id"
+                    :label="`${user.realName}（${user.username}）`"
+                    :value="user.id"
+                  />
+                </el-option-group>
               </el-select>
               <el-date-picker
                 v-model="stage.planStart"
@@ -3286,12 +3310,22 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="field span-2">
           <label>阶段负责人</label>
           <el-select v-model="stageForm.ownerId" filterable clearable placeholder="选择负责人">
-            <el-option
-              v-for="user in users"
-              :key="user.id"
-              :label="`${user.realName}（${user.username}）`"
-              :value="user.id"
-            />
+            <el-option-group v-if="ownerOptions.picked.length" label="项目组成员">
+              <el-option
+                v-for="user in ownerOptions.picked"
+                :key="user.id"
+                :label="`${user.realName}（${user.username}）`"
+                :value="user.id"
+              />
+            </el-option-group>
+            <el-option-group label="其他人员">
+              <el-option
+                v-for="user in ownerOptions.rest"
+                :key="user.id"
+                :label="`${user.realName}（${user.username}）`"
+                :value="user.id"
+              />
+            </el-option-group>
           </el-select>
         </div>
         <div class="field">
@@ -3351,9 +3385,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="field">
           <label>负责人</label>
           <el-select v-model="taskForm.ownerId" filterable clearable placeholder="选择负责人">
-            <el-option-group v-if="taskOwnerOptions.picked.length" label="项目组成员">
+            <el-option-group v-if="ownerOptions.picked.length" label="项目组成员">
               <el-option
-                v-for="user in taskOwnerOptions.picked"
+                v-for="user in ownerOptions.picked"
                 :key="user.id"
                 :label="`${user.realName}（${user.username}）`"
                 :value="String(user.id)"
@@ -3361,7 +3395,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             </el-option-group>
             <el-option-group label="其他人员">
               <el-option
-                v-for="user in taskOwnerOptions.rest"
+                v-for="user in ownerOptions.rest"
                 :key="user.id"
                 :label="`${user.realName}（${user.username}）`"
                 :value="String(user.id)"
@@ -3418,12 +3452,22 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="field">
           <label>负责人</label>
           <el-select v-model="milestoneForm.ownerId" filterable clearable placeholder="选择负责人">
-            <el-option
-              v-for="user in users"
-              :key="user.id"
-              :label="`${user.realName}（${user.username}）`"
-              :value="String(user.id)"
-            />
+            <el-option-group v-if="ownerOptions.picked.length" label="项目组成员">
+              <el-option
+                v-for="user in ownerOptions.picked"
+                :key="user.id"
+                :label="`${user.realName}（${user.username}）`"
+                :value="String(user.id)"
+              />
+            </el-option-group>
+            <el-option-group label="其他人员">
+              <el-option
+                v-for="user in ownerOptions.rest"
+                :key="user.id"
+                :label="`${user.realName}（${user.username}）`"
+                :value="String(user.id)"
+              />
+            </el-option-group>
           </el-select>
         </div>
       </div>
