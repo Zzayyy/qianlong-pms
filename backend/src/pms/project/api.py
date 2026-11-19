@@ -927,6 +927,37 @@ async def add_member(
     return ok({"id": member.id})
 
 
+class MemberRoleIn(BaseModel):
+    """成员组内角色入参。"""
+
+    roleInProject: str = Field(min_length=1, max_length=32)
+    reason: str = Field(default="", max_length=500)
+
+
+@router.put("/{project_id}/members/{member_id}", summary="修改成员组内角色")
+async def update_member(
+    project_id: int,
+    member_id: int,
+    body: MemberRoleIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+) -> object:
+    """调整成员组内角色（项目经理需走「变更项目经理」）。
+
+    `reason` 可不传：角色微调频率高，后端会自动生成「开发 → 测试」形式的留痕原因。
+    """
+    member = await service.update_member_role(
+        session,
+        project_id,
+        member_id,
+        body.roleInProject,
+        context.user_id,
+        reason=body.reason,
+    )
+    await session.commit()
+    return ok({"id": member.id, "roleInProject": member.role_in_project})
+
+
 @router.put("/{project_id}/pm", summary="变更项目负责人")
 async def change_pm(
     project_id: int,

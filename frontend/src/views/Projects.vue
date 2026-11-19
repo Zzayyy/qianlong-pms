@@ -1,6 +1,6 @@
 <script setup lang="ts">
 defineOptions({ name: 'ProjectsPage' })
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, ClipboardCheck, Info, Plus, Timer, Zap } from 'lucide-vue-next'
@@ -46,6 +46,7 @@ import {
   submitProject,
   updateMilestone,
   updateProject,
+  updateProjectMember,
   updateRisk,
   updateStage,
   updateTask,
@@ -220,7 +221,6 @@ const milestones = ref<any[]>([])
 const members = ref<any[]>([])
 const newPmId = ref('')
 const addMemberIds = ref<string[]>([])
-const addMemberRole = ref('MEMBER')
 
 /* 项目节点与文档 */
 const canManageStage = computed(() => store.has('project:stage:edit'))
@@ -439,11 +439,10 @@ const directorPickerUsers = computed(() => {
   })
   return list
 })
-const directorsDirty = computed(
-  () =>
-    [...directorIds.value].sort().join(',') !==
-    directors.value.map((item: any) => String(item.userId)).sort().join(',')
-)
+/** 是否为项目总监：会签权记在 `t_prj_director`，成员角色只是展示口径。 */
+const isProjectDirector = (row: any) => directorIds.value.includes(String(row.userId))
+
+
 
 const docCount = (stageId: string | number) =>
   docs.value.filter(
@@ -750,13 +749,41 @@ const removeMilestone = async (row: any) => {
   milestones.value = await listMilestones(detail.value.id)
 }
 
-const saveDirectors = async () => {
-  await setProjectDirectors(detail.value.id, Array.from(new Set(directorIds.value)))
-  ElMessage.success('项目总监已保存，成员已同步，本项目变更将由其会签')
-  await loadNodeData()
-  // 总监会自动入组/退组，这里同步刷新成员列表，避免停留在旧数据
-  members.value = await listMembers(detail.value.id)
+/**
+ * 项目总监：选中/移除即保存，不再需要「保存总监」按钮。
+ *
+ * 说明：后端会把总监自动入组（并在取消时退组），所以保存后要同步刷新成员列表；
+ * 请求失败时回滚为服务端的真实结果，避免界面停留在未生效的状态。
+ */
+let directorSyncing = false
+const syncDirectors = async (ids: string[]) => {
+  if (directorSyncing) return
+  const target = Array.from(new Set(ids.map(String))).sort().join(',')
+  const current = directors.value.map((item: any) => String(item.userId)).sort().join(',')
+  if (target === current) return
+  directorSyncing = true
+  try {
+    await setProjectDirectors(detail.value.id, target ? target.split(',') : [])
+    const rows = await projectDirectors(detail.value.id)
+    directors.value = rows
+    directorIds.value = rows.map((item: any) => String(item.userId))
+    members.value = await listMembers(detail.value.id)
+    ElMessage.success('项目总监已更新，成员已同步')
+  } catch {
+    const rows = await projectDirectors(detail.value.id)
+    directors.value = rows
+    directorIds.value = rows.map((item: any) => String(item.userId))
+  } finally {
+    // 等上面的赋值触发的水合 watcher 跑完，再解除同步锁
+    await nextTick()
+    directorSyncing = false
+  }
 }
+
+watch(directorIds, (next) => {
+  if (directorSyncing) return
+  void syncDirectors(next || [])
+})
 
 /** el-upload 自定义上传：统一走 `/files`，成功后刷新列表。 */
 const doUpload = async (options: any) => {
@@ -1423,24 +1450,57 @@ const doConfirmWeekly = async (row: any) => {
   await loadWeeklies()
 }
 
-const doAddMember = async () => {
-  const ids = addMemberIds.value || []
-  if (!ids.length) {
-    ElMessage.warning('请先选择人员')
-    return
-  }
-  for (const userId of ids) {
-    const user = users.value.find((item) => String(item.id) === String(userId))
-    await addMember(detail.value.id, {
-      userId,
-      deptId: String(user?.deptId || '0'),
-      roleInProject: addMemberRole.value
-    })
-  }
+/**
+ * 项目成员：选完即入组，不再需要「添加成员」按钮。
+ *
+ * 失败（例如已在组内、账号已停用）不会中断整批，最后统一提示失败人数。
+ */
+let memberAdding = false
+const doAddMember = async (ids: string[]) => {
+  if (memberAdding || !ids.length) return
+  memberAdding = true
   addMemberIds.value = []
-  addMemberRole.value = 'MEMBER'
-  ElMessage.success(`已添加 ${ids.length} 名成员`)
-  await refreshDetail()
+  let added = 0
+  const failed: string[] = []
+  try {
+    for (const userId of ids) {
+      const user = users.value.find((item) => String(item.id) === String(userId))
+      try {
+        await addMember(detail.value.id, {
+          userId,
+          deptId: String(user?.deptId || '0'),
+          // 默认「成员」；需要区分开发/测试等角色时在列表里行内改
+          roleInProject: 'MEMBER'
+        })
+        added += 1
+      } catch {
+        failed.push(user?.realName || String(userId))
+      }
+    }
+  } finally {
+    memberAdding = false
+  }
+  if (added) {
+    ElMessage.success(`已添加 ${added} 名成员`)
+    await refreshDetail()
+  }
+  if (failed.length) {
+    ElMessage.warning(`${failed.join('、')} 添加失败（可能已在组内或账号已停用）`)
+  }
+}
+
+watch(addMemberIds, (next) => {
+  if (memberAdding || !next?.length) return
+  void doAddMember(next.map(String))
+})
+
+/** 行内调整组内角色（PM 角色走「变更项目经理」，这里不出现）。 */
+const changeMemberRole = async (row: any, role: string) => {
+  if (!role || role === row.roleInProject) return
+  // 组内角色属于日常分工微调：不弹原因输入框，留痕原因由后端自动生成
+  await updateProjectMember(detail.value.id, String(row.id), { roleInProject: role })
+  ElMessage.success('组内角色已更新')
+  members.value = await listMembers(detail.value.id)
 }
 
 const doRemoveMember = async (row: any) => {
@@ -2230,7 +2290,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-button @click="createVisible = false">取消</el-button>
           <el-button type="primary" @click="doCreate()">创建项目</el-button>
           <el-button
-            type="success"
+            type="primary"
             :disabled="createForm.approvalMode === 'PRE'"
             :title="
               createForm.approvalMode === 'PRE'
@@ -2578,15 +2638,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 placeholder="点击选择项目总监（可多人）"
                 :disabled="!canEdit || !canManage"
               />
-              <el-button
-                size="small"
-                type="primary"
-                :disabled="!canEdit || !canManage || !directorsDirty"
-                @click="saveDirectors"
-              >
-                保存总监
-              </el-button>
-              <span v-if="directorsDirty" class="ops-hint">有未保存的改动</span>
+              <span class="ops-hint">选中即保存，取消同时退组</span>
             </div>
             <p v-if="!directorIds.length" class="empty-tip">
               尚未指派：未指派时本项目无法提交变更评估
@@ -2606,17 +2658,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 title="选择要加入的成员"
                 placeholder="选择成员（可多选）"
               />
-              <el-select v-model="addMemberRole" class="ops-select narrow" size="small" placeholder="组内角色">
-                <el-option
-                  v-for="(label, code) in ASSIGNABLE_MEMBER_ROLE"
-                  :key="code"
-                  :label="label"
-                  :value="code"
-                />
-              </el-select>
-              <el-button size="small" type="primary" :disabled="!canEdit" @click="doAddMember">
-                添加成员<template v-if="addMemberIds.length">（{{ addMemberIds.length }}）</template>
-              </el-button>
+              <span class="ops-hint">选中即加入项目组</span>
             </div>
             <el-table :data="members" size="small" empty-text="暂无成员">
               <el-table-column label="姓名" min-width="130">
@@ -2625,12 +2667,46 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 </template>
               </el-table-column>
               <el-table-column prop="username" label="账号" min-width="120" class-name="pms-mobile-hide" />
-              <el-table-column label="组内角色" width="130">
+              <el-table-column label="组内角色" width="176">
                 <template #default="{ row }">
-                  <el-tag size="small" effect="plain" :type="dictOf(MEMBER_ROLE, row.roleInProject).type">
-                    {{ dictOf(MEMBER_ROLE, row.roleInProject).label }}
-                  </el-tag>
-                  <span v-if="String(row.userId) === String(detail.pmId)" class="owner-mark">当前</span>
+                  <div class="role-cell">
+                    <!-- 角色直接行内调整：添加成员时不用先选角色，减少一次判断 -->
+                    <el-select
+                      v-if="
+                        canEdit &&
+                        String(row.userId) !== String(detail.pmId) &&
+                        row.roleInProject !== 'DIRECTOR'
+                      "
+                      size="small"
+                      :model-value="row.roleInProject"
+                      @change="(value: any) => changeMemberRole(row, String(value))"
+                    >
+                      <el-option
+                        v-for="(label, code) in ASSIGNABLE_MEMBER_ROLE"
+                        :key="code"
+                        :label="label"
+                        :value="code"
+                      />
+                    </el-select>
+                    <el-tag
+                      v-else
+                      size="small"
+                      effect="plain"
+                      :type="dictOf(MEMBER_ROLE, row.roleInProject).type"
+                    >
+                      {{ dictOf(MEMBER_ROLE, row.roleInProject).label }}
+                    </el-tag>
+                    <!-- 总监身份由「项目总监」区管理，这里只读叠加，避免与会签权脱节 -->
+                    <el-tag
+                      v-if="isProjectDirector(row) && row.roleInProject !== 'DIRECTOR'"
+                      size="small"
+                      type="warning"
+                      effect="plain"
+                    >
+                      总监
+                    </el-tag>
+                    <span v-if="String(row.userId) === String(detail.pmId)" class="owner-mark">当前</span>
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column prop="joinDate" label="加入日期" width="120" class-name="pms-mobile-hide" />
@@ -2789,7 +2865,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                     </el-button>
                     <el-button
                       link
-                      type="success"
+                      type="primary"
                       :disabled="!canManageNode || row.status === 'DONE'"
                       @click="finishStage(row)"
                     >
@@ -2858,7 +2934,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                     <el-button
                       v-if="row.status !== 'REACHED'"
                       link
-                      type="success"
+                      type="primary"
                       :disabled="!canManageNode"
                       @click="achieveMilestone(row)"
                     >
@@ -3253,7 +3329,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           >
             {{ detail.retroApproval === 2 ? '重新提交补审批' : '提交补审批' }}
           </el-button>
-          <el-button v-if="detail.status === 'APPROVING' && canApproveProject" type="success" @click="doApprove">
+          <el-button v-if="detail.status === 'APPROVING' && canApproveProject" type="primary" @click="doApprove">
             审批通过
           </el-button>
           <el-button v-if="detail.status === 'APPROVED' && canEdit" type="primary" @click="doStatus('IN_PROGRESS')">
@@ -3272,7 +3348,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </el-button>
           <el-button
             v-if="detail.status === 'IN_PROGRESS' && canEdit"
-            type="success"
+            type="primary"
             @click="doStatus('COMPLETED')"
           >
             完成
@@ -3280,7 +3356,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-button v-if="detail.status === 'COMPLETED' && canEdit" @click="doStatus('IN_PROGRESS')">
             重新打开
           </el-button>
-          <el-button v-if="detail.status === 'COMPLETED' && canEdit" type="success" @click="doStatus('ACCEPTED')">
+          <el-button v-if="detail.status === 'COMPLETED' && canEdit" type="primary" @click="doStatus('ACCEPTED')">
             验收
           </el-button>
           <el-button v-if="detail.status === 'ACCEPTED' && canEdit" type="primary" @click="doStatus('CLOSED')">
@@ -4395,6 +4471,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .col-help {
   border-bottom: 1px dashed var(--pms-line, #dcdfe6);
   cursor: help;
+}
+
+/* 成员角色单元格：角色控件 + 总监/当前标记并排 */
+.role-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
 }
 
 /* 阶段缺交付文档：完成前会被拦截，提前用红色提示 */

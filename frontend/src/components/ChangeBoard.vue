@@ -1338,7 +1338,7 @@ watch(
             </el-button>
             <el-button
               v-if="status === 'ASSESSED'"
-              type="success"
+              type="primary"
               :disabled="!canApproveNow"
               @click="doApprove"
             >
@@ -1366,7 +1366,7 @@ watch(
             </el-button>
             <el-button
               v-if="status === 'VERIFIED' && canExecute"
-              type="success"
+              type="primary"
               @click="doAction('close', '关闭')"
             >
               关闭变更

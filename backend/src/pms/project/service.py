@@ -9,7 +9,13 @@ from typing import Final
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pms.common.exceptions import BizRuleError, ConflictError, ForbiddenError, NotFoundError
+from pms.common.exceptions import (
+    BizRuleError,
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ParamError,
+)
 from pms.common.logging import get_logger
 from pms.common.snowflake import next_id
 from pms.core.context import AuthContext
@@ -41,6 +47,22 @@ _BASELINE_VERSION: Final[str] = "V1.0"
 #: 补审批标记（`t_prj_project.retro_approval`）：待审批 / 已被驳回（项目继续执行）
 _RETRO_PENDING: Final[int] = 1
 _RETRO_REJECTED: Final[int] = 2
+#: 可在成员列表里直接调整的组内角色（PM / DIRECTOR 各有专门入口，不在此列）
+_ASSIGNABLE_MEMBER_ROLES: Final[frozenset[str]] = frozenset(
+    {"MEMBER", "DEV", "TEST", "IMPL", "OPS", "DESIGN", "SALES"}
+)
+#: 组内角色中文名（变更留痕与前端文案共用一套说法）
+_MEMBER_ROLE_TEXT: Final[dict[str, str]] = {
+    "PM": "项目经理",
+    "DIRECTOR": "总监",
+    "MEMBER": "成员",
+    "DEV": "开发",
+    "TEST": "测试",
+    "IMPL": "实施",
+    "OPS": "运维",
+    "DESIGN": "设计",
+    "SALES": "销售",
+}
 
 logger = get_logger(__name__)
 
@@ -125,6 +147,12 @@ def _status_text(value: object) -> str:
     """项目状态中文名（未收录的原样返回）。"""
     text = str(value or "")
     return _PROJECT_STATUS_TEXT.get(text, text)
+
+
+def _member_role_text(value: object) -> str:
+    """组内角色中文名（未收录的原样返回）。"""
+    text = str(value or "")
+    return _MEMBER_ROLE_TEXT.get(text, text)
 
 
 def _notify_text(value: object) -> str:
@@ -821,6 +849,52 @@ async def add_member(
     return member
 
 
+async def update_member_role(
+    session: AsyncSession,
+    project_id: int,
+    member_id: int,
+    role_in_project: str,
+    operator_id: int = 0,
+    reason: str = "",
+) -> PrjMember:
+    """调整成员组内角色（写变更留痕，`reason` 可选）。
+
+    说明：`PM` 只对应项目负责人，走「变更项目经理」转移；`DIRECTOR` 走项目总监
+    设置接口。这里只接受普通组内角色，避免出现两个「项目经理」。
+    `reason` 为空时自动生成「调整组内角色：开发 → 测试」，不打断日常分工调整。
+    """
+    member = await session.get(PrjMember, member_id)
+    if member is None or member.deleted != 0 or member.project_id != project_id:
+        raise NotFoundError("成员不存在")
+    role = (role_in_project or "").strip().upper()
+    if role not in _ASSIGNABLE_MEMBER_ROLES:
+        raise ParamError("组内角色不合法")
+    project = await _get_project(session, project_id)
+    if int(member.user_id) == int(project.pm_id or 0):
+        raise ConflictError("项目经理角色请在「变更项目经理」中调整")
+    before = member.role_in_project
+    if before == role:
+        return member
+    member.role_in_project = role
+    member.update_by = operator_id
+    await session.flush()
+    # 组内角色是日常分工微调，频率高、影响小：不强制用户填原因，
+    # 留痕原因自动生成（「开发 → 测试」），既可以追溯又不用打断操作。
+    log_reason = (reason or "").strip() or (
+        f"调整组内角色：{_member_role_text(before)} → {_member_role_text(role)}"
+    )
+    await _log_inline(
+        session,
+        project_id=project_id,
+        title="调整组内角色",
+        reason=log_reason,
+        operator_id=operator_id,
+        change_type="RESOURCE",
+        pairs=[("组内角色", before, role)],
+    )
+    return member
+
+
 async def list_members(session: AsyncSession, project_id: int) -> list[PrjMember]:
     """项目成员列表。"""
     stmt = (
@@ -1468,7 +1542,16 @@ async def set_directors(
                 create_by=operator_id,
             )
         )
-        await ensure_member(session, project_id, user_id, 0, role_in_project="DIRECTOR")
+        member = await ensure_member(
+            session, project_id, user_id, 0, role_in_project="DIRECTOR"
+        )
+        # 已有成员默认是 MEMBER（ensure_member 不会改角色），这里升级为 DIRECTOR，
+        # 让成员列表与会签权一致；已是开发/测试等业务角色的保持不动，
+        # 界面上再用「总监」标签叠加展示，不覆盖业务身份。
+        if member.role_in_project in {"", "MEMBER"}:
+            member.role_in_project = "DIRECTOR"
+            member.update_by = operator_id
+            await session.flush()
     # 取消总监时同步回收「仅因总监身份自动入组」的成员，保持两边一致
     for user_id in removed:
         await _detach_director_member(session, project, user_id, operator_id)

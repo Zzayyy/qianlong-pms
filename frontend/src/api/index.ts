@@ -177,6 +177,13 @@ export const addMember = (id: string, data: Record<string, unknown>) =>
 export const removeMember = (id: string, memberId: string) =>
   del<null>(`/projects/${id}/members/${memberId}`)
 
+/** 调整成员组内角色：`reason` 必填，写入项目变更记录。 */
+export const updateProjectMember = (
+  id: string,
+  memberId: string,
+  data: Record<string, unknown>
+) => put<{ id: string; roleInProject: string }>(`/projects/${id}/members/${memberId}`, data)
+
 /** 变更项目负责人：`reason` 必填，写入项目变更记录。 */
 export const changeProjectPm = (id: string, pmId: string, reason = '') =>
   put<{ id: string; pmId: string }>(`/projects/${id}/pm`, {

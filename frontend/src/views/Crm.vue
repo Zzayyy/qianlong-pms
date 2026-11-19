@@ -1340,7 +1340,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <el-button
                 v-if="canOpp"
                 link
-                type="success"
+                type="primary"
                 size="small"
                 :disabled="!canConvert(row)"
                 @click="openConvert(row)"
