@@ -264,8 +264,6 @@ const riskForm = ref<any>({
   description: '',
   level: 'MEDIUM',
   probability: 50,
-  impact: '',
-  strategy: '',
   ownerId: '',
   dueDate: ''
 })
@@ -290,17 +288,25 @@ const loadRisks = async () => {
   risks.value = await listRisks(detail.value.id)
 }
 
+/**
+ * 描述合并读取：老数据里「潜在影响 / 应对措施」是独立字段，
+ * 编辑时并回描述，避免历史信息在合并后丢失。
+ */
+const riskDescription = (row: any) =>
+  [row.description, row.impact, row.strategy]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .join('\n')
+
 const openRisk = (row?: any) => {
   riskForm.value = row
     ? {
         id: String(row.id),
         riskType: row.riskType || 'RISK',
         title: row.title,
-        description: row.description || '',
+        description: riskDescription(row),
         level: row.level || 'MEDIUM',
         probability: Number(row.probability || 0),
-        impact: row.impact || '',
-        strategy: row.strategy || '',
         ownerId: row.ownerId ? String(row.ownerId) : '',
         dueDate: row.dueDate || ''
       }
@@ -311,8 +317,6 @@ const openRisk = (row?: any) => {
         description: '',
         level: 'MEDIUM',
         probability: 50,
-        impact: '',
-        strategy: '',
         ownerId: String(store.profile?.id || ''),
         dueDate: ''
       }
@@ -327,11 +331,10 @@ const saveRisk = async () => {
   const payload = {
     riskType: riskForm.value.riskType,
     title: riskForm.value.title.trim(),
+    // 影响 / 措施并入描述统一填写；不传旧字段，后端会保留历史值
     description: riskForm.value.description,
     level: riskForm.value.level,
     probability: Number(riskForm.value.probability || 0),
-    impact: riskForm.value.impact,
-    strategy: riskForm.value.strategy,
     ownerId: riskForm.value.ownerId || 0,
     // 传空串而非 null，便于后端识别「清空截止日」
     dueDate: riskForm.value.dueDate || ''
@@ -3000,6 +3003,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                   </div>
                 </template>
               </el-table-column>
+              <!-- 影响 / 措施并入描述，列表只显示一行，hover 看全文 -->
+              <el-table-column label="描述" min-width="240" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span :class="{ muted: !riskDescription(row) }">
+                    {{ riskDescription(row) || '—' }}
+                  </span>
+                </template>
+              </el-table-column>
               <el-table-column label="等级" width="80">
                 <template #default="{ row }">
                   <el-tag size="small" effect="plain" :type="dictOf(RISK_LEVEL, row.level).type">
@@ -3584,12 +3595,22 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="field">
           <label>责任人</label>
           <el-select v-model="riskForm.ownerId" filterable clearable placeholder="选择责任人">
-            <el-option
-              v-for="member in members"
-              :key="member.userId"
-              :label="member.realName || '账号已删除'"
-              :value="String(member.userId)"
-            />
+            <el-option-group v-if="ownerOptions.picked.length" label="项目组成员">
+              <el-option
+                v-for="user in ownerOptions.picked"
+                :key="user.id"
+                :label="`${user.realName}（${user.username}）`"
+                :value="String(user.id)"
+              />
+            </el-option-group>
+            <el-option-group label="其他人员">
+              <el-option
+                v-for="user in ownerOptions.rest"
+                :key="user.id"
+                :label="`${user.realName}（${user.username}）`"
+                :value="String(user.id)"
+              />
+            </el-option-group>
           </el-select>
         </div>
         <div class="field">
@@ -3604,15 +3625,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </div>
         <div class="field span-2">
           <label>描述</label>
-          <el-input v-model="riskForm.description" type="textarea" :rows="2" maxlength="500" />
-        </div>
-        <div class="field span-2">
-          <label>潜在影响</label>
-          <el-input v-model="riskForm.impact" type="textarea" :rows="2" maxlength="500" placeholder="如：整体延期 1 周" />
-        </div>
-        <div class="field span-2">
-          <label>应对措施</label>
-          <el-input v-model="riskForm.strategy" type="textarea" :rows="2" maxlength="500" placeholder="如：安排双人对接、提前锁定测试环境" />
+          <el-input
+            v-model="riskForm.description"
+            type="textarea"
+            :rows="3"
+            maxlength="500"
+            show-word-limit
+            placeholder="描述风险或问题，可附上影响与应对措施"
+          />
         </div>
       </div>
       <template #footer>
