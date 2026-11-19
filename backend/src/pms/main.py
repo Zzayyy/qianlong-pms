@@ -31,6 +31,7 @@ from pms.core.config import get_settings
 from pms.core.database import dispose_engine
 from pms.core.redis import close_redis
 from pms.crm import api as crm_api
+from pms.crm import product_api
 from pms.file import api as file_api
 from pms.jobs import shutdown_scheduler, start_scheduler
 from pms.notice import api as notice_api
@@ -142,6 +143,7 @@ def create_app() -> FastAPI:
     app.include_router(notice_api.router)
     app.include_router(mail_api.router)
     app.include_router(crm_api.router)
+    app.include_router(product_api.router)
     app.include_router(project_api.router)
     app.include_router(change_api.router)
     app.include_router(worklog_api.router)

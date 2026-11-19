@@ -641,6 +641,34 @@ export const updateCustomer = (id: string, data: Record<string, unknown>) =>
 
 export const deleteCustomer = (id: string) => del<{ id: string }>(`/crm/customers/${id}`)
 
+/* ------------------------------ 产品列表 ------------------------------ */
+
+/** 产品档案（全公司共享，按 `crm:product:*` 权限控制）。 */
+export interface ProductItem {
+  id: string
+  productCode: string
+  productName: string
+  category: string
+  spec: string
+  unit: string
+  price: number
+  status: string
+  remark: string
+  createTime: string
+}
+
+/** 产品列表：支持名称 / 编码 / 规格关键字与类别、状态筛选。 */
+export const listProducts = (params: Record<string, unknown>) =>
+  get<Page<ProductItem>>('/products', params)
+
+export const createProduct = (data: Record<string, unknown>) =>
+  post<ProductItem>('/products', data)
+
+export const updateProduct = (id: string, data: Record<string, unknown>) =>
+  put<ProductItem>(`/products/${id}`, data)
+
+export const deleteProduct = (id: string) => del<null>(`/products/${id}`)
+
 export const changeCustomerStatus = (id: string, status: string) =>
   put<{ id: string; status: string }>(`/crm/customers/${id}/status`, { status })
 

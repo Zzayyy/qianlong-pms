@@ -15,9 +15,11 @@ from pms.crm.models import (
     CrmCustomer,
     CrmFollow,
     CrmOpportunity,
+    CrmProduct,
     CustomerStatus,
     OpportunityStage,
     OpportunityStatus,
+    ProductStatus,
 )
 from pms.org.models import SysUser
 from pms.project import service as project_service
@@ -932,3 +934,185 @@ async def crm_summary(
             "wonAmount": round(won_amount, 2),
         },
     }
+
+
+# ---------------------------------------------------------------- 产品档案
+
+_PRODUCT_PREFIX: Final[str] = "PD"
+_PRODUCT_CATEGORIES: Final[frozenset[str]] = frozenset(
+    {"SOFTWARE", "HARDWARE", "SERVICE", "SOLUTION", "OTHER"}
+)
+_PRODUCT_STATUS_VALUES: Final[frozenset[str]] = frozenset(
+    item.value for item in ProductStatus
+)
+
+
+async def next_product_code(session: AsyncSession) -> str:
+    """生成产品编码 `PD-0001`（取已用最大序号 +1，删除后也不复用）。"""
+    result = await session.execute(
+        select(CrmProduct.product_code).where(
+            CrmProduct.product_code.like(f"{_PRODUCT_PREFIX}-%")
+        )
+    )
+    used: list[int] = []
+    for code in result.scalars():
+        suffix = str(code or "").rsplit("-", 1)[-1]
+        if suffix.isdigit():
+            used.append(int(suffix))
+    return f"{_PRODUCT_PREFIX}-{max(used, default=0) + 1:04d}"
+
+
+def _product_filters(keyword: str = "", category: str = "", status: str = "") -> list[object]:
+    """产品查询条件（列表与计数共用）。"""
+    clauses: list[object] = [CrmProduct.deleted == 0]
+    if keyword:
+        like = _keyword_like(keyword)
+        clauses.append(
+            or_(
+                CrmProduct.product_name.like(like),
+                CrmProduct.product_code.like(like),
+                CrmProduct.spec.like(like),
+            )
+        )
+    if category:
+        clauses.append(
+            CrmProduct.category == _enum_value(category, _PRODUCT_CATEGORIES, "产品类别")
+        )
+    if status:
+        clauses.append(
+            CrmProduct.status == _enum_value(status, _PRODUCT_STATUS_VALUES, "产品状态")
+        )
+    return clauses
+
+
+async def list_products(
+    session: AsyncSession,
+    keyword: str = "",
+    category: str = "",
+    status: str = "",
+    offset: int = 0,
+    limit: int = 20,
+) -> list[CrmProduct]:
+    """产品列表（关键字 / 类别 / 状态筛选）。"""
+    stmt = (
+        select(CrmProduct)
+        .where(*_product_filters(keyword, category, status))
+        .order_by(CrmProduct.id.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def count_products(
+    session: AsyncSession,
+    keyword: str = "",
+    category: str = "",
+    status: str = "",
+) -> int:
+    """产品总数（筛选条件与列表一致）。"""
+    stmt = select(func.count(CrmProduct.id)).where(
+        *_product_filters(keyword, category, status)
+    )
+    result = await session.execute(stmt)
+    return int(result.scalar_one())
+
+
+async def get_product(session: AsyncSession, product_id: int) -> CrmProduct:
+    """取产品，不存在时抛 404。"""
+    product = await session.get(CrmProduct, product_id)
+    if product is None or product.deleted:
+        raise NotFoundError("产品不存在")
+    return product
+
+
+def _validate_product(
+    *, product_name: str, category: str, status: str, price: float
+) -> tuple[str, str, str, float]:
+    """校验产品入参：名称必填、类别/状态合法、单价非负。"""
+    name = (product_name or "").strip()
+    if not name:
+        raise BizRuleError("请填写产品名称")
+    if len(name) > 200:
+        raise BizRuleError("产品名称不能超过 200 字")
+    if price is not None and float(price) < 0:
+        raise BizRuleError("参考价不能为负数")
+    return (
+        name,
+        _enum_value(category or "SOFTWARE", _PRODUCT_CATEGORIES, "产品类别"),
+        _enum_value(status or ProductStatus.ACTIVE, _PRODUCT_STATUS_VALUES, "产品状态"),
+        float(price or 0),
+    )
+
+
+async def create_product(
+    session: AsyncSession,
+    context: AuthContext,
+    *,
+    product_name: str,
+    category: str = "SOFTWARE",
+    spec: str = "",
+    unit: str = "",
+    price: float = 0,
+    status: str = ProductStatus.ACTIVE,
+    remark: str = "",
+) -> CrmProduct:
+    """新增产品档案。"""
+    name, category_value, status_value, price_value = _validate_product(
+        product_name=product_name, category=category, status=status, price=price
+    )
+    product = CrmProduct(
+        product_code=await next_product_code(session),
+        product_name=name,
+        category=category_value,
+        spec=(spec or "").strip()[:200],
+        unit=(unit or "").strip()[:16],
+        price=price_value,
+        status=status_value,
+        remark=remark or "",
+        create_by=context.user_id,
+    )
+    session.add(product)
+    await session.flush()
+    return product
+
+
+async def update_product(
+    session: AsyncSession,
+    context: AuthContext,
+    product_id: int,
+    *,
+    product_name: str,
+    category: str = "SOFTWARE",
+    spec: str = "",
+    unit: str = "",
+    price: float = 0,
+    status: str = ProductStatus.ACTIVE,
+    remark: str = "",
+) -> CrmProduct:
+    """编辑产品档案（整体覆盖）。"""
+    product = await get_product(session, product_id)
+    name, category_value, status_value, price_value = _validate_product(
+        product_name=product_name, category=category, status=status, price=price
+    )
+    product.product_name = name
+    product.category = category_value
+    product.spec = (spec or "").strip()[:200]
+    product.unit = (unit or "").strip()[:16]
+    product.price = price_value
+    product.status = status_value
+    product.remark = remark or ""
+    product.update_by = context.user_id
+    await session.flush()
+    return product
+
+
+async def delete_product(
+    session: AsyncSession, context: AuthContext, product_id: int
+) -> None:
+    """删除产品（软删）。"""
+    product = await get_product(session, product_id)
+    product.deleted = 1
+    product.update_by = context.user_id
+    await session.flush()

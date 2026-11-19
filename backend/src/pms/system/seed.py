@@ -154,6 +154,8 @@ PERMISSIONS: Final[tuple[tuple[str, str, str], ...]] = (
     ("crm:customer:manage", "客户维护", "API"),
     ("crm:opp:view", "商机查看", "API"),
     ("crm:opp:manage", "商机维护", "API"),
+    ("crm:product:view", "产品查看", "API"),
+    ("crm:product:manage", "产品维护", "API"),
     ("project:create", "项目立项", "API"),
     ("project:view", "项目查看", "API"),
     ("project:edit", "项目维护", "API"),
@@ -219,6 +221,8 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
             "crm:customer:manage",
             "crm:opp:view",
             "crm:opp:manage",
+            "crm:product:view",
+            "crm:product:manage",
             "project:create",
             "project:view",
             "project:edit",
@@ -249,6 +253,8 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
         "ALL",
         _ROLE_VIEW_ALL
         + (
+            # 公司领导看产品清单（报价参考），维护交给销售 / 产品经理
+            "crm:product:view",
             "project:approve",
             # 公司领导可兜底维护项目节点/成员/文档（数据层已视为项目管理者）
             "project:edit",
@@ -271,6 +277,8 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
         "ALL",
         _ROLE_VIEW_ALL
         + (
+            "crm:product:view",
+            "crm:product:manage",
             "org:dept:manage",
             "org:user:manage",
             "org:role:view",
@@ -302,6 +310,8 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
         "DEPT_AND_SUB",
         _ROLE_VIEW_ALL
         + (
+            "crm:product:view",
+            "crm:product:manage",
             "worklog:create",
             "worklog:confirm",
             "project:doc:upload",
@@ -322,6 +332,8 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
             "crm:customer:manage",
             "crm:opp:view",
             "crm:opp:manage",
+            "crm:product:view",
+            "crm:product:manage",
             "project:view",
             "project:doc:upload",
             "change:view",
@@ -345,6 +357,9 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
             "project:doc:manage",
             "change:create",
             "change:view",
+            # 产品经理维护产品档案，报价与方案可直接引用
+            "crm:product:view",
+            "crm:product:manage",
             "change:execute",
             "worklog:create",
             "worklog:view",

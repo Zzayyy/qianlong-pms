@@ -108,3 +108,32 @@ class CrmFollow(Base, CommonMixin):
     content: Mapped[str] = mapped_column(Text, default="")
     follow_time: Mapped[str | None] = mapped_column(Date, default=None)
     next_plan: Mapped[str] = mapped_column(String(500), default="")
+
+
+class ProductStatus(StrEnum):
+    """产品状态。"""
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+
+
+class CrmProduct(Base, CommonMixin):
+    """产品档案 `t_crm_product`（报价与方案的基础资料）。
+
+    产品是全公司共享的基础档案，不做部门数据范围隔离：
+    有 `crm:product:view` 的角色看到同一份清单。
+    """
+
+    __tablename__ = "t_crm_product"
+
+    product_code: Mapped[str] = mapped_column(String(32), default="")
+    product_name: Mapped[str] = mapped_column(String(200), default="")
+    #: 产品类别：SOFTWARE / HARDWARE / SERVICE / SOLUTION / OTHER
+    category: Mapped[str] = mapped_column(String(32), default="SOFTWARE")
+    #: 规格 / 版本
+    spec: Mapped[str] = mapped_column(String(200), default="")
+    #: 计量单位：套 / 人天 / 年 …
+    unit: Mapped[str] = mapped_column(String(16), default="")
+    price: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
+    status: Mapped[str] = mapped_column(String(16), default=ProductStatus.ACTIVE)
+    remark: Mapped[str] = mapped_column(Text, default="")

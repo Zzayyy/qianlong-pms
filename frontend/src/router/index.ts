@@ -26,6 +26,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'dept-board', name: 'dept-board', component: () => import('@/views/Reports.vue'), meta: { title: '部门看板', permission: 'report:dept:view' } },
       { path: 'reports', redirect: '/dept-board' },
       { path: 'crm', name: 'crm', component: () => import('@/views/Crm.vue'), meta: { title: '客户与商机', permission: 'crm:customer:view' } },
+      { path: 'products', name: 'products', component: () => import('@/views/Products.vue'), meta: { title: '产品列表', permission: 'crm:product:view' } },
       { path: 'configs', name: 'configs', component: () => import('@/views/Configs.vue'), meta: { title: '规则参数', permission: 'sys:config' } },
       { path: 'messages', name: 'messages', component: () => import('@/views/Messages.vue'), meta: { title: '我的消息' } },
       { path: 'mail', name: 'mail', component: () => import('@/views/Mail.vue'), meta: { title: '邮件中心', permission: 'sys:config' } },

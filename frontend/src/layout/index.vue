@@ -21,6 +21,7 @@ import {
   Menu,
   Network,
   NotebookPen,
+  Package,
   PanelLeftClose,
   PanelLeftOpen,
   ScrollText,
@@ -88,7 +89,10 @@ const navSections: NavSection[] = [
   {
     key: 'crm',
     label: '客户',
-    items: [{ path: '/crm', label: '客户与商机', icon: Briefcase, permission: 'crm:customer:view' }]
+    items: [
+      { path: '/crm', label: '客户与商机', icon: Briefcase, permission: 'crm:customer:view' },
+      { path: '/products', label: '产品列表', icon: Package, permission: 'crm:product:view' }
+    ]
   },
   {
     key: 'collab',
