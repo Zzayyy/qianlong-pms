@@ -169,8 +169,6 @@ const buildStageDrafts = (ownerId: string) =>
   DEFAULT_STAGES.map((stageName, index) => ({
     stageName,
     ownerId,
-    // 阶段参与人（负责人之外的多人分工），立项时一并带入
-    memberIds: [] as string[],
     weight: 25,
     seq: index + 1,
     planStart: '',
@@ -231,7 +229,6 @@ const stageForm = ref<any>({
   id: '',
   stageName: '',
   ownerId: '',
-  memberIds: [] as string[],
   weight: 1,
   seq: 1,
   planStart: '',
@@ -562,7 +559,6 @@ const openStage = (row?: any) => {
       id: '',
       stageName: '',
       ownerId: String(detail.value.pmId || ''),
-      memberIds: [],
       weight: 1,
       seq: stages.value.length + 1,
       planStart: prev?.planEnd ? nextDayText(prev.planEnd) : detail.value.planStart || '',
@@ -636,7 +632,6 @@ const saveStage = async () => {
   const payload = {
     stageName: stageForm.value.stageName,
     ownerId: stageForm.value.ownerId || 0,
-    memberIds: (stageForm.value.memberIds || []).map(String),
     weight: Number(stageForm.value.weight || 0),
     seq: Number(stageForm.value.seq || 1),
     planStart: stageForm.value.planStart || null,
@@ -925,7 +920,6 @@ const doCreate = async (startNow = false) => {
     stages: stages.map((stage, index) => ({
       stageName: stage.stageName,
       ownerId: stage.ownerId,
-      memberIds: (stage.memberIds || []).map(String),
       weight: Number(stage.weight || 0),
       seq: index + 1,
       planStart: stage.planStart || null,
@@ -1564,11 +1558,10 @@ const taskForm = ref<any>({
   priority: 'MEDIUM'
 })
 
-/** 任务负责人候选：当前阶段的成员与负责人排前面，其余人员在后。 */
+/** 任务负责人候选：本项目组成员（含项目经理）排前面，其余人员在后。 */
 const taskOwnerOptions = computed(() => {
-  const stage = stages.value.find((item) => String(item.id) === String(taskForm.value.stageId))
-  const preferred = new Set<string>((stage?.memberIds || []).map(String))
-  if (stage?.ownerId) preferred.add(String(stage.ownerId))
+  const preferred = new Set<string>(members.value.map((item: any) => String(item.userId)))
+  if (detail.value.pmId) preferred.add(String(detail.value.pmId))
   return {
     picked: users.value.filter((user) => preferred.has(String(user.id))),
     rest: users.value.filter((user) => !preferred.has(String(user.id)))
@@ -2085,16 +2078,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 class="stage-date"
                 placeholder="结束（可选）"
               />
-              <div class="stage-members">
-                <PersonPicker
-                  v-model="stage.memberIds"
-                  :users="users"
-                  :depts="depts"
-                  title="选择阶段参与人"
-                  placeholder="参与人"
-                  size="small"
-                />
-              </div>
             </div>
           </div>
         </section>
@@ -2565,9 +2548,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                         <template v-if="row.__kind === 'stage'">
                           <template v-if="row.ownerId">
                             负责人 {{ row.ownerName || userName(row.ownerId) }} ·
-                          </template>
-                          <template v-if="(row.memberNames || []).length">
-                            参与 {{ row.memberNames.join('、') }} ·
                           </template>
                           权重 {{ row.weight }} · 文档 {{ docCount(row.id) }} ·
                           {{ tasksOfStage(row.id).length }} 个任务
@@ -3173,18 +3153,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             />
           </el-select>
         </div>
-        <div class="field span-2">
-          <label>
-            阶段参与人<span class="optional">可选，新建任务时优先从这里选负责人</span>
-          </label>
-          <PersonPicker
-            v-model="stageForm.memberIds"
-            :users="users"
-            :depts="depts"
-            title="选择阶段参与人"
-            placeholder="点击选择参与人（可多人）"
-          />
-        </div>
         <div class="field">
           <label>权重</label>
           <el-input-number v-model="stageForm.weight" :min="0" :step="0.1" />
@@ -3242,7 +3210,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="field">
           <label>负责人</label>
           <el-select v-model="taskForm.ownerId" filterable clearable placeholder="选择负责人">
-            <el-option-group v-if="taskOwnerOptions.picked.length" label="本阶段成员">
+            <el-option-group v-if="taskOwnerOptions.picked.length" label="项目组成员">
               <el-option
                 v-for="user in taskOwnerOptions.picked"
                 :key="user.id"
@@ -4082,15 +4050,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .stage-date {
   flex: 1 1 140px;
   min-width: 120px;
-}
-
-.stage-members {
-  flex: 1 1 140px;
-  min-width: 120px;
-}
-
-.stage-members :deep(.person-picker) {
-  width: 100%;
 }
 
 .stage-draft-sep {

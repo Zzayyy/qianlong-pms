@@ -80,6 +80,9 @@ def get_redis() -> Redis | None:
                 get_settings().redis_url,
                 encoding="utf-8",
                 decode_responses=True,
+                # 强制 RESP2：redis-py 8.x 默认走 RESP3 握手（HELLO），Redis 3.x/4.x
+                # 及 Windows 移植版（v3.2.100）不支持该命令，会直接报 unknown command
+                protocol=2,
                 socket_connect_timeout=_CONNECT_TIMEOUT,
                 socket_timeout=_SOCKET_TIMEOUT,
                 health_check_interval=_HEALTH_CHECK_SECONDS,
