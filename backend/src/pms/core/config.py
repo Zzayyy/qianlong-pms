@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     db_name: str = "qloffice"
     db_pool_size: int = 10
     db_max_overflow: int = 20
+    # 连接在池中最多复用多少秒后强制重建，必须小于服务端 `wait_timeout`，
+    # 否则会复用到已被服务端断开的连接（报 MySQL server has gone away）
+    db_pool_recycle: int = 1800
+    # 优先复用最近使用过的连接（LIFO），让多余的空闲连接自然回收
+    db_pool_use_lifo: bool = True
     db_echo: bool = False
 
     redis_host: str = "127.0.0.1"

@@ -975,7 +975,9 @@ async def add_member(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
 ) -> object:
-    """添加项目成员（重复加入报冲突）。"""
+    """添加项目成员（重复加入报冲突）；仅项目经理/PMO 可操作。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_manager(session, context, project)
     member = await service.add_member(
         session,
         project_id,
@@ -1006,7 +1008,10 @@ async def update_member(
     """调整成员组内角色（项目经理需走「变更项目经理」）。
 
     `reason` 可不传：角色微调频率高，后端会自动生成「开发 → 测试」形式的留痕原因。
+    仅项目经理/PMO 可操作。
     """
+    project = await service.get_project(session, project_id)
+    await ensure_project_manager(session, context, project)
     member = await service.update_member_role(
         session,
         project_id,
@@ -1053,7 +1058,9 @@ async def delete_member(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
 ) -> object:
-    """移出项目成员；项目负责人需先变更负责人。"""
+    """移出项目成员；项目负责人需先变更负责人。仅项目经理/PMO 可操作。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_manager(session, context, project)
     await service.remove_member(session, project_id, member_id, context.user_id)
     await session.commit()
     return ok(message="成员已移出")

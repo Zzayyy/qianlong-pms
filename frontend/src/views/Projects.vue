@@ -241,6 +241,8 @@ const canManageStage = computed(() => store.has('project:stage:edit'))
 const canManage = computed(() => Boolean(detail.value.canManage))
 /** 阶段 / 里程碑既要有功能权限，也要是本项目管理者。 */
 const canManageNode = computed(() => canManageStage.value && canManage.value)
+/** 成员维护（加人/改组内角色/移出）：`project:edit` + 本项目管理者，后端同样校验。 */
+const canManageMembers = computed(() => canEdit.value && canManage.value)
 const directors = ref<any[]>([])
 const directorIds = ref<string[]>([])
 const docs = ref<any[]>([])
@@ -2665,6 +2667,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <span class="block-tip">共 {{ members.length }} 人</span>
             </div>
             <div class="pane-ops">
+              <!-- 成员维护属项目管理动作：无 project:edit 或非本项目管理者不可选，避免点了才报 403 -->
               <PersonPicker
                 v-model="addMemberIds"
                 class="member-picker"
@@ -2673,8 +2676,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 :depts="depts"
                 title="选择要加入的成员"
                 placeholder="选择成员（可多选）"
+                :disabled="!canManageMembers"
               />
-              <span class="ops-hint">选中即加入项目组</span>
+              <span v-if="canManageMembers" class="ops-hint">选中即加入项目组</span>
             </div>
             <el-table :data="members" size="small" empty-text="暂无成员">
               <el-table-column label="姓名" min-width="130">
@@ -2689,7 +2693,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                     <!-- 角色直接行内调整：添加成员时不用先选角色，减少一次判断 -->
                     <el-select
                       v-if="
-                        canEdit &&
+                        canManageMembers &&
                         String(row.userId) !== String(detail.pmId) &&
                         row.roleInProject !== 'DIRECTOR'
                       "
@@ -2731,7 +2735,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                   <el-button
                     link
                     type="danger"
-                    :disabled="!canEdit || String(row.userId) === String(detail.pmId)"
+                    :disabled="!canManageMembers || String(row.userId) === String(detail.pmId)"
                     :title="String(row.userId) === String(detail.pmId) ? '项目经理需先变更项目经理' : ''"
                     @click="doRemoveMember(row)"
                   >
