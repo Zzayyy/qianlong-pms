@@ -34,13 +34,19 @@ const props = withDefaults(
   { height: '180px' }
 )
 
+/** 图形点击透传给父组件，便于图表做钻取（如状态分布跳列表）。 */
+const emit = defineEmits<{ (e: 'chart-click', params: unknown): void }>()
+
 const container = ref<HTMLDivElement | null>(null)
 let chart: ECharts | null = null
 let observer: ResizeObserver | null = null
 
 const render = () => {
   if (!container.value) return
-  if (!chart) chart = echarts.init(container.value)
+  if (!chart) {
+    chart = echarts.init(container.value)
+    chart.on('click', (params) => emit('chart-click', params))
+  }
   chart.setOption(props.option as EChartsCoreOption, true)
 }
 

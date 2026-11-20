@@ -170,6 +170,23 @@ const TABS = [
 const tab = ref('RUNNING')
 const activeStatus = computed(() => TABS.find((item) => item.key === tab.value)?.status || '')
 
+/**
+ * 看板「项目状态」钻取：`?status=IN_PROGRESS` 精确过滤单个状态。
+ * 页签是分组维度，精确状态单独存一份，避免被分组口径收敛后看不出差异。
+ */
+const statusFilter = ref('')
+
+/** 状态编码 → 所属分组页签，用于页签高亮对齐。 */
+const tabOfStatus = (code: string) =>
+  TABS.find((item) => item.status.split(',').includes(code))?.key || ''
+
+const applyStatusFilter = (code: string) => {
+  if (!code || !PROJECT_STATUS[code]) return
+  statusFilter.value = code
+  const matched = tabOfStatus(code)
+  if (matched) tab.value = matched
+}
+
 const createVisible = ref(false)
 /** 立项即按这四段建立阶段；阶段负责人默认取项目经理，可在同一界面改。 */
 const DEFAULT_STAGES = ['设计', '开发', '测试', '交付']
@@ -873,7 +890,7 @@ const load = async () => {
       pageNum: page.value.pageNum,
       pageSize: page.value.pageSize,
       keyword: keyword.value.trim() || undefined,
-      status: activeStatus.value || undefined,
+      status: statusFilter.value || activeStatus.value || undefined,
       deptId: deptFilter.value || undefined,
       pmId: pmFilter.value || undefined,
       health: healthFilter.value || undefined,
@@ -896,7 +913,16 @@ const search = () => {
 
 const switchTab = (key: string) => {
   if (tab.value === key) return
+  // 手动切页签视为放弃单状态钻取，回到分组口径
+  statusFilter.value = ''
   tab.value = key
+  search()
+}
+
+/** 清掉看板带入的状态筛选，回到当前页签分组。 */
+const clearStatusFilter = () => {
+  if (!statusFilter.value) return
+  statusFilter.value = ''
   search()
 }
 
@@ -912,6 +938,7 @@ const resetFilters = () => {
   pmFilter.value = ''
   healthFilter.value = ''
   scopeFilter.value = 'all'
+  statusFilter.value = ''
   tab.value = 'RUNNING'
   search()
 }
@@ -1987,7 +2014,25 @@ const applyEntryQuery = () => {
   const rawCreate = route.query.create
   const create = Array.isArray(rawCreate) ? rawCreate[0] : rawCreate
   if (create === '1' && canCreateProject.value) openCreate()
+  // 看板状态分布钻取：`?status=IN_PROGRESS`
+  const rawStatus = route.query.status
+  const status = Array.isArray(rawStatus) ? rawStatus[0] : rawStatus
+  if (status) applyStatusFilter(String(status))
 }
+
+/**
+ * 页面被 keep-alive 缓存，再次从看板钻取时不会重跑 onMounted，
+ * 这里靠 query 变化重新应用状态筛选。
+ */
+watch(
+  () => route.query.status,
+  (value) => {
+    const code = Array.isArray(value) ? value[0] : value
+    if (!code) return
+    applyStatusFilter(String(code))
+    search()
+  }
+)
 
 onMounted(async () => {
   syncWidth()
@@ -2016,6 +2061,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </button>
         </div>
         <div class="list-side">
+          <el-tag v-if="statusFilter" size="small" type="primary" closable @close="clearStatusFilter">
+            状态：{{ statusMeta(statusFilter).label }}
+          </el-tag>
           <span class="list-total">共 {{ total }} 个项目</span>
           <el-button size="small" :loading="loading" @click="refreshAll">刷新</el-button>
           <el-button
