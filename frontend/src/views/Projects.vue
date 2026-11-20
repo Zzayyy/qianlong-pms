@@ -113,11 +113,19 @@ const canManageDoc = computed(() => store.has('project:doc:manage'))
 const canReportProgress = computed(() => store.has('project:task:progress'))
 
 /**
- * 任务进度上报权限：项目维护者（project:edit）可改全部；
+ * 任务维护入口以接口下发的行级标记为准：项目管理者可维护全项目任务，
+ * 其余角色仅自己负责的阶段（交付负责人），后端同样兜底校验。
+ */
+const canEditTask = (row: any) => Boolean(row?.canEdit)
+/** 阶段行「新建任务」：同上，由阶段列表的 `canEditTasks` 下发。 */
+const canEditStageTasks = (row: any) => Boolean(row?.canEditTasks)
+
+/**
+ * 任务进度上报权限：能维护该任务的人可改；
  * 其他角色凭 `project:task:progress` 只能改自己负责的任务（后端同样校验）。
  */
 const canProgressTask = (row: any) => {
-  if (canEdit.value) return true
+  if (canEditTask(row)) return true
   if (!canReportProgress.value) return false
   const me = String(store.profile?.id || '')
   return Boolean(me) && String(row?.ownerId || '') === me
@@ -221,6 +229,11 @@ const milestones = ref<any[]>([])
 const members = ref<any[]>([])
 const newPmId = ref('')
 const addMemberIds = ref<string[]>([])
+/** 已在项目组的人不再进入「选择成员」候选，避免选完才提示添加失败。 */
+const memberCandidates = computed(() => {
+  const inTeam = new Set(members.value.map((item: any) => String(item.userId ?? item.id)))
+  return users.value.filter((user: any) => !inTeam.has(String(user.id)))
+})
 
 /* 项目节点与文档 */
 const canManageStage = computed(() => store.has('project:stage:edit'))
@@ -2656,7 +2669,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 v-model="addMemberIds"
                 class="member-picker"
                 size="small"
-                :users="users"
+                :users="memberCandidates"
                 :depts="depts"
                 title="选择要加入的成员"
                 placeholder="选择成员（可多选）"
@@ -2863,7 +2876,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 <template #default="{ row }">
                   <span v-if="row.__kind === 'pseudo'" class="muted">—</span>
                   <div v-else-if="row.__kind === 'stage'" class="ops-cell">
-                    <el-button link type="primary" :disabled="!canEdit" @click="openTask(undefined, String(row.id))">
+                    <el-button
+                      link
+                      type="primary"
+                      :disabled="!canEditStageTasks(row)"
+                      @click="openTask(undefined, String(row.id))"
+                    >
                       新建任务
                     </el-button>
                     <el-button
@@ -2882,8 +2900,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                     </el-button>
                   </div>
                   <div v-else class="ops-cell">
-                    <el-button link type="primary" :disabled="!canEdit" @click="openTask(row)">编辑</el-button>
-                    <el-button link type="danger" :disabled="!canEdit" @click="removeTask(row)">删除</el-button>
+                    <el-button link type="primary" :disabled="!canEditTask(row)" @click="openTask(row)">
+                      编辑
+                    </el-button>
+                    <el-button link type="danger" :disabled="!canEditTask(row)" @click="removeTask(row)">
+                      删除
+                    </el-button>
                   </div>
                 </template>
               </el-table-column>

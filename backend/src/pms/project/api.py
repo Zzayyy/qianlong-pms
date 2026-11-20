@@ -24,9 +24,11 @@ from pms.org.models import SysDept, SysUser
 from pms.project import service
 from pms.project.models import PrjProject
 from pms.project.visibility import (
+    can_manage_stage_tasks,
     can_view_project,
     ensure_project_manager,
     ensure_project_visible,
+    ensure_stage_task_manager,
     is_project_manager,
 )
 from pms.system.config_service import ConfigService
@@ -501,7 +503,14 @@ async def stages(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
 ) -> object:
-    """阶段列表（含负责人、参与人、权重与进度）。"""
+    """阶段列表（含负责人、参与人、权重与进度）。
+
+    出参附加 `canEditTasks`：当前用户能否维护该阶段下的任务
+    （项目经理/PMO 全项目，其余角色仅自己负责的阶段），供前端控制入口。
+    """
+    project = await service.get_project(session, project_id)
+    manager = await is_project_manager(session, context, project)
+    task_perm = context.has_permission("project:task:manage")
     items = await service.list_stages(session, project_id)
     member_map = await service.list_stage_members(session, [item.id for item in items])
     user_ids = {item.owner_id for item in items} | {
@@ -523,6 +532,8 @@ async def stages(
                 "planStart": item.plan_start,
                 "planEnd": item.plan_end,
                 "status": item.status,
+                "canEditTasks": manager
+                or (task_perm and int(item.owner_id or 0) == context.user_id),
             }
             for item in items
         ]
@@ -627,7 +638,18 @@ async def tasks(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
 ) -> object:
-    """WBS 任务列表（甘特数据源）。"""
+    """WBS 任务列表（甘特数据源）。
+
+    出参附加 `canEdit`：当前用户能否编辑/删除该任务（项目管理者或所属阶段交付负责人）。
+    """
+    project = await service.get_project(session, project_id)
+    manager = await is_project_manager(session, context, project)
+    task_perm = context.has_permission("project:task:manage")
+    my_stage_ids = {
+        item.id
+        for item in await service.list_stages(session, project_id)
+        if int(item.owner_id or 0) == context.user_id
+    }
     items = await service.list_tasks(session, project_id)
     names = await _user_names(session, {item.owner_id for item in items})
     return ok(
@@ -648,6 +670,7 @@ async def tasks(
                 "planEnd": item.plan_end,
                 "status": item.status,
                 "priority": item.priority,
+                "canEdit": manager or (task_perm and item.stage_id in my_stage_ids),
             }
             for item in items
         ]
@@ -659,9 +682,19 @@ async def create_task(
     project_id: int,
     body: TaskIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+    context: Annotated[
+        AuthContext,
+        Depends(require_any_permission("project:task:manage", "project:edit")),
+    ],
 ) -> object:
-    """新增 WBS 任务。"""
+    """新增 WBS 任务。
+
+    项目经理 / PMO 可给任意阶段建任务；阶段交付负责人（`project:task:manage`）
+    只能在自己负责的阶段下建，未分配阶段仍只允许项目管理者建。
+    """
+    project = await service.get_project(session, project_id)
+    await ensure_project_visible(session, context, project)
+    await ensure_stage_task_manager(session, context, project, body.stageId)
     task = await service.create_task(
         session,
         project_id,
@@ -685,9 +718,21 @@ async def update_task(
     task_id: int,
     body: TaskIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+    context: Annotated[
+        AuthContext,
+        Depends(require_any_permission("project:task:manage", "project:edit")),
+    ],
 ) -> object:
-    """编辑任务名称/阶段/负责人/权重/工时/计划起止/优先级。"""
+    """编辑任务名称/阶段/负责人/权重/工时/计划起止/优先级。
+
+    交付负责人只能改自己阶段下的任务；换阶段时目标阶段也必须在自己权限内。
+    """
+    project = await service.get_project(session, project_id)
+    await ensure_project_visible(session, context, project)
+    current = await service.get_task(session, project_id, task_id)
+    await ensure_stage_task_manager(session, context, project, current.stage_id)
+    if body.stageId and body.stageId != current.stage_id:
+        await ensure_stage_task_manager(session, context, project, body.stageId)
     task = await service.update_task(
         session,
         project_id,
@@ -711,9 +756,16 @@ async def delete_task(
     project_id: int,
     task_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
-    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+    context: Annotated[
+        AuthContext,
+        Depends(require_any_permission("project:task:manage", "project:edit")),
+    ],
 ) -> object:
-    """删除任务（软删）并重算项目进度。"""
+    """删除任务（软删）并重算项目进度；交付负责人仅限自己负责的阶段。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_visible(session, context, project)
+    current = await service.get_task(session, project_id, task_id)
+    await ensure_stage_task_manager(session, context, project, current.stage_id)
     await service.delete_task(session, project_id, task_id, context.user_id)
     await session.commit()
     return ok(message="任务已删除")
@@ -727,21 +779,30 @@ async def update_task_progress(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[
         AuthContext,
-        Depends(require_any_permission("project:task:progress", "project:edit")),
+        Depends(
+            require_any_permission(
+                "project:task:progress", "project:task:manage", "project:edit"
+            )
+        ),
     ],
 ) -> object:
     """更新任务进度并级联重算项目进度。
 
     执行人凭 `project:task:progress` 上报本人负责任务的进度；
-    项目维护者（`project:edit`）可改任意任务（服务层校验负责人身份）。
+    项目管理者与阶段交付负责人可改该范围内任意任务（服务层再次校验负责人身份）。
     """
-    del project_id
+    project = await service.get_project(session, project_id)
+    await ensure_project_visible(session, context, project)
+    current = await service.get_task(session, project_id, task_id)
+    privileged = await can_manage_stage_tasks(
+        session, context, project, current.stage_id
+    )
     task = await service.update_task_progress(
         session,
         task_id,
         body.progress,
         context.user_id,
-        privileged=context.has_permission("project:edit"),
+        privileged=privileged,
     )
     await session.commit()
     return ok({"id": task.id, "progress": float(task.progress)})

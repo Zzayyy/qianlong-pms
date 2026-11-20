@@ -1090,6 +1090,14 @@ async def list_tasks(session: AsyncSession, project_id: int) -> list[PrjTask]:
     return list(result.scalars().all())
 
 
+async def get_task(session: AsyncSession, project_id: int, task_id: int) -> PrjTask:
+    """按项目取单个任务（不存在或不属于该项目时抛 404）。"""
+    task = await session.get(PrjTask, task_id)
+    if task is None or task.deleted or task.project_id != project_id:
+        raise NotFoundError("任务不存在")
+    return task
+
+
 async def update_task_progress(
     session: AsyncSession,
     task_id: int,
