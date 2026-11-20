@@ -31,7 +31,6 @@ from pms.common.exceptions import (
     ConflictError,
     ForbiddenError,
     NotFoundError,
-    ParamError,
 )
 from pms.common.logging import get_logger
 from pms.core.context import AuthContext
@@ -154,7 +153,9 @@ async def record_inline(
     实现要点：
     - `items` 每项为 `{field_name, before_value, after_value}`；没有实际字段变化时
       直接返回 None，既不落库也不校验原因，避免"打开弹窗点保存"也要求填理由；
-    - `reason` 必填：改了东西却说不出为什么改，台账就没有价值；
+    - `reason` 为空时用变更内容兜底（如「项目状态：草稿 → 执行中」）：内联留痕
+      常与业务动作同一次调用（状态流转、成员调整），没有单独原因时也不能让
+      主流程失败，且台账仍要能看出改了什么；
     - 主单 `origin=INLINE`、`status=EFFECTIVE`，明细写 `t_chg_item`（`applied=1`），
       与审批变更共用一张表，前端台账与项目详情一次查询即可看到全部记录。
     """
@@ -165,18 +166,16 @@ async def record_inline(
     ]
     if not changes:
         return None
-    text = (reason or "").strip()
-    if not text:
-        raise ParamError("请填写变更原因")
-    project = await session.get(PrjProject, project_id)
-    if project is None or project.deleted:
-        raise NotFoundError("项目不存在")
-
     content = "\n".join(
         f"{item.get('field_name') or ''}：{item.get('before_value') or '空'} → "
         f"{item.get('after_value') or '空'}"
         for item in changes
     )
+    text = (reason or "").strip() or content
+    project = await session.get(PrjProject, project_id)
+    if project is None or project.deleted:
+        raise NotFoundError("项目不存在")
+
     request = ChgRequest(
         request_code=await next_change_code(session),
         project_id=project_id,

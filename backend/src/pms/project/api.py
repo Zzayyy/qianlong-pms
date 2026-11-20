@@ -985,6 +985,7 @@ async def add_member(
         body.deptId,
         role_in_project=body.roleInProject,
         allocation=body.allocation,
+        operator_id=context.user_id,
     )
     await session.commit()
     return ok({"id": member.id})

@@ -582,9 +582,21 @@ async def remove_member(
     project = await _get_project(session, project_id)
     if member.user_id == project.pm_id:
         raise ConflictError("项目负责人不可移出，请先变更负责人")
+    name = await _user_label(session, member.user_id)
+    role_text = _member_role_text(member.role_in_project)
     member.deleted = 1
     member.update_by = operator_id
     await session.flush()
+    if operator_id:
+        await _log_inline(
+            session,
+            project_id=project_id,
+            title=f"移出项目组：{name}",
+            reason=f"{name} 移出项目组（原组内角色：{role_text}）",
+            operator_id=operator_id,
+            change_type="RESOURCE",
+            pairs=[("组内角色", role_text, "")],
+        )
 
 
 async def submit_for_approval(
@@ -826,8 +838,13 @@ async def add_member(
     dept_id: int,
     role_in_project: str = "MEMBER",
     allocation: float = 100,
+    operator_id: int = 0,
 ) -> PrjMember:
-    """添加项目成员（重复加入抛冲突）。"""
+    """添加项目成员（重复加入抛冲突）。
+
+    `operator_id` 非空时写「加入项目组」留痕；立项、阶段负责人自动入组等
+    内部场景不传，避免一次立项刷出十几条变更记录。
+    """
     stmt = select(PrjMember).where(
         PrjMember.project_id == project_id,
         PrjMember.user_id == user_id,
@@ -846,6 +863,18 @@ async def add_member(
     )
     session.add(member)
     await session.flush()
+    if operator_id:
+        name = await _user_label(session, user_id)
+        role_text = _member_role_text(member.role_in_project)
+        await _log_inline(
+            session,
+            project_id=project_id,
+            title=f"加入项目组：{name}",
+            reason=f"{name} 加入项目组（{role_text}）",
+            operator_id=operator_id,
+            change_type="RESOURCE",
+            pairs=[("组内角色", "", role_text)],
+        )
     return member
 
 
@@ -878,19 +907,23 @@ async def update_member_role(
     member.role_in_project = role
     member.update_by = operator_id
     await session.flush()
+    # 姓名要能直接看出「谁的角色变了」：写进标题、原因与明细字段名
+    name = await _user_label(session, member.user_id)
+    # 明细字段名上限 32 字符，超长姓名截断，避免写库报错
+    short_name = name if len(name) <= 20 else f"{name[:19]}…"
+    before_text = _member_role_text(before)
+    after_text = _member_role_text(role)
     # 组内角色是日常分工微调，频率高、影响小：不强制用户填原因，
-    # 留痕原因自动生成（「开发 → 测试」），既可以追溯又不用打断操作。
-    log_reason = (reason or "").strip() or (
-        f"调整组内角色：{_member_role_text(before)} → {_member_role_text(role)}"
-    )
+    # 留痕原因自动生成（「张三：开发 → 测试」），既可以追溯又不用打断操作。
+    log_reason = (reason or "").strip() or f"{name}：{before_text} → {after_text}"
     await _log_inline(
         session,
         project_id=project_id,
-        title="调整组内角色",
+        title=f"调整组内角色：{name}",
         reason=log_reason,
         operator_id=operator_id,
         change_type="RESOURCE",
-        pairs=[("组内角色", before, role)],
+        pairs=[(f"组内角色（{short_name}）", before_text, after_text)],
     )
     return member
 

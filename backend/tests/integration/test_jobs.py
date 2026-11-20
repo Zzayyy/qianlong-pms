@@ -36,7 +36,7 @@ def _last_weekday() -> str:
 
 
 def test_scheduler_jobs() -> None:
-    """调度器装配四个任务（含审计按月归档）。"""
+    """调度器装配六个任务（含审计按月归档、邮件派发、周报自动生成）。"""
     scheduler = build_scheduler()
     jobs = {job.id: job.name for job in scheduler.get_jobs()}
     assert set(jobs) == {
@@ -44,6 +44,8 @@ def test_scheduler_jobs() -> None:
         "report_aggregate",
         "change_sla",
         "audit_archive",
+        "mail_dispatch",
+        "weekly_generate",
     }
     assert "归档" in jobs["audit_archive"]
 
