@@ -3,7 +3,7 @@ defineOptions({ name: 'ProjectsPage' })
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, ClipboardCheck, Info, Plus, Timer, Zap } from 'lucide-vue-next'
+import { ArrowDown, Check, ClipboardCheck, Plus, Timer, Zap } from 'lucide-vue-next'
 import {
   addMember,
   approveProject,
@@ -196,11 +196,35 @@ const createForm = ref<any>({
   planStart: '',
   planEnd: '',
   memberIds: [] as string[],
+  /** 组内角色：userId -> 角色编码，未指定按「成员」入组 */
+  memberRoles: {} as Record<string, string>,
   directorIds: [] as string[],
   // 创建方式：NONE=直接立项 / RETRO=先开工后补审批 / PRE=先审批后开工
   approvalMode: 'NONE' as 'NONE' | 'RETRO' | 'PRE',
   stages: [] as any[]
 })
+/** 组内角色跟随人员选择同步：新选的人默认「成员」，移除的人清掉遗留角色 */
+watch(
+  () => createForm.value.memberIds,
+  (next: string[]) => {
+    const roles: Record<string, string> = { ...(createForm.value.memberRoles || {}) }
+    const ids = (next || []).map(String)
+    for (const id of Object.keys(roles)) {
+      if (!ids.includes(id)) delete roles[id]
+    }
+    for (const id of ids) {
+      if (!roles[id]) roles[id] = 'MEMBER'
+    }
+    createForm.value.memberRoles = roles
+  },
+  { deep: true, immediate: true }
+)
+const memberName = (id: string) =>
+  users.value.find((user: any) => String(user.id) === String(id))?.realName || '未知人员'
+/** 组内角色：项目经理由「项目经理」字段决定，其余人员可自由选择分工角色 */
+const setMemberRole = (id: string, role: string) => {
+  createForm.value.memberRoles = { ...(createForm.value.memberRoles || {}), [String(id)]: role }
+}
 /** 项目经理改选时，仍指向原项目经理的阶段跟着调整；已单独指定的阶段保持不变。 */
 watch(
   () => createForm.value.pmId,
@@ -938,24 +962,13 @@ const openCreate = () => {
     planStart: '',
     planEnd: '',
     memberIds: store.profile?.id ? [store.profile.id] : [],
+    memberRoles: {},
     directorIds: [],
     approvalMode: createOptions.value.approvalEnabled ? 'PRE' : 'NONE',
     stages: buildStageDrafts(me)
   }
   createVisible.value = true
 }
-
-/** 立项方式说明文案：三种创建方式各一句，避免「审批前到底能不能干活」的歧义。 */
-const createModeTip = computed(() => {
-  const mode = createForm.value.approvalMode
-  if (mode === 'RETRO') {
-    return `创建即开工，需在 ${createOptions.value.retroDays || 7} 天内提交补审批；逾期只在列表和详情提示，不阻断执行。`
-  }
-  if (mode === 'PRE') {
-    return '创建即提交审批，审批通过后才能启动；驳回会回到草稿，改完可重新提交。'
-  }
-  return '保存即立项通过，可直接启动开展工作，无需等待审批。'
-})
 
 /**
  * 创建项目。`startNow=true` 对应「创建并启动」，仅在「直接立项」下生效：
@@ -1020,8 +1033,11 @@ const doCreate = async (startNow = false) => {
     contractAmount: Number(createForm.value.contractAmount || 0),
     planStart: createForm.value.planStart || null,
     planEnd: createForm.value.planEnd || null,
-    // 立项即带入项目组成员；项目经理和阶段负责人会自动入组，重复会被忽略
-    members: memberIds.map((userId) => ({ userId, roleInProject: 'MEMBER' })),
+    // 立项即带入项目组成员与组内角色；项目经理和阶段负责人会自动入组，重复会被忽略
+    members: memberIds.map((userId) => ({
+      userId,
+      roleInProject: createForm.value.memberRoles?.[userId] || 'MEMBER'
+    })),
     directorIds: createForm.value.directorIds || [],
     approvalMode: mode,
     startNow: effectiveStart,
@@ -1059,9 +1075,12 @@ const doCreate = async (startNow = false) => {
   await load()
 }
 
-const openDetail = async (row: any) => {
+/**
+ * 打开项目详情。`tab` 指定落地页签（列表「直达」下拉用）；
+ * 表格 `row-click` 会把 column 对象透传进来，非字符串时回落到「团队」。
+ */
+const openDetail = async (row: any, tab?: unknown) => {
   detail.value = await projectDetail(row.id)
-  activeTab.value = 'team'
   newPmId.value = String(detail.value.pmId || '')
   addMemberIds.value = []
   stages.value = await listStages(row.id)
@@ -1077,6 +1096,12 @@ const openDetail = async (row: any) => {
   weeklyTargetReport.value = null
   await loadWeeklies()
   detailVisible.value = true
+  // 落地页签：变更记录 / 周报按权限决定是否可用，不可用时回落到「团队」
+  const target = typeof tab === 'string' ? tab : 'team'
+  const allowed = new Set(['team', 'plan', 'risks', 'docs'])
+  if (store.has('change:view')) allowed.add('changes')
+  if (canViewWeekly.value) allowed.add('weekly')
+  activeTab.value = allowed.has(target) ? target : 'team'
 }
 
 const refreshDetail = async () => {
@@ -2093,9 +2118,29 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <span class="num-cell">{{ money(row.contractAmount) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="84">
+        <el-table-column label="操作" width="132">
           <template #default="{ row }">
-            <el-button link type="primary" @click.stop="openDetail(row)">详情</el-button>
+            <div class="row-actions" @click.stop>
+              <el-button link type="primary" @click.stop="openDetail(row)">详情</el-button>
+              <!-- 直达：跳过详情默认页签，直接落到团队/计划/风险/文档等 -->
+              <el-dropdown trigger="click" @command="(tab: string) => openDetail(row, tab)">
+                <el-button link type="primary">
+                  直达<el-icon class="row-actions-caret"><ArrowDown /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="team">团队</el-dropdown-item>
+                    <el-dropdown-item command="plan">计划</el-dropdown-item>
+                    <el-dropdown-item command="risks">风险</el-dropdown-item>
+                    <el-dropdown-item v-if="store.has('change:view')" command="changes">
+                      变更记录
+                    </el-dropdown-item>
+                    <el-dropdown-item command="docs">文档</el-dropdown-item>
+                    <el-dropdown-item command="weekly">周报</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
           </template>
         </el-table-column>
         <template #empty>
@@ -2123,15 +2168,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       :close-on-click-modal="false"
     >
       <div class="dialog-body">
-        <p class="form-hint">
-          保存即自动建立「设计 / 开发 / 测试 / 交付」四个阶段，无需再进详情补操作。
-        </p>
-
         <section class="form-section">
           <div class="section-head">
             <span class="section-no">1</span>
             <h4>创建方式</h4>
-            <span class="section-note">可按项目单独选择，系统参数仅为默认值</span>
           </div>
           <div class="mode-grid">
             <button
@@ -2177,10 +2217,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <el-icon v-if="createForm.approvalMode === 'PRE'" class="mode-check"><Check /></el-icon>
             </button>
           </div>
-          <p class="mode-tip">
-            <el-icon><Info /></el-icon>
-            {{ createModeTip }}
-          </p>
         </section>
 
         <section class="form-section">
@@ -2194,7 +2230,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <el-input v-model="createForm.projectName" maxlength="200" show-word-limit placeholder="如：XX 客户订单系统中台建设" />
             </div>
             <div class="field">
-              <label>所属部门<span class="optional">可选，默认总公司</span></label>
+              <label>所属部门</label>
               <el-select v-model="createForm.deptId" filterable clearable placeholder="默认总公司">
                 <el-option v-for="dept in depts" :key="dept.id" :label="dept.deptName" :value="dept.id" />
               </el-select>
@@ -2211,7 +2247,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               </el-select>
             </div>
             <div class="field">
-              <label>合同金额（元）<span class="optional">可选</span></label>
+              <label>合同金额（元）</label>
               <el-input-number v-model="createForm.contractAmount" :min="0" :step="1000" />
             </div>
             <div class="field">
@@ -2229,27 +2265,51 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <div class="section-head">
             <span class="section-no">3</span>
             <h4>项目人员</h4>
-            <span class="section-note">选中人员自动入组</span>
           </div>
           <div class="form-grid">
             <div class="field span-2">
-              <label>项目组成员<span class="optional">可选，支持搜索与部门筛选</span></label>
+              <label>项目组成员</label>
               <PersonPicker
                 v-model="createForm.memberIds"
                 :users="users"
                 :depts="depts"
                 title="选择项目组成员"
-                placeholder="点击选择成员，项目经理和阶段负责人会自动入组"
+                placeholder="选择成员"
               />
             </div>
+            <div v-if="createForm.memberIds?.length" class="field span-2">
+              <label>组内角色</label>
+              <div class="member-role-list">
+                <div v-for="id in createForm.memberIds" :key="id" class="member-role-row">
+                  <span class="member-role-name">{{ memberName(id) }}</span>
+                  <el-tag v-if="String(id) === String(createForm.pmId)" size="small" type="warning">
+                    项目经理
+                  </el-tag>
+                  <el-select
+                    v-else
+                    :model-value="createForm.memberRoles?.[id] || 'MEMBER'"
+                    size="small"
+                    class="member-role-select"
+                    @change="(value: any) => setMemberRole(String(id), String(value))"
+                  >
+                    <el-option
+                      v-for="(label, code) in ASSIGNABLE_MEMBER_ROLE"
+                      :key="code"
+                      :label="label"
+                      :value="code"
+                    />
+                  </el-select>
+                </div>
+              </div>
+            </div>
             <div class="field span-2">
-              <label>项目总监<span class="optional">可选，参与变更会签</span></label>
+              <label>项目总监</label>
               <PersonPicker
                 v-model="createForm.directorIds"
                 :users="users"
                 :depts="depts"
                 title="选择项目总监"
-                placeholder="点击选择项目总监（可多人）"
+                placeholder="选择总监"
               />
             </div>
           </div>
@@ -2259,7 +2319,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <div class="section-head">
             <span class="section-no">4</span>
             <h4>阶段安排</h4>
-            <span class="section-note">负责人默认同项目经理；时间可留空，提交时二次确认</span>
+            <span class="section-note">时间可留空</span>
           </div>
           <div class="stage-section">
             <div v-for="(stage, index) in createForm.stages" :key="stage.stageName" class="stage-draft-row">
@@ -2612,7 +2672,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-tab-pane label="团队" name="team">
             <div class="block-head">
               <h4>项目经理</h4>
-              <span class="block-tip">当前 {{ detail.pmName || userName(detail.pmId) }}，变更后原项目经理转为普通成员</span>
+              <span class="block-tip">当前 {{ detail.pmName || userName(detail.pmId) }}</span>
             </div>
             <!-- 无 project:edit 的角色（如销售）看不到下拉，只展示项目经理姓名 -->
             <div v-if="canEdit" class="pane-ops">
@@ -2643,7 +2703,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
             <div class="block-head block-head-gap">
               <h4>项目总监</h4>
-              <span class="block-tip">参与变更会签，可多人</span>
             </div>
             <div class="pane-ops">
               <PersonPicker
@@ -2653,14 +2712,11 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 :users="directorPickerUsers"
                 :depts="depts"
                 title="选择项目总监"
-                placeholder="点击选择项目总监（可多人）"
+                placeholder="选择总监"
                 :disabled="!canEdit || !canManage"
               />
-              <span class="ops-hint">选中即保存，取消同时退组</span>
             </div>
-            <p v-if="!directorIds.length" class="empty-tip">
-              尚未指派：未指派时本项目无法提交变更评估
-            </p>
+            <p v-if="!directorIds.length" class="empty-tip">未指派时无法提交变更评估</p>
 
             <div class="block-head block-head-gap">
               <h4>项目成员</h4>
@@ -2675,10 +2731,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 :users="memberCandidates"
                 :depts="depts"
                 title="选择要加入的成员"
-                placeholder="选择成员（可多选）"
+                placeholder="选择成员"
                 :disabled="!canManageMembers"
               />
-              <span v-if="canManageMembers" class="ops-hint">选中即加入项目组</span>
             </div>
             <el-table :data="members" size="small" empty-text="暂无成员">
               <el-table-column label="姓名" min-width="130">
@@ -3832,6 +3887,18 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   font-variant-numeric: tabular-nums;
 }
 
+/* 操作列：详情 + 直达下拉 */
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.row-actions-caret {
+  margin-left: 2px;
+  font-size: 11px;
+}
+
 .health {
   display: inline-flex;
   align-items: center;
@@ -4155,6 +4222,36 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--el-color-primary);
 }
 
+/* 立项时的人+组内角色分配：行内左对齐，下拉固定宽度避免被 .field 的 100% 规则撑满 */
+.member-role-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px dashed var(--el-border-color-lighter);
+  border-radius: 6px;
+}
+
+.member-role-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.member-role-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-role-row :deep(.el-select) {
+  flex: none;
+  width: 132px;
+}
+
 .form-section {
   margin-top: 18px;
 }
@@ -4278,19 +4375,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   right: 12px;
   color: var(--el-color-primary);
   font-size: 15px;
-}
-
-.mode-tip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 10px 0 0;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: var(--el-fill-color-light);
-  color: var(--pms-text-2, var(--el-text-color-regular));
-  font-size: 11.5px;
-  line-height: 1.5;
 }
 
 .stage-section {
