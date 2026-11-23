@@ -106,6 +106,11 @@ const scopeFilter = ref<ProjectScope>('all')
 const depts = ref<any[]>([])
 const users = ref<any[]>([])
 const canEdit = computed(() => store.has('project:edit'))
+/**
+ * 合同额属敏感字段：仅项目维护者与审批人可见，
+ * 开发/测试/运维/销售等普通人员看不到（后端同样不下发该字段）。
+ */
+const canViewAmount = computed(() => store.has('project:edit') || store.has('project:approve'))
 const canCreateProject = computed(() => store.has('project:create'))
 const canApproveProject = computed(() => store.has('project:approve'))
 const canUploadDoc = computed(() => store.has('project:doc:upload'))
@@ -2161,7 +2166,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <el-table-column label="计划周期" width="190" class-name="pms-mobile-hide">
           <template #default="{ row }">{{ row.planStart || '—' }} ~ {{ row.planEnd || '—' }}</template>
         </el-table-column>
-        <el-table-column label="合同额" width="110" align="right" class-name="pms-mobile-hide">
+        <el-table-column
+          v-if="canViewAmount"
+          label="合同额"
+          width="110"
+          align="right"
+          class-name="pms-mobile-hide"
+        >
           <template #default="{ row }">
             <span class="num-cell">{{ money(row.contractAmount) }}</span>
           </template>
@@ -2697,7 +2708,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <span>计划周期</span>
             <b>{{ detail.planStart || '—' }} ~ {{ detail.planEnd || '—' }}</b>
           </div>
-          <div class="metric">
+          <div v-if="canViewAmount" class="metric">
             <span>合同额</span>
             <b>{{ money(detail.contractAmount) }}</b>
           </div>

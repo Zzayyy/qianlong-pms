@@ -52,7 +52,18 @@ async def _user_names(session: AsyncSession, user_ids: set[int]) -> dict[int, st
     return {row[0]: row[1] for row in rows.all()}
 
 
-def _project_out(project: PrjProject, pm_name: str = "") -> dict[str, object]:
+def _can_view_amount(context: AuthContext) -> bool:
+    """合同额属敏感字段：仅项目维护者（`project:edit`）与审批人（`project:approve`）可见。
+
+    开发 / 测试 / 运维 / 销售等仅有 `project:view` 的普通人员看不到金额，
+    后端直接不下发该字段，避免只靠前端隐藏。
+    """
+    return context.has_permission("project:edit") or context.has_permission("project:approve")
+
+
+def _project_out(
+    project: PrjProject, pm_name: str = "", show_amount: bool = True
+) -> dict[str, object]:
     """项目出参（`pmName` 随行下发，仅 `project:view` 的角色也能看到负责人姓名）。"""
     return {
         "id": project.id,
@@ -66,7 +77,8 @@ def _project_out(project: PrjProject, pm_name: str = "") -> dict[str, object]:
         "pmName": pm_name or "",
         "customerId": project.customer_id,
         "opportunityId": project.opportunity_id,
-        "contractAmount": float(project.contract_amount),
+        # 无权限时置空，前端据此不展示合同额
+        "contractAmount": float(project.contract_amount) if show_amount else None,
         "planStart": project.plan_start,
         "planEnd": project.plan_end,
         "approvalLevel": project.approval_level,
@@ -338,8 +350,12 @@ async def list_projects(
     )
     visible_items = [item for item in items if await _can_view(session, context, item)]
     names = await _user_names(session, {item.pm_id for item in visible_items})
+    show_amount = _can_view_amount(context)
     return paged(
-        [_project_out(item, names.get(item.pm_id, "")) for item in visible_items],
+        [
+            _project_out(item, names.get(item.pm_id, ""), show_amount=show_amount)
+            for item in visible_items
+        ],
         len(visible_items) if len(visible_items) != len(items) else total,
         pagination.page_num,
         pagination.page_size,
@@ -384,7 +400,10 @@ async def project_detail(
     if not await _can_view(session, context, project):
         raise DataForbiddenError("无该项目访问权限")
     names = await _user_names(session, {project.pm_id})
-    data = _project_out(project, names.get(project.pm_id, ""))
+    can_view_amount = _can_view_amount(context)
+    data = _project_out(project, names.get(project.pm_id, ""), show_amount=can_view_amount)
+    # 前端据此决定是否展示合同额列/指标（与后端下发口径一致）
+    data["canViewAmount"] = can_view_amount
     data["canManage"] = await is_project_manager(session, context, project)
     # 项目周报只对项目经理与领导层开放，前端据此决定是否显示「周报」页签
     from pms.weekly import service as weekly_service
