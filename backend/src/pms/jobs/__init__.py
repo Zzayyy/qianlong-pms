@@ -84,7 +84,11 @@ async def job_remind_worklogs(day: str | None = None, *, notify: bool = False) -
         users = (await session.execute(
             select(SysUser).where(SysUser.deleted == 0, SysUser.status == "ENABLED")
         )).scalars().all()
+        # 管理者/领导岗自己安排补填，不做系统催办（与手动催办对象口径一致）
+        leaders = await worklog_service.leader_user_ids(session)
         for user in users:
+            if user.id in leaders:
+                continue
             # 一人一天允许多条日志，只能用 `first()` 判存在，否则多行会抛 MultipleResultsFound
             exists = (
                 await session.execute(

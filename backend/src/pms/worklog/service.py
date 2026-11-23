@@ -600,16 +600,63 @@ async def list_reminders(
     return list(result.scalars().all())
 
 
+#: 管理者/领导岗权限点：拥有日志确认或日志管理的人不被系统催办
+_LEADER_PERM_CODES: Final[tuple[str, ...]] = ("worklog:confirm", "worklog:manage")
+
+
+async def leader_user_ids(session: AsyncSession) -> set[int]:
+    """管理者/领导岗用户：全公司数据范围，或具备日志确认/管理权限。
+
+    这些人自己安排补填，系统不发催办（自动任务与手动催办对象都排除）。
+    """
+    from pms.org.models import (
+        SysPermission,
+        SysRole,
+        SysRolePermission,
+        SysUserRole,
+    )
+
+    ids: set[int] = set()
+    scope_rows = await session.execute(
+        select(SysUserRole.user_id)
+        .join(SysRole, SysRole.id == SysUserRole.role_id)
+        .where(
+            SysUserRole.deleted == 0,
+            SysRole.deleted == 0,
+            SysRole.status == "ENABLED",
+            SysRole.data_scope == "ALL",
+        )
+    )
+    ids.update(int(row[0]) for row in scope_rows.all())
+    perm_rows = await session.execute(
+        select(SysUserRole.user_id)
+        .join(SysRole, SysRole.id == SysUserRole.role_id)
+        .join(SysRolePermission, SysRolePermission.role_id == SysRole.id)
+        .join(SysPermission, SysPermission.id == SysRolePermission.perm_id)
+        .where(
+            SysUserRole.deleted == 0,
+            SysRole.deleted == 0,
+            SysRole.status == "ENABLED",
+            SysRolePermission.deleted == 0,
+            SysPermission.deleted == 0,
+            SysPermission.perm_code.in_(_LEADER_PERM_CODES),
+        )
+    )
+    ids.update(int(row[0]) for row in perm_rows.all())
+    return ids
+
+
 async def reminder_targets(
     session: AsyncSession,
     *,
     log_date: str,
     dept_ids: list[int] | None = None,
 ) -> list[dict[str, object]]:
-    """待催办人员：在岗、未提交该日日志、且该日尚未催办。"""
+    """待催办人员：在岗、未提交该日日志、且该日尚未催办（管理者/领导岗不再催办）。"""
     from pms.org.models import SysDept, SysUser
 
     day = _as_date(log_date)
+    leaders = await leader_user_ids(session)
     submitted = select(WlWorklog.user_id).where(
         WlWorklog.deleted == 0,
         WlWorklog.log_date == day,
@@ -638,6 +685,8 @@ async def reminder_targets(
     )
     if dept_ids is not None:
         stmt = stmt.where(SysUser.dept_id.in_(dept_ids))
+    if leaders:
+        stmt = stmt.where(SysUser.id.not_in(leaders))
     users = list((await session.execute(stmt)).scalars().all())
     if not users:
         return []

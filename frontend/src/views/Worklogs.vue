@@ -179,6 +179,16 @@ const router = useRouter()
 const canCreate = computed(() => store.has('worklog:create'))
 const canManageWorklog = computed(() => store.has('worklog:manage'))
 const currentUserId = computed(() => String(store.profile?.id || ''))
+/**
+ * 管理者/领导岗（全公司数据范围，或有日志确认/管理权限）：
+ * 自己安排补填，页面不展示催办提醒（与后端催办口径一致）。
+ */
+const isLeader = computed(
+  () =>
+    Boolean(store.profile?.allScope) ||
+    store.has('worklog:confirm') ||
+    store.has('worklog:manage')
+)
 
 const STATUS_META: Record<string, { label: string; type: TagType }> = {
   DRAFT: { label: '草稿', type: 'info' },
@@ -382,7 +392,10 @@ const reminderSignature = computed(
   () => `${openReminderCount.value}:${latestReminder.value?.id || ''}`
 )
 const showReminderStrip = computed(
-  () => openReminderCount.value > 0 && dismissedSignature.value !== reminderSignature.value
+  () =>
+    !isLeader.value &&
+    openReminderCount.value > 0 &&
+    dismissedSignature.value !== reminderSignature.value
 )
 const dismissReminderStrip = () => {
   dismissedSignature.value = reminderSignature.value
@@ -442,6 +455,12 @@ const latestBackfillable = computed(
 )
 
 const loadReminderBadge = async () => {
+  // 管理/领导岗不提示催办，连请求也省掉
+  if (isLeader.value) {
+    reminderBadge.value = []
+    openReminderCount.value = 0
+    return
+  }
   try {
     const data = await worklogReminders({ status: 'OPEN', pageNum: 1, pageSize: 5 })
     reminderBadge.value = (data.list || []) as unknown as ReminderRow[]
