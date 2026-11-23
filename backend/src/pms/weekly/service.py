@@ -131,9 +131,37 @@ async def _build_snapshot(
     )
     users = await worklog_service.user_names(session, {row.user_id for row in rows})
     tasks = await worklog_service.task_names(session, {row.task_id for row in rows})
-    projects = await worklog_service.project_names(
-        session, {row.project_id for row in rows}
+    # 一条日志可覆盖多个项目：工时按明细归属，避免项目周报整条重复计入
+    item_map = await worklog_service.worklog_item_projects(
+        session, [int(row.id) for row in rows]
     )
+    projects = await worklog_service.project_names(
+        session,
+        {row.project_id for row in rows}
+        | {
+            int(entry["projectId"])
+            for entries in item_map.values()
+            for entry in entries
+        },
+    )
+
+    def scoped_hours(row: WlWorklog) -> float:
+        """当前视角下这条日志贡献的工时：项目周报只取该项目的明细工时。"""
+        entries = item_map.get(int(row.id), [])
+        if project is None:
+            return float(row.total_hours)
+        if not entries:
+            # 老日志没有明细时回落到主表，避免统计丢数
+            return (
+                float(row.total_hours)
+                if int(row.project_id) == project.id
+                else 0.0
+            )
+        return sum(
+            float(entry["hours"])
+            for entry in entries
+            if int(entry["projectId"]) == project.id
+        )
 
     member_hours: dict[int, float] = {}
     member_counts: dict[int, int] = {}
@@ -145,7 +173,7 @@ async def _build_snapshot(
     late_count = 0
     risk_count = 0
     for row in rows:
-        hours = float(row.total_hours)
+        hours = scoped_hours(row)
         _, real_name = users.get(row.user_id, ("", ""))
         member_names[row.user_id] = real_name or users.get(
             row.user_id, ("", "")
@@ -154,13 +182,31 @@ async def _build_snapshot(
         member_counts[row.user_id] = member_counts.get(row.user_id, 0) + 1
 
         meta = worklog_service.log_type_meta(row.log_type)
-        label = (
-            projects.get(row.project_id, "") or "未命名项目"
-            if meta.requires_project
-            else meta.label
-        )
-        project_hours[label] = project_hours.get(label, 0.0) + hours
-        project_counts[label] = project_counts.get(label, 0) + 1
+        entries = item_map.get(int(row.id), [])
+        if meta.requires_project:
+            if project is not None:
+                label = project.project_name
+            else:
+                names = [
+                    projects.get(int(entry["projectId"]), "") or "未命名项目"
+                    for entry in entries
+                ]
+                label = "、".join(dict.fromkeys(names)) or (
+                    projects.get(row.project_id, "") or "未命名项目"
+                )
+        else:
+            label = meta.label
+        # 个人周总结展示多项目时按明细拆分；项目周报只统计当前项目
+        if project is None and meta.requires_project and entries:
+            for entry in entries:
+                name = projects.get(int(entry["projectId"]), "") or "未命名项目"
+                project_hours[name] = project_hours.get(name, 0.0) + float(
+                    entry["hours"]
+                )
+                project_counts[name] = project_counts.get(name, 0) + 1
+        else:
+            project_hours[label] = project_hours.get(label, 0.0) + hours
+            project_counts[label] = project_counts.get(label, 0) + 1
 
         day_text = _date_text(row.log_date)
         day_hours[day_text] = day_hours.get(day_text, 0.0) + hours
@@ -190,17 +236,29 @@ async def _build_snapshot(
     ]
 
     ordered = rows[-max_logs:] if max_logs > 0 and len(rows) > max_logs else rows
+
+    def entry_project(row: WlWorklog) -> str:
+        """日志涉及的项目名：项目视角固定当前项目，个人视角拼接多项目。"""
+        meta = worklog_service.log_type_meta(row.log_type)
+        if not meta.requires_project:
+            return meta.label
+        if project is not None:
+            return project.project_name
+        names = [
+            projects.get(int(entry["projectId"]), "") or "未命名项目"
+            for entry in item_map.get(int(row.id), [])
+        ]
+        return "、".join(dict.fromkeys(names)) or (
+            projects.get(row.project_id, "") or "未命名项目"
+        )
+
     entries = [
         {
             "date": _date_text(row.log_date),
             "user": member_names.get(row.user_id, ""),
-            "project": (
-                projects.get(row.project_id, "")
-                if worklog_service.log_type_meta(row.log_type).requires_project
-                else worklog_service.log_type_meta(row.log_type).label
-            ),
+            "project": entry_project(row),
             "task": tasks.get(row.task_id, ""),
-            "hours": float(row.total_hours),
+            "hours": scoped_hours(row),
             "content": (row.content or "").strip()[:_CONTENT_LIMIT],
             "problem": (row.problem or "").strip()[:_CONTENT_LIMIT],
             "plan": (row.plan or "").strip()[:_CONTENT_LIMIT],
@@ -213,7 +271,7 @@ async def _build_snapshot(
         "weekLabel": week_label(start),
         "dateFrom": start.isoformat(),
         "dateTo": end.isoformat(),
-        "totalHours": round_hours(sum(float(row.total_hours) for row in rows)),
+        "totalHours": round_hours(sum(scoped_hours(row) for row in rows)),
         "logCount": len(rows),
         "memberCount": len(member_hours),
         "lateCount": late_count,

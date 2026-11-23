@@ -930,7 +930,8 @@ async def team_summary(
 
     供项目周报详情里的「团队日志」页签展示，口径与列表筛选完全一致。
     """
-    conditions = _worklog_filters(
+    rows = await list_worklogs(
+        session,
         user_ids=user_ids,
         project_id=project_id,
         date_from=date_from,
@@ -938,54 +939,58 @@ async def team_summary(
         status=status,
         keyword=keyword,
         log_type=log_type,
+        limit=0,
     )
-    member_rows = (
-        await session.execute(
-            select(
-                WlWorklog.user_id,
-                func.count(WlWorklog.id),
-                func.sum(WlWorklog.total_hours),
-            )
-            .where(*conditions)
-            .group_by(WlWorklog.user_id)
-        )
-    ).all()
-    day_rows = (
-        await session.execute(
-            select(
-                WlWorklog.log_date,
-                func.count(WlWorklog.id),
-                func.sum(WlWorklog.total_hours),
-            )
-            .where(*conditions)
-            .group_by(WlWorklog.log_date)
-            .order_by(WlWorklog.log_date)
-        )
-    ).all()
+    item_map = await worklog_item_projects(session, [int(row.id) for row in rows])
 
-    names = await user_names(session, {int(row[0]) for row in member_rows})
+    def hours_of(row: WlWorklog) -> float:
+        """只统计本项目工时：多项目日志按明细拆分，老日志回落主表。"""
+        entries = item_map.get(int(row.id), [])
+        if not entries:
+            return float(row.total_hours) if int(row.project_id) == project_id else 0.0
+        return sum(
+            float(entry["hours"])
+            for entry in entries
+            if int(entry["projectId"]) == project_id
+        )
+
+    member_hours: dict[int, float] = {}
+    member_counts: dict[int, int] = {}
+    day_hours: dict[str, float] = {}
+    day_counts: dict[str, int] = {}
+    for row in rows:
+        hours = hours_of(row)
+        member_hours[row.user_id] = member_hours.get(row.user_id, 0.0) + hours
+        member_counts[row.user_id] = member_counts.get(row.user_id, 0) + 1
+        day_text = (
+            row.log_date.isoformat() if hasattr(row.log_date, "isoformat") else str(row.log_date)
+        )
+        day_hours[day_text] = day_hours.get(day_text, 0.0) + hours
+        day_counts[day_text] = day_counts.get(day_text, 0) + 1
+
+    names = await user_names(session, set(member_hours))
     members = [
         {
             "userId": int(user_id),
             "name": _display_name(names.get(int(user_id), ("", "")), int(user_id)),
-            "logCount": int(count),
-            "hours": round_hours(float(hours or 0)),
+            "logCount": member_counts.get(int(user_id), 0),
+            "hours": round_hours(hours),
         }
-        for user_id, count, hours in sorted(
-            member_rows, key=lambda row: float(row[2] or 0), reverse=True
+        for user_id, hours in sorted(
+            member_hours.items(), key=lambda item: item[1], reverse=True
         )
     ]
     by_day = [
         {
-            "date": log_date.isoformat() if hasattr(log_date, "isoformat") else str(log_date),
-            "count": int(count),
-            "hours": round_hours(float(hours or 0)),
+            "date": day_text,
+            "count": day_counts[day_text],
+            "hours": round_hours(day_hours[day_text]),
         }
-        for log_date, count, hours in day_rows
+        for day_text in sorted(day_hours)
     ]
     return {
-        "logCount": sum(int(row[1]) for row in member_rows),
-        "totalHours": round_hours(sum(float(row[2] or 0) for row in member_rows)),
+        "logCount": len(rows),
+        "totalHours": round_hours(sum(member_hours.values())),
         "memberCount": len(members),
         "members": members,
         "byDay": by_day,
@@ -1198,31 +1203,45 @@ async def period_summary(
     )
     rows = list(result.scalars().all())
 
+    # 一条日志可覆盖多个项目：按明细把工时拆到各项目，老日志回落主表
+    item_map = await worklog_item_projects(session, [int(row.id) for row in rows])
+
     # 项目日志按项目聚合；个人/学习/外出/会议按类型聚合，避免都挤进「个人 / 其他」
     by_project: dict[str, dict[str, object]] = {}
     by_status: dict[str, int] = {}
     late_count = 0
-    for row in rows:
-        meta = log_type_meta(row.log_type)
-        if meta.requires_project:
-            project_id = int(row.project_id or 0)
-            key = f"project:{project_id}"
-            fallback_name = ""
-        else:
-            project_id = 0
-            key = f"type:{(row.log_type or 'PERSONAL').upper()}"
-            fallback_name = meta.label
-        bucket = by_project.setdefault(
+
+    def bucket_of(key: str, project_id: int = 0, name: str = "") -> dict[str, object]:
+        """取（或建）一个统计桶。"""
+        return by_project.setdefault(
             key,
             {
                 "projectId": project_id,
-                "projectName": fallback_name,
+                "projectName": name,
                 "hours": 0.0,
                 "logCount": 0,
             },
         )
-        bucket["hours"] = float(bucket["hours"]) + float(row.total_hours)
-        bucket["logCount"] = int(bucket["logCount"]) + 1
+
+    for row in rows:
+        meta = log_type_meta(row.log_type)
+        entries = item_map.get(int(row.id), [])
+        if meta.requires_project and entries:
+            for entry in entries:
+                project_id = int(entry["projectId"])
+                bucket = bucket_of(f"project:{project_id}", project_id)
+                bucket["hours"] = float(bucket["hours"]) + float(entry["hours"])
+                bucket["logCount"] = int(bucket["logCount"]) + 1
+        elif meta.requires_project:
+            project_id = int(row.project_id or 0)
+            bucket = bucket_of(f"project:{project_id}", project_id)
+            bucket["hours"] = float(bucket["hours"]) + float(row.total_hours)
+            bucket["logCount"] = int(bucket["logCount"]) + 1
+        else:
+            key = f"type:{(row.log_type or 'PERSONAL').upper()}"
+            bucket = bucket_of(key, 0, meta.label)
+            bucket["hours"] = float(bucket["hours"]) + float(row.total_hours)
+            bucket["logCount"] = int(bucket["logCount"]) + 1
         by_status[row.status] = by_status.get(row.status, 0) + 1
         if row.is_late:
             late_count += 1

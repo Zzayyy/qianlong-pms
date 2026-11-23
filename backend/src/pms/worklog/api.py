@@ -528,7 +528,16 @@ async def export_worklogs(
             if await service.can_view(session, context, row)
         ]
 
-    projects = await service.project_names(session, {row.project_id for row in rows})
+    item_map = await service.worklog_item_projects(session, [int(row.id) for row in rows])
+    projects = await service.project_names(
+        session,
+        {row.project_id for row in rows}
+        | {
+            int(entry["projectId"])
+            for entries in item_map.values()
+            for entry in entries
+        },
+    )
     users = await service.user_names(session, {row.user_id for row in rows})
     tasks = await service.task_names(session, {row.task_id for row in rows})
 
@@ -543,6 +552,7 @@ async def export_worklogs(
             "项目",
             "任务",
             "工时",
+            "分项目工时",
             "状态",
             "补填",
             "补填天数",
@@ -561,17 +571,31 @@ async def export_worklogs(
             if row.submit_at
             else (row.submit_time.isoformat() if row.submit_time else "")
         )
+        entries = item_map.get(int(row.id), [])
+        item_projects = [
+            projects.get(int(entry["projectId"]), "") or "未命名项目"
+            for entry in entries
+        ]
+        # 多项目日志：项目列拼接、新增「分项目工时」列，Excel 里可直接筛选
+        split_hours = "；".join(
+            f"{name} {float(entry['hours']):g}h"
+            for name, entry in zip(item_projects, entries, strict=False)
+        )
+        project_text = (
+            ("、".join(item_projects) or (projects.get(row.project_id, "") or "非项目"))
+            if meta.requires_project
+            else meta.label
+        )
         writer.writerow(
             [
                 row.log_date.isoformat() if row.log_date else "",
                 row.worklog_no,
                 real_name or user_name,
                 meta.label,
-                (projects.get(row.project_id, "") or "非项目")
-                if meta.requires_project
-                else meta.label,
+                project_text,
                 tasks.get(row.task_id, ""),
                 float(row.total_hours),
+                split_hours,
                 _STATUS_LABELS.get(row.status, row.status),
                 "是" if row.is_late else "否",
                 row.late_days,
