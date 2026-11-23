@@ -97,7 +97,8 @@ class CustomerIn(BaseModel):
     industry: str = ""
     ownerUserId: int = 0
     ownerDeptId: int = 0
-    contactName: str = ""
+    # 联系人必填：没有对接人的客户无法跟进
+    contactName: str = Field(min_length=1, max_length=64)
     contactMobile: str = ""
     contactEmail: str = ""
     province: str = ""
@@ -118,7 +119,7 @@ class CustomerUpdateIn(BaseModel):
     industry: str | None = None
     ownerUserId: int | None = None
     ownerDeptId: int | None = None
-    contactName: str | None = None
+    contactName: str | None = Field(default=None, min_length=1, max_length=64)
     contactMobile: str | None = None
     contactEmail: str | None = None
     province: str | None = None

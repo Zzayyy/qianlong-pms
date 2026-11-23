@@ -332,7 +332,11 @@ def run() -> None:
         check("手动触发日聚合", code_of(r) == 0, str(data_of(r))[:60])
 
         # 10. CRM → 转项目
-        r = c.post(f"{BASE}/api/v1/crm/customers", json={"customerName": f"{MARK}客户-{RUN_ID}", "customerLevel": "A"}, headers=ah)
+        r = c.post(
+            f"{BASE}/api/v1/crm/customers",
+            json={"customerName": f"{MARK}客户-{RUN_ID}", "customerLevel": "A", "contactName": "张三"},
+            headers=ah,
+        )
         customer_id = data_of(r).get("id")
         check("创建客户", bool(customer_id), f"http={r.status_code} code={code_of(r)} id={customer_id}")
         if customer_id:

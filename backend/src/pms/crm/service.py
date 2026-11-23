@@ -265,7 +265,9 @@ async def create_customer(
     status: str = "POTENTIAL",
     remark: str = "",
 ) -> CrmCustomer:
-    """创建客户（名称唯一校验）。"""
+    """创建客户（名称唯一校验；联系人必填，没有对接人无法跟进）。"""
+    if not str(contact_name or "").strip():
+        raise BizRuleError("请填写联系人")
     exists = await session.execute(
         select(CrmCustomer.id).where(
             CrmCustomer.customer_name == customer_name, CrmCustomer.deleted == 0
@@ -281,7 +283,7 @@ async def create_customer(
         industry=industry,
         owner_user_id=owner_user_id or context.user_id,
         owner_dept_id=owner_dept_id or context.dept_id,
-        contact_name=contact_name,
+        contact_name=str(contact_name).strip(),
         contact_mobile=contact_mobile,
         contact_email=contact_email,
         province=province,
@@ -349,7 +351,9 @@ async def update_customer(
     if owner_dept_id is not None:
         customer.owner_dept_id = owner_dept_id
     if contact_name is not None:
-        customer.contact_name = contact_name
+        if not str(contact_name).strip():
+            raise BizRuleError("请填写联系人")
+        customer.contact_name = contact_name.strip()
     if contact_mobile is not None:
         customer.contact_mobile = contact_mobile
     if contact_email is not None:

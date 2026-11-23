@@ -105,6 +105,7 @@ async def test_crm_to_project_flow() -> None:
                 customer_name=f"冒烟客户{_SUFFIX}",
                 owner_user_id=user.id,
                 owner_dept_id=dept.id,
+                contact_name="张三",
                 contact_mobile="13800001111",
                 contact_email="smoke@qloffice.com",
             )

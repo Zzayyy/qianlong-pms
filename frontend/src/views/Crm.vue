@@ -98,9 +98,9 @@ const customerStatusFallback = [
   { value: 'BLACKLIST', label: '黑名单' }
 ]
 const customerLevelFallback = [
-  { value: 'A', label: 'A 类' },
-  { value: 'B', label: 'B 类' },
-  { value: 'C', label: 'C 类' }
+  { value: 'A', label: '重要' },
+  { value: 'B', label: '一般' },
+  { value: 'C', label: '次要' }
 ]
 const oppStageFallback = [
   { value: 'LEAD', label: '线索' },
@@ -387,7 +387,6 @@ const emptyCustomer = () => ({
   province: '',
   city: '',
   address: '',
-  source: '',
   status: 'POTENTIAL',
   remark: '',
   productIds: [] as string[]
@@ -415,18 +414,21 @@ const saveCustomer = async () => {
     ElMessage.warning('请填写客户名称')
     return
   }
+  if (!customerForm.value.contactName?.trim()) {
+    ElMessage.warning('请填写联系人')
+    return
+  }
   const payload = stripMasked({
     customerName: customerForm.value.customerName.trim(),
     customerLevel: customerForm.value.customerLevel,
     industry: customerForm.value.industry,
     // 负责人不再手选：新增由后端取当前登录账号，编辑不传则保持原负责人
-    contactName: customerForm.value.contactName,
+    contactName: customerForm.value.contactName.trim(),
     contactMobile: customerForm.value.contactMobile,
     contactEmail: customerForm.value.contactEmail,
     province: customerForm.value.province,
     city: customerForm.value.city,
     address: customerForm.value.address,
-    source: customerForm.value.source,
     status: customerForm.value.status,
     remark: customerForm.value.remark,
     // 无产品查看权限时不带该字段，避免把已有产品关联误清空
@@ -702,7 +704,15 @@ const quickCreateCustomer = async () => {
     })
     const name = String(result.value || '').trim()
     if (!name) return
-    const created = await createCustomer({ customerName: name })
+    // 联系人必填：快捷建客户也补一步，避免创建后才被后端拒绝
+    const contactResult = await ElMessageBox.prompt('填写该客户的联系人', '新建客户 · 联系人', {
+      confirmButtonText: '创建',
+      cancelButtonText: '取消',
+      inputPlaceholder: '如 张经理',
+      inputValidator: (value: string) => (value && value.trim() ? true : '请填写联系人')
+    })
+    const contactName = String(contactResult.value || '').trim()
+    const created = await createCustomer({ customerName: name, contactName, customerLevel: 'B' })
     await loadCustomerOptions()
     await loadSummary()
     oppForm.value.customerId = String(created.id)
@@ -1433,9 +1443,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="来源">
-          <el-input v-model="customerForm.source" placeholder="如 官网 / 转介绍 / 展会" />
-        </el-form-item>
         <el-form-item v-if="canViewProducts" label="关注产品" class="span-2">
           <el-select
             v-model="customerForm.productIds"
@@ -1457,8 +1464,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
       <div class="form-section-title">联系方式</div>
       <el-form :model="customerForm" label-width="92px" class="form-grid">
-        <el-form-item label="联系人">
-          <el-input v-model="customerForm.contactName" placeholder="选填" />
+        <el-form-item label="联系人" required>
+          <el-input v-model="customerForm.contactName" maxlength="64" placeholder="必填，如 张经理" />
         </el-form-item>
         <el-form-item label="联系电话">
           <el-input v-model="customerForm.contactMobile" placeholder="选填" />
@@ -1482,7 +1489,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
       <template #footer>
         <div class="dialog-footer">
-          <span class="form-tip">客户名称必填；新增客户默认归属当前登录账号，数据可见范围按你所在部门判断。</span>
+          <span class="form-tip">客户名称、联系人必填；新增客户默认归属当前登录账号，数据可见范围按你所在部门判断。</span>
           <div class="dialog-actions">
             <el-button @click="customerDialog = false">取消</el-button>
             <el-button type="primary" @click="saveCustomer">保存</el-button>

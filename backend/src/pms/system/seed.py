@@ -106,7 +106,8 @@ DICTS: Final[tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...]] = (
     (
         "dict_customer_level",
         "客户等级",
-        (("A", "A 类"), ("B", "B 类"), ("C", "C 类")),
+        # 值仍用 A/B/C，只改显示名：老数据不需要迁移，排序也天然稳定
+        (("A", "重要"), ("B", "一般"), ("C", "次要")),
     ),
     (
         "dict_customer_status",
