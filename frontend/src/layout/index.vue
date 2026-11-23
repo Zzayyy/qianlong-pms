@@ -42,6 +42,7 @@ import {
   type NoticeItem
 } from '@/api'
 import { firstAccessiblePath } from '@/router'
+import { pageTitleOf } from '@/utils/pageTitle'
 import { useUserStore } from '@/stores/user'
 
 interface NavLeaf {
@@ -170,15 +171,32 @@ const go = (path: string) => {
   if (route.path !== path) router.push(path)
 }
 
+/** 导航高亮：详情页（如 /projects/:id）也归属到对应列表页的导航项。 */
+const navActive = (path: string) => route.path === path || route.path.startsWith(`${path}/`)
+
 /* ---------------- 面包屑 ---------------- */
+/**
+ * 当前页对应的导航项：精确命中优先，详情页（/projects/:id）通过 meta.parentPath 回挂到列表页，
+ * 这样面包屑仍是「首页 > 项目 > 项目周期 > 项目名」四级结构。
+ */
+const crumbNav = computed(() => {
+  const exact = flatNav.value.find((item) => item.path === route.path)
+  if (exact) return { item: exact, exact: true }
+  const parentPath = route.meta.parentPath as string | undefined
+  const parent = parentPath ? flatNav.value.find((item) => item.path === parentPath) : undefined
+  return parent ? { item: parent, exact: false } : null
+})
+
 const crumbs = computed(() => {
   const items: { label: string; path?: string }[] = [{ label: '首页', path: '/dashboard' }]
-  const section = flatNav.value.find((item) => item.path === route.path)
-  if (section && section.total > 1) {
-    const first = visibleSections.value.find((entry) => entry.label === section.section)?.items[0]
-    items.push({ label: section.section, path: first?.path })
+  const hit = crumbNav.value
+  if (hit && hit.item.total > 1) {
+    const first = visibleSections.value.find((entry) => entry.label === hit.item.section)?.items[0]
+    items.push({ label: hit.item.section, path: first?.path })
   }
-  const title = (route.meta.title as string) || ''
+  // 详情页多推一层列表页，标题由页面加载数据后通过 setPageTitle 改成项目名
+  if (hit && !hit.exact) items.push({ label: hit.item.label, path: hit.item.path })
+  const title = pageTitleOf(route.path) || (route.meta.title as string) || ''
   if (title) items.push({ label: title })
   return items
 })
@@ -199,12 +217,16 @@ const KEEP_ALIVE_VIEWS: Record<string, string> = {
 }
 const cachedViews = ref<string[]>([])
 
+/** 项目详情（/projects/:id）复用列表页组件，按前缀归到同一个缓存名。 */
+const cachedNameOf = (path: string): string | undefined =>
+  KEEP_ALIVE_VIEWS[path] ?? (path.startsWith('/projects/') ? 'ProjectsPage' : undefined)
+
 /** 按当前标签页同步缓存白名单（关闭标签时立即释放对应缓存）。 */
 const syncCachedViews = () => {
   cachedViews.value = Array.from(
     new Set(
       tabs.value
-        .map((tab) => KEEP_ALIVE_VIEWS[tab.path])
+        .map((tab) => cachedNameOf(tab.path))
         .filter((name): name is string => Boolean(name))
     )
   )
@@ -212,7 +234,12 @@ const syncCachedViews = () => {
 
 const iconOf = (path: string) => {
   if (path === '/403') return ShieldAlert
-  return flatNav.value.find((item) => item.path === path)?.icon ?? LayoutDashboard
+  const parentPath = route.meta.parentPath as string | undefined
+  return (
+    flatNav.value.find((item) => item.path === path)?.icon ??
+    (parentPath ? flatNav.value.find((item) => item.path === parentPath)?.icon : undefined) ??
+    LayoutDashboard
+  )
 }
 
 if (store.has('report:company:view')) {
@@ -242,6 +269,12 @@ const addTab = () => {
 }
 
 watch(() => route.path, addTab, { immediate: true })
+
+/**
+ * 标签文案：页面若通过 `setPageTitle` 注册了标题（如项目详情用项目名），优先用它，
+ * 这样同时打开多个项目标签时靠名字区分，而不是一排「项目详情」。
+ */
+const tabLabel = (tab: TabItem) => pageTitleOf(tab.path) || tab.label
 
 const closeTab = (tab: TabItem) => {
   const index = tabs.value.findIndex((item) => item.path === tab.path)
@@ -543,7 +576,7 @@ const markAllNotices = async () => {
             :key="item.path"
             type="button"
             class="side-item"
-            :class="{ 'is-active': route.path === item.path }"
+            :class="{ 'is-active': navActive(item.path) }"
             :title="item.label"
             @click="go(item.path)"
           >
@@ -694,12 +727,13 @@ const markAllNotices = async () => {
             role="tab"
             :aria-selected="route.path === tab.path"
             tabindex="0"
+            :title="tabLabel(tab)"
             @click="go(tab.path)"
             @keydown.enter.prevent="go(tab.path)"
             @contextmenu.prevent="openContextMenu($event, tab)"
           >
             <component :is="tab.icon" class="tab-icon" :size="14" :stroke-width="1.75" />
-            <span class="tab-label">{{ tab.label }}</span>
+            <span class="tab-label">{{ tabLabel(tab) }}</span>
             <span class="tab-close" role="button" aria-label="关闭标签" @click.stop="closeTab(tab)">
               <X :size="12" :stroke-width="2" />
             </span>
@@ -890,7 +924,7 @@ const markAllNotices = async () => {
             :key="item.path"
             type="button"
             class="drawer-item"
-            :class="{ 'is-active': route.path === item.path }"
+            :class="{ 'is-active': navActive(item.path) }"
             @click="go(item.path)"
           >
             <component :is="item.icon" :size="16" :stroke-width="1.75" />
@@ -1144,10 +1178,15 @@ const markAllNotices = async () => {
 }
 
 .crumb-current {
+  display: inline-block;
+  max-width: 360px;
   padding: 3px 5px;
+  overflow: hidden;
   color: var(--pms-text);
   font-weight: 500;
   white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
 }
 
 /* ---------------- 用户 ---------------- */
@@ -1395,6 +1434,13 @@ const markAllNotices = async () => {
 
 .tab-icon {
   opacity: 0.85;
+}
+
+/* 项目名可能很长：标签内省略，悬停 title 看全名 */
+.tab-label {
+  max-width: 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tab-close {

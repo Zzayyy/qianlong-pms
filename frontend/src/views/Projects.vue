@@ -1,9 +1,9 @@
 <script setup lang="ts">
 defineOptions({ name: 'ProjectsPage' })
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, Check, ClipboardCheck, Plus, Timer, Zap } from 'lucide-vue-next'
+import { ArrowDown, ArrowLeft, Check, ClipboardCheck, Plus, Timer, Zap } from 'lucide-vue-next'
 import {
   addMember,
   approveProject,
@@ -63,6 +63,8 @@ import PersonPicker from '@/components/PersonPicker.vue'
 import { useUserStore } from '@/stores/user'
 import { useKeepAliveRefresh } from '@/utils/keepAlive'
 import { renderMarkdown, stripLeadingTitle } from '@/utils/markdown'
+import { setPageTitle } from '@/utils/pageTitle'
+import { bumpProjectData, projectDataVersion } from '@/utils/projectData'
 import { confirmWeeklyOverwrite, mondayOf, toWeekStart, weekLabelOf } from '@/utils/weekly'
 import {
   ASSIGNABLE_MEMBER_ROLE,
@@ -81,6 +83,18 @@ import {
 } from '@/utils/dict'
 
 const store = useUserStore()
+const route = useRoute()
+const router = useRouter()
+
+/**
+ * 当前实例对应的项目 ID：详情页按路由 `path` 作 key 渲染，一个项目一个实例，
+ * 因此这里在 setup 时取一次即可，不会随其它实例的路由切换而串味。
+ */
+const projectId = String(route.params.id || '')
+const isDetailView = Boolean(projectId)
+/** 本实例对应的路由地址，用作页面标题注册表的 key。 */
+const pagePath = route.path
+
 const rows = ref<any[]>([])
 const total = ref(0)
 const page = ref({ pageNum: 1, pageSize: 10 })
@@ -259,8 +273,38 @@ watch(
   }
 )
 
-const detailVisible = ref(false)
+const detailLoading = ref(false)
 const detail = ref<any>({})
+
+/**
+ * 列表页与详情页是两个实例，详情里的改动不会自动反映到缓存中的列表。
+ * 监听列表会展示的字段，一经变化就自增版本号，让列表页重新取数。
+ */
+watch(
+  () =>
+    [
+      detail.value.id,
+      detail.value.status,
+      detail.value.progress,
+      detail.value.health,
+      detail.value.pmId,
+      detail.value.deptId,
+      detail.value.contractAmount,
+      detail.value.planStart,
+      detail.value.planEnd,
+      detail.value.projectName
+    ].join('|'),
+  () => {
+    if (!isDetailView) return
+    if (!detail.value.id) return
+    bumpProjectData()
+  }
+)
+
+watch(projectDataVersion, () => {
+  if (!isDetailView) void load()
+})
+
 /** 补审批是否已逾期：只做提示，不阻断执行。 */
 const retroDuePassed = computed(() => {
   const due = String(detail.value.retroDue || '')
@@ -950,7 +994,7 @@ const resetFilters = () => {
 
 const refreshAll = async () => {
   await load()
-  if (detailVisible.value && detail.value.id) {
+  if (isDetailView && detail.value.id) {
     detail.value = await projectDetail(detail.value.id)
     stages.value = await listStages(detail.value.id)
     tasks.value = await listTasks(detail.value.id)
@@ -1108,33 +1152,69 @@ const doCreate = async (startNow = false) => {
 }
 
 /**
- * 打开项目详情。`tab` 指定落地页签（列表「直达」下拉用）；
- * 表格 `row-click` 会把 column 对象透传进来，非字符串时回落到「团队」。
+ * 打开项目详情页。`tab` 指定落地页签（列表「直达」下拉用）；
+ * 表格 `row-click` 会把 column 对象透传进来，非字符串时落到默认「团队」。
  */
 const openDetail = async (row: any, tab?: unknown) => {
-  detail.value = await projectDetail(row.id)
-  newPmId.value = String(detail.value.pmId || '')
-  addMemberIds.value = []
-  stages.value = await listStages(row.id)
-  tasks.value = await listTasks(row.id)
-  milestones.value = await listMilestones(row.id)
-  members.value = await listMembers(row.id)
-  await loadNodeData()
-  riskFilter.value = ''
-  await loadRisks()
-  await loadBaselines()
-  weeklyFilter.value = { weekStart: '', status: '' }
-  weeklyPage.value.pageNum = 1
-  weeklyTargetReport.value = null
-  await loadWeeklies()
-  detailVisible.value = true
-  // 落地页签：变更记录 / 周报按权限决定是否可用，不可用时回落到「团队」
-  const target = typeof tab === 'string' ? tab : 'team'
-  const allowed = new Set(['team', 'plan', 'risks', 'docs'])
-  if (store.has('change:view')) allowed.add('changes')
-  if (canViewWeekly.value) allowed.add('weekly')
-  activeTab.value = allowed.has(target) ? target : 'team'
+  const target = typeof tab === 'string' ? tab : ''
+  await router.push({
+    path: `/projects/${String(row.id)}`,
+    query: target ? { tab: target } : {}
+  })
 }
+
+/** 返回列表：列表页被 keep-alive 缓存，筛选与分页原样保留。 */
+const backToList = async () => {
+  await router.push('/projects')
+}
+
+const pageEl = ref<HTMLElement | null>(null)
+
+/**
+ * 详情页取数：只依赖路由里的项目 ID，支持直接打开 / 刷新 / 分享链接。
+ * 落地页签由 `?tab=` 决定，变更记录 / 周报按权限决定是否可用，不可用时回落到「团队」。
+ */
+const loadDetail = async (id: string, tab?: unknown) => {
+  detailLoading.value = true
+  try {
+    detail.value = await projectDetail(id)
+    newPmId.value = String(detail.value.pmId || '')
+    addMemberIds.value = []
+    stages.value = await listStages(id)
+    tasks.value = await listTasks(id)
+    milestones.value = await listMilestones(id)
+    members.value = await listMembers(id)
+    await loadNodeData()
+    riskFilter.value = ''
+    await loadRisks()
+    await loadBaselines()
+    weeklyFilter.value = { weekStart: '', status: '' }
+    weeklyPage.value.pageNum = 1
+    weeklyTargetReport.value = null
+    await loadWeeklies()
+    // 标签栏与面包屑改用项目名，同时打开多个项目时不再是一排「项目详情」
+    setPageTitle(pagePath, String(detail.value.projectName || ''))
+    const target = typeof tab === 'string' ? tab : 'team'
+    const allowed = new Set(['team', 'plan', 'risks', 'docs'])
+    if (store.has('change:view')) allowed.add('changes')
+    if (canViewWeekly.value) allowed.add('weekly')
+    activeTab.value = allowed.has(target) ? target : 'team'
+    await nextTick()
+    pageEl.value?.scrollIntoView({ block: 'start' })
+  } catch {
+    // 项目不存在或无权查看：退回列表，错误提示由请求拦截器统一给出
+    await router.replace('/projects')
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+/** 页签同步到地址栏，刷新后还能回到同一个页签。 */
+watch(activeTab, (value) => {
+  if (!isDetailView) return
+  if (String(route.query.tab || '') === value) return
+  void router.replace({ path: route.path, query: { ...route.query, tab: value } })
+})
 
 const refreshDetail = async () => {
   detail.value = await projectDetail(detail.value.id)
@@ -1617,11 +1697,9 @@ const doSubmit = async () => {
   ElMessage.success(retro ? '已提交补审批' : '已提交立项审批')
   if (retro) {
     await refreshDetail()
-    await load()
     return
   }
-  detailVisible.value = false
-  await load()
+  await backToList()
 }
 
 const doApprove = async () => {
@@ -1642,11 +1720,9 @@ const doApprove = async () => {
   ElMessage.success(retro ? '补审批已通过，项目继续执行' : '立项已通过并冻结基线')
   if (retro) {
     await refreshDetail()
-    await load()
     return
   }
-  detailVisible.value = false
-  await load()
+  await backToList()
 }
 
 const doReject = async () => {
@@ -1673,11 +1749,9 @@ const doReject = async () => {
   ElMessage.success(retro ? '补审批已驳回，项目继续执行' : '已驳回')
   if (retro) {
     await refreshDetail()
-    await load()
     return
   }
-  detailVisible.value = false
-  await load()
+  await backToList()
 }
 
 /** 状态流转的二次确认文案（重启/暂停/完成/验收/关闭都会改项目可见状态，确认一下更稳）。 */
@@ -2009,8 +2083,6 @@ const saveMilestone = async () => {
   milestones.value = await listMilestones(detail.value.id)
 }
 
-const route = useRoute()
-
 /** 入口参数：`?scope=pm|member` 落到对应视角，`?create=1` 直接打开立项弹窗。 */
 const applyEntryQuery = () => {
   const rawScope = route.query.scope
@@ -2043,16 +2115,29 @@ onMounted(async () => {
   syncWidth()
   window.addEventListener('resize', syncWidth)
   await loadBase()
+  if (isDetailView) {
+    await loadDetail(projectId, route.query.tab)
+    return
+  }
   applyEntryQuery()
   await load()
+})
+
+/**
+ * 详情页被缓存后再次进入（列表 → 详情 → 列表 → 详情）不会重跑 onMounted，
+ * 这里补一次刷新，避免看到旧状态；首次挂载时详情还没加载完，直接跳过。
+ */
+onActivated(() => {
+  if (!isDetailView || !detail.value.id) return
+  void loadDetail(projectId, route.query.tab)
 })
 
 onUnmounted(() => window.removeEventListener('resize', syncWidth))
 </script>
 
 <template>
-  <div class="pms-page">
-    <div class="pms-card list-card">
+  <div ref="pageEl" class="pms-page">
+    <div v-if="!isDetailView" class="pms-card list-card">
       <div class="list-head">
         <div class="seg">
           <button
@@ -2656,7 +2741,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       </template>
     </el-dialog>
 
-    <el-drawer v-model="detailVisible" title="项目详情" size="min(1320px, 96vw)">
+    <div v-if="isDetailView" class="detail-page">
+      <div class="detail-bar">
+        <el-button link :icon="ArrowLeft" @click="backToList">返回项目列表</el-button>
+        <span class="detail-bar-tip">项目详情</span>
+      </div>
+
+      <div v-if="detail.id" class="pms-card detail-card">
       <div class="detail">
         <div class="detail-head">
           <div>
@@ -3449,8 +3540,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </el-tab-pane>
         </el-tabs>
       </div>
-      <template #footer>
-        <div class="drawer-footer">
+
+      <div class="detail-actions">
           <el-button
             v-if="detail.status === 'APPROVING' && canApproveProject"
             type="danger"
@@ -3513,9 +3604,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-button v-if="detail.status === 'ACCEPTED' && canEdit" type="primary" @click="doStatus('CLOSED')">
             关闭项目
           </el-button>
-        </div>
-      </template>
-    </el-drawer>
+      </div>
+      </div>
+
+      <div v-else v-loading="detailLoading" class="pms-card detail-loading">
+        <p class="detail-loading-tip">正在加载项目详情…</p>
+      </div>
+    </div>
 
     <el-dialog v-model="stageVisible" :title="stageForm.id ? '编辑阶段' : '新增阶段'" width="min(560px, 94vw)" align-center>
       <p v-if="stageReference" class="form-hint stage-ref">
@@ -4499,9 +4594,51 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   flex: 1;
 }
 
-/* ---------------- 详情抽屉 ---------------- */
+/* ---------------- 详情页 ---------------- */
+.detail-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.detail-bar-tip {
+  font-size: 12px;
+  color: var(--pms-text-3);
+}
+
+.detail-card {
+  padding: 0;
+}
+
+.detail-loading {
+  min-height: 240px;
+}
+
+.detail-loading-tip {
+  margin: 0;
+  padding: 40px 0;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--pms-text-3);
+}
+
 .detail {
-  padding: 4px 20px 24px;
+  padding: 20px 20px 24px;
+}
+
+/* 项目状态流转按钮固定在卡片底部，长页签滚动时也能随手操作 */
+.detail-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--pms-line-soft);
+  background: var(--pms-surface);
 }
 
 .detail-head {
@@ -5027,7 +5164,11 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   }
 
   .detail {
-    padding: 4px 14px 20px;
+    padding: 16px 14px 20px;
+  }
+
+  .detail-actions {
+    padding: 10px 14px;
   }
 
   .ops-select,
