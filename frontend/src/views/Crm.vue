@@ -587,20 +587,25 @@ const oppDialog = ref(false)
 const oppEditingId = ref('')
 const oppForm = ref<any>({})
 
-/** 产品线候选（可自由输入，列表仅作快捷选择）。 */
-const PRODUCT_LINE_OPTIONS = [
-  '信贷管理',
-  '风险管控',
-  '监管报送',
-  '支付结算',
-  '资金交易',
-  '反洗钱',
-  '理财资管',
-  '数据中台',
-  '核心系统',
-  '其他'
-]
-const productLineOptions = PRODUCT_LINE_OPTIONS
+/** 产品线固定兜底项：产品档案里没有的（如纯驻场服务）统一选「其他」。 */
+const OTHER_PRODUCT_LINE = '其他'
+/**
+ * 产品线候选：与产品档案对齐（取产品名称），末尾固定补「其他」。
+ * 历史数据里的自定义产品线也并进来，避免编辑时回显成空。
+ */
+const productLineOptions = computed(() => {
+  const names = new Set<string>()
+  productOptions.value.forEach((item: any) => {
+    const name = String(item.productName || '').trim()
+    if (name) names.add(name)
+  })
+  ;(oppForm.value.productLines || []).forEach((item: any) => {
+    const name = String(item || '').trim()
+    if (name) names.add(name)
+  })
+  names.add(OTHER_PRODUCT_LINE)
+  return Array.from(names)
+})
 
 const emptyOpp = () => ({
   oppName: '',
@@ -641,7 +646,8 @@ const openOpp = async (row?: any) => {
     oppForm.value.customerId = customerId && customerId !== '0' ? customerId : null
     oppForm.value.ownerUserId = idText(oppForm.value.ownerUserId)
     oppForm.value.ownerDeptId = idText(oppForm.value.ownerDeptId)
-    oppForm.value.expectAmount = toNumber(oppForm.value.expectAmount)
+    // 表单按「万元」录入，库里存元
+    oppForm.value.expectAmount = toNumber(oppForm.value.expectAmount) / 10000
     oppForm.value.winRate = toNumber(oppForm.value.winRate)
     oppForm.value.expectSignDate = oppForm.value.expectSignDate || ''
     oppForm.value.bidDate = oppForm.value.bidDate || ''
@@ -662,10 +668,17 @@ const saveOpp = async () => {
     ElMessage.warning('请选择客户')
     return
   }
+  // 后端产品线字段上限 500 字：选太多产品时提前提示，避免 422
+  const productLine = (oppForm.value.productLines || []).map(String).join(',')
+  if (productLine.length > 500) {
+    ElMessage.warning('产品线选择过多，请精简后再保存')
+    return
+  }
   const payload = {
     oppName: oppForm.value.oppName.trim(),
     customerId: idText(oppForm.value.customerId),
-    expectAmount: Number(oppForm.value.expectAmount || 0),
+    // 表单按「万元」录入，落库换算成元（保留两位小数）
+    expectAmount: Math.round(Number(oppForm.value.expectAmount || 0) * 1000000) / 100,
     expectSignDate: oppForm.value.expectSignDate || '',
     stage: oppForm.value.stage,
     winRate: Number(oppForm.value.winRate || 0),
@@ -674,7 +687,7 @@ const saveOpp = async () => {
     bidDate: oppForm.value.bidDate || null,
     launchDate: oppForm.value.launchDate || null,
     advantage: oppForm.value.advantage || '',
-    productLine: (oppForm.value.productLines || []).join(','),
+    productLine,
     // 负责人不再手选：新增由后端取当前登录账号，编辑不传则保持原负责人
     remark: oppForm.value.remark
   }
@@ -1449,6 +1462,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             multiple
             filterable
             collapse-tags
+            :max-collapse-tags="3"
             collapse-tags-tooltip
             placeholder="选择客户关注 / 在用的产品（可多选）"
           >
@@ -1736,7 +1750,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             :rows="3"
             maxlength="500"
             show-word-limit
-            placeholder="难点、需要协助的事项、关键决策人态度…"
+            placeholder="如 需驻场 2 人 6 个月、客户要求 12 月上线、关键决策人态度…"
           />
         </el-form-item>
       </el-form>
@@ -1760,13 +1774,25 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           />
         </el-form-item>
         <el-form-item label="招标金额">
+          <!-- 录入单位是万元：步进 1 就是「加 1 万」，落库时 ×10000 换算成元 -->
           <el-input-number
             v-model="oppForm.expectAmount"
             :min="0"
             :precision="2"
-            :step="10000"
+            :step="1"
             controls-position="right"
-          />
+          >
+            <template #suffix>
+              <!-- 悬停「万元」看折合元，避免多一行提示把表单行高撑歪 -->
+              <el-tooltip
+                :content="`折合 ${Math.round(Number(oppForm.expectAmount || 0) * 10000).toLocaleString('zh-CN')} 元`"
+                :disabled="!Number(oppForm.expectAmount)"
+                placement="top"
+              >
+                <span class="amount-unit">万元</span>
+              </el-tooltip>
+            </template>
+          </el-input-number>
         </el-form-item>
         <el-form-item label="赢率(%)">
           <el-input-number
@@ -1802,11 +1828,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             v-model="oppForm.productLines"
             multiple
             filterable
-            allow-create
-            default-first-option
             collapse-tags
+            :max-collapse-tags="3"
             collapse-tags-tooltip
-            placeholder="选择或输入产品线（可多选）"
+            placeholder="选择产品线（来自产品列表，可多选；没有对应产品选「其他」）"
           >
             <el-option
               v-for="item in productLineOptions"
@@ -2240,6 +2265,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .amount-cell {
   font-variant-numeric: tabular-nums;
   font-weight: 500;
+}
+
+/* 商机金额：输入框内标单位，折合元放悬停提示，不额外占行高 */
+.amount-unit {
+  margin-left: 4px;
+  color: var(--pms-text-3);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: help;
 }
 
 /* 状态标签可点开下拉直接切换 */
