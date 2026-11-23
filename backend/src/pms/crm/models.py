@@ -108,6 +108,64 @@ class CrmOpportunity(Base, CommonMixin):
     remark: Mapped[str] = mapped_column(Text, default="")
 
 
+class RequirementStatus(StrEnum):
+    """原始需求状态。"""
+
+    OPEN = "OPEN"
+    EVALUATING = "EVALUATING"
+    CONVERTED = "CONVERTED"
+    CLOSED = "CLOSED"
+
+
+class RequirementPriority(StrEnum):
+    """原始需求优先级。"""
+
+    HIGH = "HIGH"
+    MIDDLE = "MIDDLE"
+    LOW = "LOW"
+
+
+class CrmRequirement(Base, CommonMixin):
+    """原始需求 `t_crm_requirement`。
+
+    原始需求是商机的前置：客户提的需求先落这里（一定录），评估后再决定是否转商机。
+    """
+
+    __tablename__ = "t_crm_requirement"
+
+    req_code: Mapped[str] = mapped_column(String(32), default="")
+    req_name: Mapped[str] = mapped_column(String(200), default="")
+    #: 客户可为空：口头/内部转来的需求先记录，后续再补客户
+    customer_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    owner_user_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    owner_dept_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    #: 需求来源（自由文本：客户直接提出 / 招标 / 内部规划等）
+    source: Mapped[str] = mapped_column(String(32), default="")
+    #: 优先级 HIGH / MIDDLE / LOW
+    priority: Mapped[str] = mapped_column(String(16), default=RequirementPriority.MIDDLE)
+    #: 期望完成时间 / 期望上线时间
+    expect_finish_date: Mapped[str | None] = mapped_column(Date, default=None)
+    expect_launch_date: Mapped[str | None] = mapped_column(Date, default=None)
+    #: 预估金额（元）：商机招标金额的前置口径
+    expect_amount: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
+    #: 需求说明（原「备注」字段）
+    requirement: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default=RequirementStatus.OPEN)
+    #: 评估后转成的商机（未转为空）
+    opp_id: Mapped[int | None] = mapped_column(BigInteger, default=None)
+
+
+class CrmRequirementFile(Base, CommonMixin):
+    """原始需求附件 `t_crm_requirement_file`（文件本体在 `t_sys_file`）。"""
+
+    __tablename__ = "t_crm_requirement_file"
+
+    requirement_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    file_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    file_name: Mapped[str] = mapped_column(String(256), default="")
+    size: Mapped[int] = mapped_column(BigInteger, default=0)
+
+
 class CrmFollow(Base, CommonMixin):
     """商机跟进 `t_crm_follow`。"""
 

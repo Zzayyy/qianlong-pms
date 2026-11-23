@@ -752,6 +752,34 @@ export const addOppFollow = (id: string, data: Record<string, unknown>) =>
 
 export const deleteOppFollow = (id: string) => del<{ id: string }>(`/crm/follows/${id}`)
 
+/** 原始需求（商机的前置环节）。 */
+export const listRequirements = (params: Record<string, unknown>) =>
+  get<Page<Record<string, unknown>>>('/crm/requirements', params)
+
+export const requirementDetail = (id: string) =>
+  get<Record<string, unknown>>(`/crm/requirements/${id}`)
+
+export const createRequirement = (data: Record<string, unknown>) =>
+  post<{ id: string; reqCode: string }>('/crm/requirements', data)
+
+export const updateRequirement = (id: string, data: Record<string, unknown>) =>
+  put<{ id: string; status: string }>(`/crm/requirements/${id}`, data)
+
+export const deleteRequirement = (id: string) =>
+  del<{ id: string }>(`/crm/requirements/${id}`)
+
+export const requirementFiles = (id: string) =>
+  get<Record<string, unknown>[]>(`/crm/requirements/${id}/files`)
+
+export const uploadRequirementFile = (form: FormData) =>
+  upload<Record<string, unknown>>('/crm/requirements/files', form)
+
+export const deleteRequirementFile = (fileId: string) =>
+  del<{ id: string }>(`/crm/requirement-files/${fileId}`)
+
+export const downloadRequirementFile = (fileId: string, fileName: string) =>
+  download(`/crm/requirement-files/${fileId}/download`, fileName)
+
 /* ------------------------------ 组织与参数 ------------------------------ */
 
 export const deptTree = () => get<Record<string, unknown>[]>('/depts/tree')

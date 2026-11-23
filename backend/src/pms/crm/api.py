@@ -6,24 +6,27 @@ from collections.abc import Callable
 from datetime import date, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pms.common.exceptions import NotFoundError
 from pms.common.mask import mask_amount, mask_email, mask_mobile
 from pms.common.response import ok, paged
 from pms.core.context import AuthContext
 from pms.core.database import get_session
 from pms.core.deps import Pagination, get_pagination, require_permissions
 from pms.crm import service
-from pms.crm.models import CrmContact, CrmCustomer, CrmFollow, CrmOpportunity
+from pms.crm.models import CrmContact, CrmCustomer, CrmFollow, CrmOpportunity, CrmRequirement
 from pms.crm.visibility import (
     ensure_contact_access,
     ensure_customer_access,
     ensure_dept_assignable,
     ensure_follow_access,
     ensure_opportunity_access,
+    ensure_requirement_access,
 )
 from pms.org.models import SysUser
 
@@ -208,6 +211,39 @@ class OpportunityUpdateIn(BaseModel):
     remark: str | None = None
 
 
+class RequirementIn(BaseModel):
+    """原始需求入参（覆盖 `t_crm_requirement` 业务字段）。"""
+
+    reqName: str = Field(min_length=1, max_length=200)
+    #: 客户可为空：先把需求记下来，客户后续再补
+    customerId: int = 0
+    source: str = ""
+    priority: str = "MIDDLE"
+    expectFinishDate: str | None = None
+    expectLaunchDate: str | None = None
+    expectAmount: float = 0
+    #: 需求说明（原「备注」）
+    requirement: str = ""
+    ownerUserId: int = 0
+    ownerDeptId: int = 0
+
+
+class RequirementUpdateIn(BaseModel):
+    """原始需求编辑入参（未传字段保持不变）。"""
+
+    reqName: str | None = Field(default=None, min_length=1, max_length=200)
+    customerId: int | None = None
+    source: str | None = None
+    priority: str | None = None
+    expectFinishDate: str | None = None
+    expectLaunchDate: str | None = None
+    expectAmount: float | None = None
+    requirement: str | None = None
+    status: str | None = None
+    ownerUserId: int | None = None
+    ownerDeptId: int | None = None
+
+
 class StageIn(BaseModel):
     """商机阶段入参。"""
 
@@ -334,6 +370,32 @@ def _follow_out(item: CrmFollow, creator_name: str) -> dict[str, object]:
         "createBy": item.create_by,
         "creatorName": creator_name,
         "createTime": _date_text(item.create_time),
+    }
+
+
+def _requirement_out(
+    item: CrmRequirement, owner_name: str = "", customer_name: str = ""
+) -> dict[str, object]:
+    """原始需求出参（字段覆盖数据库表）。"""
+    return {
+        "id": item.id,
+        "reqCode": item.req_code,
+        "reqName": item.req_name,
+        "customerId": item.customer_id,
+        "customerName": customer_name,
+        "ownerUserId": item.owner_user_id,
+        "ownerDeptId": item.owner_dept_id,
+        "ownerName": owner_name,
+        "source": item.source,
+        "priority": item.priority,
+        "expectFinishDate": _date_text(item.expect_finish_date),
+        "expectLaunchDate": _date_text(item.expect_launch_date),
+        "expectAmount": float(item.expect_amount),
+        "requirement": item.requirement,
+        "status": item.status,
+        "oppId": item.opp_id,
+        "createTime": _date_text(item.create_time),
+        "updateTime": _date_text(item.update_time),
     }
 
 
@@ -886,3 +948,210 @@ async def delete_follow(
     await service.delete_follow(session, context, follow_id)
     await session.commit()
     return ok({"id": follow_id})
+
+
+# ---------------------------------------------------------------- 原始需求
+# 权限沿用商机的 `crm:opp:view/manage`：需求与商机是同一批人维护的前后环节。
+
+
+@router.get("/requirements", summary="原始需求列表")
+async def requirements(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("crm:opp:view"))],
+    pagination: Annotated[Pagination, Depends(get_pagination)],
+    customerId: Annotated[int | None, Query()] = None,
+    keyword: Annotated[str, Query()] = "",
+    status: Annotated[str, Query()] = "",
+    priority: Annotated[str, Query()] = "",
+    ownerId: Annotated[int, Query()] = 0,
+) -> object:
+    """分页查询原始需求，**按数据范围过滤**。"""
+    visible = _scope(context)
+    total = await service.count_requirements(
+        session,
+        visible,
+        customerId,
+        keyword,
+        status=status,
+        priority=priority,
+        owner_id=ownerId,
+    )
+    items = await service.list_requirements(
+        session,
+        visible,
+        customerId,
+        keyword,
+        pagination.offset,
+        pagination.limit,
+        status=status,
+        priority=priority,
+        owner_id=ownerId,
+    )
+    names = await _user_names(session, {item.owner_user_id for item in items})
+    customer_names = await _customer_names(session, {item.customer_id for item in items})
+    counts = await service.requirement_file_counts(session, {int(item.id) for item in items})
+    return paged(
+        [
+            {
+                **_requirement_out(
+                    item,
+                    names.get(item.owner_user_id, ""),
+                    customer_names.get(item.customer_id, ""),
+                ),
+                "fileCount": counts.get(int(item.id), 0),
+            }
+            for item in items
+        ],
+        total,
+        pagination.page_num,
+        pagination.page_size,
+    )
+
+
+@router.post("/requirements", summary="创建原始需求")
+async def create_requirement(
+    body: RequirementIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("crm:opp:manage"))],
+) -> object:
+    """创建原始需求（客户可空，填了需可见；负责人部门不可越界）。"""
+    if body.customerId:
+        await ensure_customer_access(session, context, body.customerId)
+    ensure_dept_assignable(context, body.ownerDeptId)
+    item = await service.create_requirement(
+        session,
+        context,
+        req_name=body.reqName,
+        customer_id=body.customerId,
+        source=body.source,
+        priority=body.priority,
+        expect_finish_date=body.expectFinishDate,
+        expect_launch_date=body.expectLaunchDate,
+        expect_amount=body.expectAmount,
+        requirement=body.requirement,
+        owner_user_id=body.ownerUserId,
+        owner_dept_id=body.ownerDeptId,
+    )
+    await session.commit()
+    return ok({"id": item.id, "reqCode": item.req_code})
+
+
+@router.post("/requirements/files", summary="上传原始需求附件")
+async def upload_requirement_file(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("crm:opp:manage"))],
+    file: Annotated[UploadFile, File(description="待上传文件")],
+    requirementId: Annotated[int, Form(description="原始需求 ID")],
+) -> object:
+    """上传需求附件：先保存需求再传文件，文件落在 `data/uploads/requirements/`。"""
+    await ensure_requirement_access(session, context, requirementId)
+    data = await service.add_requirement_file(session, context, requirementId, file)
+    await session.commit()
+    return ok(data)
+
+
+@router.get("/requirements/{requirement_id}", summary="原始需求详情")
+async def requirement_detail(
+    requirement_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("crm:opp:view"))],
+) -> object:
+    """原始需求详情（按数据范围校验可见性）。"""
+    item = await ensure_requirement_access(session, context, requirement_id)
+    names = await _user_names(session, {item.owner_user_id})
+    customer_names = await _customer_names(session, {item.customer_id})
+    counts = await service.requirement_file_counts(session, {int(item.id)})
+    return ok(
+        {
+            **_requirement_out(
+                item,
+                names.get(item.owner_user_id, ""),
+                customer_names.get(item.customer_id, ""),
+            ),
+            "fileCount": counts.get(int(item.id), 0),
+        }
+    )
+
+
+@router.put("/requirements/{requirement_id}", summary="编辑原始需求")
+async def update_requirement(
+    requirement_id: int,
+    body: RequirementUpdateIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("crm:opp:manage"))],
+) -> object:
+    """编辑原始需求（换客户需新客户可见）。"""
+    await ensure_requirement_access(session, context, requirement_id)
+    if body.customerId:
+        await ensure_customer_access(session, context, body.customerId)
+    ensure_dept_assignable(context, body.ownerDeptId or 0)
+    item = await service.update_requirement(
+        session,
+        context,
+        requirement_id,
+        req_name=body.reqName,
+        customer_id=body.customerId,
+        source=body.source,
+        priority=body.priority,
+        expect_finish_date=body.expectFinishDate,
+        expect_launch_date=body.expectLaunchDate,
+        expect_amount=body.expectAmount,
+        requirement=body.requirement,
+        status=body.status,
+        owner_user_id=body.ownerUserId,
+        owner_dept_id=body.ownerDeptId,
+    )
+    await session.commit()
+    return ok({"id": item.id, "status": item.status})
+
+
+@router.delete("/requirements/{requirement_id}", summary="删除原始需求")
+async def delete_requirement(
+    requirement_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("crm:opp:manage"))],
+) -> object:
+    """逻辑删除原始需求（附件一并逻辑删除）。"""
+    await ensure_requirement_access(session, context, requirement_id)
+    await service.delete_requirement(session, context, requirement_id)
+    await session.commit()
+    return ok({"id": requirement_id})
+
+
+@router.get("/requirements/{requirement_id}/files", summary="原始需求附件列表")
+async def requirement_files(
+    requirement_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("crm:opp:view"))],
+) -> object:
+    """需求附件列表（需可见该需求）。"""
+    await ensure_requirement_access(session, context, requirement_id)
+    return ok(await service.list_requirement_files(session, requirement_id))
+
+
+@router.get("/requirement-files/{file_id}/download", summary="下载原始需求附件")
+async def download_requirement_file(
+    file_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("crm:opp:view"))],
+) -> FileResponse:
+    """下载需求附件（浏览器按原文件名保存）。"""
+    link, file, path = await service.requirement_file_path(session, file_id)
+    await ensure_requirement_access(session, context, int(link.requirement_id))
+    if not path.is_file():
+        raise NotFoundError("文件已丢失，请联系管理员")
+    return FileResponse(path, filename=file.origin_name, media_type=file.mime)
+
+
+@router.delete("/requirement-files/{file_id}", summary="删除原始需求附件")
+async def delete_requirement_file(
+    file_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("crm:opp:manage"))],
+) -> object:
+    """逻辑删除需求附件（需可见所属需求）。"""
+    link, _file = await service.get_requirement_file(session, file_id)
+    await ensure_requirement_access(session, context, int(link.requirement_id))
+    await service.delete_requirement_file(session, context, file_id)
+    await session.commit()
+    return ok({"id": file_id})

@@ -11,7 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pms.common.exceptions import DataForbiddenError, NotFoundError
 from pms.core.context import AuthContext
 from pms.crm import service
-from pms.crm.models import CrmContact, CrmCustomer, CrmFollow, CrmOpportunity
+from pms.crm.models import (
+    CrmContact,
+    CrmCustomer,
+    CrmFollow,
+    CrmOpportunity,
+    CrmRequirement,
+)
 
 
 def can_view_customer(context: AuthContext, customer: CrmCustomer) -> bool:
@@ -62,6 +68,28 @@ async def ensure_opportunity_access(
     opportunity = await service.get_opportunity(session, opportunity_id)
     ensure_opportunity_visible(context, opportunity)
     return opportunity
+
+
+def can_view_requirement(context: AuthContext, requirement: CrmRequirement) -> bool:
+    """原始需求可见性：本人负责，或负责人部门在数据范围内。"""
+    if int(requirement.owner_user_id or 0) == context.user_id:
+        return True
+    return context.can_see_dept(int(requirement.owner_dept_id or 0))
+
+
+def ensure_requirement_visible(context: AuthContext, requirement: CrmRequirement) -> None:
+    """不可见时抛数据越权（40302）。"""
+    if not can_view_requirement(context, requirement):
+        raise DataForbiddenError("无该需求访问权限")
+
+
+async def ensure_requirement_access(
+    session: AsyncSession, context: AuthContext, requirement_id: int
+) -> CrmRequirement:
+    """按 ID 取原始需求并校验可见性（详情/写接口统一入口）。"""
+    requirement = await service.get_requirement(session, requirement_id)
+    ensure_requirement_visible(context, requirement)
+    return requirement
 
 
 async def ensure_contact_access(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Final
 
+from fastapi import UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,22 +18,35 @@ from pms.crm.models import (
     CrmFollow,
     CrmOpportunity,
     CrmProduct,
+    CrmRequirement,
+    CrmRequirementFile,
     CustomerStatus,
     OpportunityStage,
     OpportunityStatus,
     ProductStatus,
+    RequirementPriority,
+    RequirementStatus,
 )
+from pms.file.storage import resolve_storage_path, save_upload
 from pms.org.models import SysUser
 from pms.project import service as project_service
 from pms.system.config_service import ConfigService
+from pms.system.models import SysFile
 
 _CUSTOMER_PREFIX: Final[str] = "CUS"
 _OPP_PREFIX: Final[str] = "OPP"
+_REQ_PREFIX: Final[str] = "REQ"
+#: 需求附件磁盘目录（不挂项目，单独一个根目录便于管理员翻阅）
+_REQ_UPLOAD_FOLDER: Final[str] = "requirements"
 _DEFAULT_WIN_STAGE: Final[str] = "WON"
 _CUSTOMER_LEVELS: Final[frozenset[str]] = frozenset({"A", "B", "C"})
 _STATUS_VALUES: Final[frozenset[str]] = frozenset(item.value for item in CustomerStatus)
 _STAGE_VALUES: Final[frozenset[str]] = frozenset(item.value for item in OpportunityStage)
 _OPP_STATUS_VALUES: Final[frozenset[str]] = frozenset(item.value for item in OpportunityStatus)
+_REQ_STATUS_VALUES: Final[frozenset[str]] = frozenset(item.value for item in RequirementStatus)
+_REQ_PRIORITY_VALUES: Final[frozenset[str]] = frozenset(
+    item.value for item in RequirementPriority
+)
 
 
 def _enum_value(value: str, allowed: frozenset[str], label: str) -> str:
@@ -87,6 +101,21 @@ async def next_opportunity_code(session: AsyncSession) -> str:
         if suffix.isdigit():
             used.append(int(suffix))
     return f"{_OPP_PREFIX}-{year}-{max(used, default=0) + 1:04d}"
+
+
+async def next_requirement_code(session: AsyncSession) -> str:
+    """生成原始需求编码 `REQ-2026-0001`（按年度序号递增）。"""
+    year = date.today().year
+    pattern = f"{_REQ_PREFIX}-{year}-%"
+    result = await session.execute(
+        select(CrmRequirement.req_code).where(CrmRequirement.req_code.like(pattern))
+    )
+    used: list[int] = []
+    for code in result.scalars():
+        suffix = str(code or "").rsplit("-", 1)[-1]
+        if suffix.isdigit():
+            used.append(int(suffix))
+    return f"{_REQ_PREFIX}-{year}-{max(used, default=0) + 1:04d}"
 
 
 async def get_customer(session: AsyncSession, customer_id: int) -> CrmCustomer:
@@ -964,6 +993,344 @@ async def crm_summary(
             "wonAmount": round(won_amount, 2),
         },
     }
+
+
+# ---------------------------------------------------------------- 原始需求
+
+
+async def get_requirement(session: AsyncSession, requirement_id: int) -> CrmRequirement:
+    """取原始需求，不存在或已删除时抛 `NotFoundError`。"""
+    requirement = await session.get(CrmRequirement, requirement_id)
+    if requirement is None or requirement.deleted:
+        raise NotFoundError("原始需求不存在")
+    return requirement
+
+
+def _requirement_filters(
+    stmt,
+    visible: set[int] | None,
+    *,
+    customer_id: int | None = None,
+    keyword: str = "",
+    status: str = "",
+    priority: str = "",
+    owner_id: int = 0,
+):
+    """原始需求列表/计数共用的过滤条件（口径必须一致）。"""
+    stmt = stmt.where(CrmRequirement.deleted == 0)
+    if visible is not None:
+        stmt = stmt.where(CrmRequirement.owner_dept_id.in_(visible))
+    if customer_id:
+        stmt = stmt.where(CrmRequirement.customer_id == customer_id)
+    if keyword:
+        like = _keyword_like(keyword)
+        stmt = stmt.where(
+            or_(CrmRequirement.req_name.like(like), CrmRequirement.req_code.like(like))
+        )
+    if status:
+        stmt = stmt.where(
+            CrmRequirement.status == _enum_value(status, _REQ_STATUS_VALUES, "需求状态")
+        )
+    if priority:
+        stmt = stmt.where(
+            CrmRequirement.priority == _enum_value(priority, _REQ_PRIORITY_VALUES, "优先级")
+        )
+    if owner_id:
+        stmt = stmt.where(CrmRequirement.owner_user_id == owner_id)
+    return stmt
+
+
+async def list_requirements(
+    session: AsyncSession,
+    visible: set[int] | None,
+    customer_id: int | None = None,
+    keyword: str = "",
+    offset: int = 0,
+    limit: int = 20,
+    status: str = "",
+    priority: str = "",
+    owner_id: int = 0,
+) -> list[CrmRequirement]:
+    """原始需求列表（受数据范围约束）。"""
+    stmt = _requirement_filters(
+        select(CrmRequirement),
+        visible,
+        customer_id=customer_id,
+        keyword=keyword,
+        status=status,
+        priority=priority,
+        owner_id=owner_id,
+    )
+    stmt = stmt.order_by(CrmRequirement.id.desc()).offset(offset).limit(limit)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def count_requirements(
+    session: AsyncSession,
+    visible: set[int] | None,
+    customer_id: int | None = None,
+    keyword: str = "",
+    status: str = "",
+    priority: str = "",
+    owner_id: int = 0,
+) -> int:
+    """原始需求总数（筛选条件与列表保持一致）。"""
+    stmt = _requirement_filters(
+        select(func.count(CrmRequirement.id)),
+        visible,
+        customer_id=customer_id,
+        keyword=keyword,
+        status=status,
+        priority=priority,
+        owner_id=owner_id,
+    )
+    result = await session.execute(stmt)
+    return int(result.scalar_one())
+
+
+async def create_requirement(
+    session: AsyncSession,
+    context: AuthContext,
+    *,
+    req_name: str,
+    customer_id: int = 0,
+    source: str = "",
+    priority: str = "MIDDLE",
+    expect_finish_date: str | None = None,
+    expect_launch_date: str | None = None,
+    expect_amount: float = 0,
+    requirement: str = "",
+    owner_user_id: int = 0,
+    owner_dept_id: int = 0,
+) -> CrmRequirement:
+    """创建原始需求（客户可选，填了才校验存在性）。"""
+    if customer_id:
+        await get_customer(session, customer_id)
+    item = CrmRequirement(
+        req_code=await next_requirement_code(session),
+        req_name=req_name,
+        customer_id=customer_id,
+        owner_user_id=owner_user_id or context.user_id,
+        owner_dept_id=owner_dept_id or context.dept_id,
+        source=source or "",
+        priority=_enum_value(priority or "MIDDLE", _REQ_PRIORITY_VALUES, "优先级"),
+        expect_finish_date=expect_finish_date or None,
+        expect_launch_date=expect_launch_date or None,
+        expect_amount=expect_amount,
+        requirement=requirement or "",
+        status=RequirementStatus.OPEN.value,
+        create_by=context.user_id,
+    )
+    session.add(item)
+    await session.flush()
+    return item
+
+
+async def update_requirement(
+    session: AsyncSession,
+    context: AuthContext,
+    requirement_id: int,
+    *,
+    req_name: str | None = None,
+    customer_id: int | None = None,
+    source: str | None = None,
+    priority: str | None = None,
+    expect_finish_date: str | None = None,
+    expect_launch_date: str | None = None,
+    expect_amount: float | None = None,
+    requirement: str | None = None,
+    status: str | None = None,
+    owner_user_id: int | None = None,
+    owner_dept_id: int | None = None,
+) -> CrmRequirement:
+    """编辑原始需求（未传字段保持不变）。"""
+    item = await get_requirement(session, requirement_id)
+    if req_name is not None:
+        item.req_name = req_name
+    if customer_id is not None and customer_id != item.customer_id:
+        if customer_id:
+            await get_customer(session, customer_id)
+        item.customer_id = customer_id
+    if source is not None:
+        item.source = source
+    if priority is not None:
+        item.priority = _enum_value(priority, _REQ_PRIORITY_VALUES, "优先级")
+    if expect_finish_date is not None:
+        item.expect_finish_date = expect_finish_date or None
+    if expect_launch_date is not None:
+        item.expect_launch_date = expect_launch_date or None
+    if expect_amount is not None:
+        item.expect_amount = expect_amount
+    if requirement is not None:
+        item.requirement = requirement
+    if status is not None:
+        item.status = _enum_value(status, _REQ_STATUS_VALUES, "需求状态")
+    if owner_user_id is not None:
+        item.owner_user_id = owner_user_id
+    if owner_dept_id is not None:
+        item.owner_dept_id = owner_dept_id
+    item.update_by = context.user_id
+    await session.flush()
+    return item
+
+
+async def delete_requirement(
+    session: AsyncSession, context: AuthContext, requirement_id: int
+) -> CrmRequirement:
+    """逻辑删除原始需求（附件一并逻辑删除）。"""
+    item = await get_requirement(session, requirement_id)
+    item.deleted = 1
+    item.update_by = context.user_id
+    links = (
+        await session.execute(
+            select(CrmRequirementFile).where(
+                CrmRequirementFile.requirement_id == requirement_id,
+                CrmRequirementFile.deleted == 0,
+            )
+        )
+    ).scalars()
+    for link in links:
+        link.deleted = 1
+        link.update_by = context.user_id
+    await session.flush()
+    return item
+
+
+def _requirement_file_out(
+    link: CrmRequirementFile, file: SysFile, uploader: str = ""
+) -> dict[str, object]:
+    """需求附件出参。"""
+    return {
+        "id": link.id,
+        "fileId": link.file_id,
+        "fileName": link.file_name,
+        "size": int(link.size),
+        "mime": file.mime,
+        "uploader": uploader,
+        "uploadTime": file.create_time.isoformat(sep=" ", timespec="seconds")
+        if file.create_time
+        else "",
+    }
+
+
+async def list_requirement_files(
+    session: AsyncSession, requirement_id: int
+) -> list[dict[str, object]]:
+    """需求附件列表（含上传人姓名）。"""
+    rows = (
+        await session.execute(
+            select(CrmRequirementFile, SysFile)
+            .join(SysFile, SysFile.id == CrmRequirementFile.file_id)
+            .where(
+                CrmRequirementFile.requirement_id == requirement_id,
+                CrmRequirementFile.deleted == 0,
+                SysFile.deleted == 0,
+            )
+            .order_by(CrmRequirementFile.id.desc())
+        )
+    ).all()
+    uploader_ids = {int(file.create_by or 0) for _, file in rows}
+    names: dict[int, str] = {}
+    if uploader_ids:
+        name_rows = await session.execute(
+            select(SysUser.id, SysUser.real_name).where(SysUser.id.in_(uploader_ids))
+        )
+        names = {int(row[0]): str(row[1] or "") for row in name_rows.all()}
+    return [
+        _requirement_file_out(link, file, names.get(int(file.create_by or 0), ""))
+        for link, file in rows
+    ]
+
+
+async def requirement_file_counts(
+    session: AsyncSession, requirement_ids: set[int]
+) -> dict[int, int]:
+    """批量统计需求附件数量（列表展示用，避免逐行查询）。"""
+    ids = {item for item in requirement_ids if item}
+    if not ids:
+        return {}
+    rows = await session.execute(
+        select(CrmRequirementFile.requirement_id, func.count(CrmRequirementFile.id))
+        .where(CrmRequirementFile.requirement_id.in_(ids), CrmRequirementFile.deleted == 0)
+        .group_by(CrmRequirementFile.requirement_id)
+    )
+    return {int(req_id): int(count) for req_id, count in rows.all()}
+
+
+async def add_requirement_file(
+    session: AsyncSession, context: AuthContext, requirement_id: int, upload: UploadFile
+) -> dict[str, object]:
+    """上传需求附件：落 `t_sys_file` + `t_crm_requirement_file`。"""
+    item = await get_requirement(session, requirement_id)
+    stored = await save_upload(
+        upload,
+        0,
+        project_code=_REQ_UPLOAD_FOLDER,
+        biz_type="REQUIREMENT",
+    )
+    file = SysFile(
+        file_key=stored.file_key,
+        origin_name=stored.origin_name,
+        storage_path=stored.storage_path,
+        size=stored.size,
+        mime=stored.mime,
+        bucket="local",
+        biz_type="REQUIREMENT",
+        biz_id=item.id,
+        create_by=context.user_id,
+    )
+    session.add(file)
+    await session.flush()
+    await session.refresh(file)
+    link = CrmRequirementFile(
+        requirement_id=item.id,
+        file_id=file.id,
+        file_name=stored.origin_name,
+        size=stored.size,
+        create_by=context.user_id,
+    )
+    session.add(link)
+    await session.flush()
+    return _requirement_file_out(link, file, context.real_name)
+
+
+async def get_requirement_file(
+    session: AsyncSession, file_id: int
+) -> tuple[CrmRequirementFile, SysFile]:
+    """按文件 ID 取附件关联与文件记录（含软删校验）。"""
+    link = (
+        await session.execute(
+            select(CrmRequirementFile).where(
+                CrmRequirementFile.file_id == file_id, CrmRequirementFile.deleted == 0
+            )
+        )
+    ).scalars().first()
+    if link is None:
+        raise NotFoundError("附件不存在")
+    file = await session.get(SysFile, file_id)
+    if file is None or file.deleted:
+        raise NotFoundError("文件不存在")
+    return link, file
+
+
+async def requirement_file_path(session: AsyncSession, file_id: int):
+    """取下载所需的文件记录与磁盘绝对路径。"""
+    link, file = await get_requirement_file(session, file_id)
+    path = resolve_storage_path(file.storage_path)
+    return link, file, path
+
+
+async def delete_requirement_file(
+    session: AsyncSession, context: AuthContext, file_id: int
+) -> None:
+    """逻辑删除需求附件（上传人本人或需求管理员）。"""
+    link, file = await get_requirement_file(session, file_id)
+    link.deleted = 1
+    link.update_by = context.user_id
+    file.deleted = 1
+    file.update_by = context.user_id
+    await session.flush()
 
 
 # ---------------------------------------------------------------- 产品档案

@@ -18,6 +18,7 @@ import {
   createContact,
   createCustomer,
   createOpportunity,
+  createRequirement,
   crmOptions,
   crmStaff,
   crmSummary,
@@ -27,21 +28,29 @@ import {
   deleteCustomer,
   deleteOppFollow,
   deleteOpportunity,
+  deleteRequirement,
+  deleteRequirementFile,
   dictItems,
+  downloadRequirementFile,
   listCustomers,
   listOpportunities,
   listProducts,
+  listRequirements,
   oppFollows,
   opportunityDetail,
   pushOppStage,
+  requirementDetail,
+  requirementFiles,
   updateContact,
   updateCustomer,
-  updateOpportunity
+  updateOpportunity,
+  updateRequirement,
+  uploadRequirementFile
 } from '@/api'
 import { useUserStore } from '@/stores/user'
 import { useKeepAliveRefresh } from '@/utils/keepAlive'
 
-type TabKey = 'customers' | 'opportunities'
+type TabKey = 'requirements' | 'opportunities' | 'customers'
 type TagType = 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
 interface KpiItem {
@@ -54,10 +63,12 @@ interface KpiItem {
 }
 
 const store = useUserStore()
-/** 默认落在「商机」：日常跟进按商机维度走，客户档案作为基础数据。 */
-const tab = ref<TabKey>('opportunities')
+/** 默认落在「原始需求」：需求一定要录，商机只是评估后的结果。 */
+const tab = ref<TabKey>('requirements')
 const canCustomer = computed(() => store.has('crm:customer:manage'))
 const canOpp = computed(() => store.has('crm:opp:manage'))
+/** 原始需求与商机共用一套权限点。 */
+const canReq = canOpp
 
 const customerLoading = ref(false)
 const oppLoading = ref(false)
@@ -116,6 +127,17 @@ const oppStatusFallback = [
   { value: 'LOST', label: '输单' },
   { value: 'CLOSED', label: '已关闭' }
 ]
+const reqPriorityFallback = [
+  { value: 'HIGH', label: '高' },
+  { value: 'MIDDLE', label: '中' },
+  { value: 'LOW', label: '低' }
+]
+const reqStatusFallback = [
+  { value: 'OPEN', label: '待评估' },
+  { value: 'EVALUATING', label: '评估中' },
+  { value: 'CONVERTED', label: '已转商机' },
+  { value: 'CLOSED', label: '已关闭' }
+]
 const followTypeOptions = [
   { value: 'PHONE', label: '电话' },
   { value: 'VISIT', label: '拜访' },
@@ -138,6 +160,18 @@ const customerLevelLabel = (value: any) =>
   dictLabel('dict_customer_level', value, customerLevelFallback)
 const oppStageLabel = (value: any) => dictLabel('dict_opp_stage', value, oppStageFallback)
 const oppStatusLabel = (value: any) => dictLabel('dict_opp_status', value, oppStatusFallback)
+const reqPriorityLabel = (value: any) => dictLabel('dict_req_priority', value, reqPriorityFallback)
+const reqStatusLabel = (value: any) => dictLabel('dict_req_status', value, reqStatusFallback)
+const priorityTagType = (priority: string): TagType =>
+  priority === 'HIGH' ? 'danger' : priority === 'LOW' ? 'info' : 'warning'
+const reqStatusTagType = (status: string): TagType =>
+  status === 'CONVERTED'
+    ? 'success'
+    : status === 'CLOSED'
+      ? 'info'
+      : status === 'EVALUATING'
+        ? 'primary'
+        : 'warning'
 const followTypeLabel = (value: any) =>
   followTypeOptions.find((item) => item.value === value)?.label || value || '—'
 
@@ -267,7 +301,9 @@ const loadDicts = async () => {
     'dict_customer_level',
     'dict_customer_status',
     'dict_opp_stage',
-    'dict_opp_status'
+    'dict_opp_status',
+    'dict_req_priority',
+    'dict_req_status'
   ]
   const rows = await Promise.all(codes.map((code) => dictItems(code).catch(() => [])))
   const map: Record<string, any[]> = {}
@@ -333,6 +369,7 @@ const staffSelectOptions = computed(() =>
 const customers = ref<any[]>([])
 const customerTableRef = ref<any>()
 const oppTableRef = ref<any>()
+const reqTableRef = ref<any>()
 const customerTotal = ref(0)
 const customerPage = ref({ pageNum: 1, pageSize: 10 })
 const customerFilter = ref({ keyword: '', status: '', level: '' })
@@ -769,6 +806,216 @@ const removeOpp = async (row: any) => {
   await Promise.all([loadOpps(), loadSummary()])
 }
 
+/* ------------------------------ 原始需求 ------------------------------ */
+const requirements = ref<any[]>([])
+const reqTotal = ref(0)
+const reqPage = ref({ pageNum: 1, pageSize: 10 })
+const reqFilter = ref({ keyword: '', customerId: '', priority: '', status: '' })
+const reqLoading = ref(false)
+
+/** 列表右上角计数（跟随当前页签）。 */
+const currentTotal = computed(() =>
+  tab.value === 'customers'
+    ? customerTotal.value
+    : tab.value === 'opportunities'
+      ? oppTotal.value
+      : reqTotal.value
+)
+
+const loadRequirements = async () => {
+  reqLoading.value = true
+  try {
+    const params: Record<string, any> = { ...reqPage.value }
+    if (reqFilter.value.keyword) params.keyword = reqFilter.value.keyword
+    if (reqFilter.value.customerId) params.customerId = reqFilter.value.customerId
+    if (reqFilter.value.priority) params.priority = reqFilter.value.priority
+    if (reqFilter.value.status) params.status = reqFilter.value.status
+    const data = await listRequirements(params)
+    requirements.value = data.list || []
+    reqTotal.value = data.total || 0
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
+  } finally {
+    reqLoading.value = false
+  }
+}
+
+const searchRequirements = () => {
+  reqPage.value.pageNum = 1
+  loadRequirements()
+}
+
+const resetReqFilter = () => {
+  reqFilter.value = { keyword: '', customerId: '', priority: '', status: '' }
+  searchRequirements()
+}
+
+const onReqSizeChange = () => {
+  reqPage.value.pageNum = 1
+  loadRequirements()
+}
+
+const reqDialog = ref(false)
+const reqEditingId = ref('')
+const reqForm = ref<any>({})
+/** 已上传的附件（编辑态展示） */
+const reqFiles = ref<any[]>([])
+/** 新增态先选的附件：保存拿到需求 ID 后再逐个上传 */
+const reqPendingFiles = ref<File[]>([])
+const reqFileLoading = ref(false)
+const reqUploading = ref(false)
+
+const emptyReq = () => ({
+  reqName: '',
+  customerId: null,
+  source: '',
+  priority: 'MIDDLE',
+  expectFinishDate: '',
+  expectLaunchDate: '',
+  expectAmount: 0,
+  requirement: '',
+  status: 'OPEN',
+  ownerUserId: idText(store.profile?.id),
+  ownerDeptId: idText(store.profile?.deptId)
+})
+
+const loadReqFiles = async () => {
+  if (!reqEditingId.value) {
+    reqFiles.value = []
+    return
+  }
+  reqFileLoading.value = true
+  try {
+    reqFiles.value = await requirementFiles(reqEditingId.value)
+  } catch {
+    reqFiles.value = []
+  } finally {
+    reqFileLoading.value = false
+  }
+}
+
+const openReq = async (row?: any) => {
+  reqEditingId.value = row ? String(row.id) : ''
+  reqFiles.value = []
+  reqPendingFiles.value = []
+  if (row) {
+    const detail = await requirementDetail(String(row.id))
+    reqForm.value = { ...emptyReq(), ...detail }
+    const customerId = idText(reqForm.value.customerId)
+    reqForm.value.customerId = customerId && customerId !== '0' ? customerId : null
+    reqForm.value.ownerUserId = idText(reqForm.value.ownerUserId)
+    reqForm.value.ownerDeptId = idText(reqForm.value.ownerDeptId)
+    // 表单按「万元」录入，库里存元
+    reqForm.value.expectAmount = toNumber(reqForm.value.expectAmount) / 10000
+    reqForm.value.expectFinishDate = reqForm.value.expectFinishDate || ''
+    reqForm.value.expectLaunchDate = reqForm.value.expectLaunchDate || ''
+    reqForm.value.requirement = reqForm.value.requirement || ''
+    await loadReqFiles()
+  } else {
+    reqForm.value = emptyReq()
+  }
+  reqDialog.value = true
+}
+
+const uploadOneReqFile = async (file: File, requirementId: string) => {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('requirementId', requirementId)
+  await uploadRequirementFile(form)
+}
+
+/** el-upload 自定义上传：编辑态立即上传，新增态先排队，保存后补传。 */
+const doReqUpload = async (options: any) => {
+  if (!reqEditingId.value) {
+    reqPendingFiles.value = [...reqPendingFiles.value, options.file]
+    options.onSuccess?.({})
+    return
+  }
+  reqUploading.value = true
+  try {
+    await uploadOneReqFile(options.file, reqEditingId.value)
+    ElMessage.success('附件已上传')
+    await loadReqFiles()
+    options.onSuccess?.({})
+  } catch (error) {
+    options.onError?.(error)
+  } finally {
+    reqUploading.value = false
+  }
+}
+
+const removePendingReqFile = (index: number) => {
+  reqPendingFiles.value.splice(index, 1)
+}
+
+const removeReqFile = async (item: any) => {
+  if (!(await confirmAction(`确认删除附件「${item.fileName}」？`, '删除附件'))) return
+  await deleteRequirementFile(String(item.fileId))
+  ElMessage.success('附件已删除')
+  await loadReqFiles()
+}
+
+const downloadReqFile = (item: any) =>
+  downloadRequirementFile(String(item.fileId), String(item.fileName || '附件'))
+
+const fileSizeText = (size: any) => {
+  const num = Number(size || 0)
+  if (num >= 1024 * 1024) return `${(num / 1024 / 1024).toFixed(1)} MB`
+  if (num >= 1024) return `${(num / 1024).toFixed(0)} KB`
+  return `${num} B`
+}
+
+const saveReq = async () => {
+  if (!reqForm.value.reqName?.trim()) {
+    ElMessage.warning('请填写需求名称')
+    return
+  }
+  const payload = {
+    reqName: reqForm.value.reqName.trim(),
+    // 客户可空：原始需求来自口头/内部转达时先不挂客户
+    customerId: idOrZero(reqForm.value.customerId),
+    source: reqForm.value.source || '',
+    priority: reqForm.value.priority || 'MIDDLE',
+    // 传空串而不是 null：后端用「字段为 null 表示不修改」，空串才能清空日期
+    expectFinishDate: reqForm.value.expectFinishDate || '',
+    expectLaunchDate: reqForm.value.expectLaunchDate || '',
+    expectAmount: Math.round(Number(reqForm.value.expectAmount || 0) * 1000000) / 100,
+    requirement: reqForm.value.requirement || ''
+  }
+  let requirementId = reqEditingId.value
+  if (requirementId) {
+    await updateRequirement(requirementId, { ...payload, status: reqForm.value.status })
+    ElMessage.success('原始需求已更新')
+  } else {
+    const created = await createRequirement(payload)
+    requirementId = String(created.id)
+    // 先记住 ID：后续附件上传失败重试时不会再建一条
+    reqEditingId.value = requirementId
+    ElMessage.success('原始需求已创建')
+  }
+  if (reqPendingFiles.value.length) {
+    reqUploading.value = true
+    try {
+      // 逐个上传并即时出队：中途失败重试时不会重复上传已成功的文件
+      for (const file of [...reqPendingFiles.value]) {
+        await uploadOneReqFile(file, requirementId)
+        reqPendingFiles.value = reqPendingFiles.value.filter((item) => item !== file)
+      }
+    } finally {
+      reqUploading.value = false
+    }
+  }
+  reqDialog.value = false
+  await loadRequirements()
+}
+
+const removeReq = async (row: any) => {
+  if (!(await confirmAction(`确认删除原始需求「${row.reqName}」？`, '删除原始需求'))) return
+  await deleteRequirement(String(row.id))
+  ElMessage.success('原始需求已删除')
+  await loadRequirements()
+}
+
 /* ------------------------------ 转项目 ------------------------------ */
 const convertDialog = ref(false)
 const convertRow = ref<any>({})
@@ -805,6 +1052,14 @@ const oppCustomerOptions = computed(() =>
     customerSelectOptions.value,
     oppForm.value.customerId,
     oppForm.value.customerName,
+    '未知客户'
+  )
+)
+const reqCustomerOptions = computed(() =>
+  withSelectedOption(
+    customerSelectOptions.value,
+    reqForm.value.customerId,
+    reqForm.value.customerName,
     '未知客户'
   )
 )
@@ -885,15 +1140,26 @@ const removeFollow = async (row: any) => {
 const switchTab = (key: TabKey) => {
   if (tab.value === key) return
   tab.value = key
-  // 两个表格常驻后用 v-show 切换，显示时需要重算列宽
+  // 多个表格常驻后用 v-show 切换，显示时需要重算列宽
   nextTick(() => {
-    const table = key === 'customers' ? customerTableRef.value : oppTableRef.value
+    const table =
+      key === 'customers'
+        ? customerTableRef.value
+        : key === 'opportunities'
+          ? oppTableRef.value
+          : reqTableRef.value
     table?.doLayout?.()
   })
 }
 
 const refreshAll = async () => {
-  await Promise.all([loadSummary(), loadCustomers(), loadOpps(), loadCustomerOptions()])
+  await Promise.all([
+    loadSummary(),
+    loadCustomers(),
+    loadOpps(),
+    loadRequirements(),
+    loadCustomerOptions()
+  ])
   markLoaded()
 }
 
@@ -903,6 +1169,11 @@ const onCustomerCommand = (command: string, row: any) => {
   if (command === 'edit') openCustomer(row)
   else if (command === 'contacts') openContacts(row)
   else if (command === 'delete') removeCustomer(row)
+}
+
+const onReqCommand = (command: string, row: any) => {
+  if (command === 'edit') openReq(row)
+  else if (command === 'delete') removeReq(row)
 }
 
 const onOppCommand = (command: string, row: any) => {
@@ -945,29 +1216,43 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="seg">
           <button
             type="button"
+            :class="{ 'is-active': tab === 'requirements' }"
+            @click="switchTab('requirements')"
+          >
+            原始需求<i>{{ reqTotal }}</i>
+          </button>
+          <button
+            type="button"
             :class="{ 'is-active': tab === 'opportunities' }"
             @click="switchTab('opportunities')"
           >
-            商机
+            商机<i>{{ oppTotal }}</i>
           </button>
           <button
             type="button"
             :class="{ 'is-active': tab === 'customers' }"
             @click="switchTab('customers')"
           >
-            客户
+            客户<i>{{ customerTotal }}</i>
           </button>
         </div>
         <div class="list-side">
-          <span class="list-total">
-            共 {{ tab === 'customers' ? customerTotal : oppTotal }} 条
-          </span>
+          <span class="list-total">共 {{ currentTotal }} 条</span>
           <el-button
             size="small"
-            :loading="customerLoading || oppLoading || summaryLoading"
+            :loading="customerLoading || oppLoading || reqLoading || summaryLoading"
             @click="refreshAll"
           >
             刷新
+          </el-button>
+          <el-button
+            v-if="tab === 'requirements' && canReq"
+            type="primary"
+            :icon="Plus"
+            class="pms-create-btn"
+            @click="openReq()"
+          >
+            新增原始需求
           </el-button>
           <el-button
             v-if="tab === 'customers' && canCustomer"
@@ -1037,7 +1322,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       </div>
 
       <!-- 商机筛选 -->
-      <div v-else class="filter-row">
+      <div v-else-if="tab === 'opportunities'" class="filter-row">
         <el-input
           v-model="oppFilter.keyword"
           class="f-keyword"
@@ -1086,6 +1371,61 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="filter-actions">
           <el-button type="primary" :loading="oppLoading" @click="searchOpps">查询</el-button>
           <el-button @click="resetOppFilter">重置</el-button>
+        </div>
+      </div>
+
+      <!-- 原始需求筛选 -->
+      <div v-else class="filter-row">
+        <el-input
+          v-model="reqFilter.keyword"
+          class="f-keyword"
+          placeholder="需求名称 / 编号"
+          clearable
+          @keyup.enter="searchRequirements"
+          @clear="searchRequirements"
+        />
+        <el-select-v2
+          v-model="reqFilter.customerId"
+          class="f-customer"
+          :options="customerSelectOptions"
+          placeholder="全部客户"
+          clearable
+          filterable
+          @change="searchRequirements"
+        />
+        <el-select
+          v-model="reqFilter.priority"
+          class="f-status"
+          placeholder="全部优先级"
+          clearable
+          @change="searchRequirements"
+        >
+          <el-option
+            v-for="item in dictOptions('dict_req_priority', reqPriorityFallback)"
+            :key="item.value"
+            :label="item.label"
+            :value="item.value"
+          />
+        </el-select>
+        <el-select
+          v-model="reqFilter.status"
+          class="f-status"
+          placeholder="全部状态"
+          clearable
+          @change="searchRequirements"
+        >
+          <el-option
+            v-for="item in dictOptions('dict_req_status', reqStatusFallback)"
+            :key="item.value"
+            :label="item.label"
+            :value="item.value"
+          />
+        </el-select>
+        <div class="filter-actions">
+          <el-button type="primary" :loading="reqLoading" @click="searchRequirements">
+            查询
+          </el-button>
+          <el-button @click="resetReqFilter">重置</el-button>
         </div>
       </div>
 
@@ -1217,9 +1557,102 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </el-table-column>
       </el-table>
 
+      <!-- 原始需求列表 -->
+      <el-table
+        v-show="tab === 'requirements'"
+        ref="reqTableRef"
+        v-loading="reqLoading"
+        :data="requirements"
+        size="small"
+        empty-text="暂无原始需求"
+      >
+        <el-table-column label="需求名称" min-width="220">
+          <template #default="{ row }">
+            <div class="cell-stack">
+              <span class="cell-main" :title="row.reqName">{{ row.reqName }}</span>
+              <span class="cell-sub">
+                {{ row.reqCode || '—' }}
+                <template v-if="row.source"> · {{ row.source }}</template>
+              </span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="客户" min-width="140" class-name="pms-mobile-hide">
+          <template #default="{ row }">
+            <span class="cell-ellipsis" :title="row.customerName">{{ row.customerName || '—' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="优先级" width="86">
+          <template #default="{ row }">
+            <el-tag :type="priorityTagType(row.priority)" size="small" effect="plain">
+              {{ reqPriorityLabel(row.priority) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="期望完成 / 上线" width="160" class-name="pms-mobile-hide">
+          <template #default="{ row }">
+            <div class="cell-stack">
+              <span :class="{ 'cell-muted': !row.expectFinishDate }">
+                {{ row.expectFinishDate || '—' }}
+              </span>
+              <span class="cell-sub" :class="{ 'cell-muted': !row.expectLaunchDate }">
+                上线 {{ row.expectLaunchDate || '—' }}
+              </span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="预估金额" width="132" align="right">
+          <template #default="{ row }">
+            <span class="amount-cell">¥{{ money(row.expectAmount) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="附件" width="72" align="center" class-name="pms-mobile-hide">
+          <template #default="{ row }">
+            <span v-if="row.fileCount" class="cell-muted">{{ row.fileCount }} 个</span>
+            <span v-else class="cell-muted">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <el-tag :type="reqStatusTagType(row.status)" size="small" effect="plain">
+              {{ reqStatusLabel(row.status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="负责人" width="96" class-name="pms-mobile-hide">
+          <template #default="{ row }">{{ row.ownerName || userName(row.ownerUserId) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" :width="isNarrow ? 92 : 150" fixed="right">
+          <template #default="{ row }">
+            <el-dropdown
+              v-if="isNarrow"
+              trigger="click"
+              placement="bottom-end"
+              @command="(command) => onReqCommand(command, row)"
+            >
+              <el-button size="small">操作</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="edit" :disabled="!canReq">编辑需求</el-dropdown-item>
+                  <el-dropdown-item v-if="canReq" command="delete" divided>
+                    删除需求
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <div v-else class="op-actions">
+              <el-button size="small" :disabled="!canReq" @click="openReq(row)">编辑</el-button>
+              <el-button v-if="canReq" link type="danger" size="small" @click="removeReq(row)">
+                删除
+              </el-button>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+
       <!-- 商机列表 -->
       <el-table
-        v-show="tab !== 'customers'"
+        v-show="tab === 'opportunities'"
         ref="oppTableRef"
         v-loading="oppLoading"
         :data="opportunities"
@@ -1390,7 +1823,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         @size-change="onCustomerSizeChange"
       />
       <el-pagination
-        v-else
+        v-else-if="tab === 'opportunities'"
         v-model:current-page="oppPage.pageNum"
         v-model:page-size="oppPage.pageSize"
         :total="oppTotal"
@@ -1399,6 +1832,17 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         class="pager"
         @current-change="loadOpps"
         @size-change="onOppSizeChange"
+      />
+      <el-pagination
+        v-else
+        v-model:current-page="reqPage.pageNum"
+        v-model:page-size="reqPage.pageSize"
+        :total="reqTotal"
+        :page-sizes="[10, 20, 50]"
+        :layout="isNarrow ? 'prev, pager, next' : 'total, sizes, prev, pager, next'"
+        class="pager"
+        @current-change="loadRequirements"
+        @size-change="onReqSizeChange"
       />
     </div>
 
@@ -1666,6 +2110,174 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       <template #footer>
         <el-button @click="contactDialog = false">取消</el-button>
         <el-button type="primary" @click="saveContact">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 原始需求编辑 -->
+    <el-dialog
+      v-model="reqDialog"
+      :title="reqEditingId ? '编辑原始需求' : '新增原始需求'"
+      width="min(720px, 94vw)"
+      :close-on-click-modal="false"
+    >
+      <div v-if="reqEditingId" class="dialog-id">
+        <span class="dialog-avatar" aria-hidden="true">
+          {{ (reqForm.reqName || '需').slice(0, 1) }}
+        </span>
+        <div class="dialog-id-meta">
+          <div class="dialog-id-line">
+            <span class="dialog-id-name">{{ reqForm.reqName || '未命名' }}</span>
+            <el-tag :type="priorityTagType(reqForm.priority)" size="small" effect="plain">
+              {{ reqPriorityLabel(reqForm.priority) }}
+            </el-tag>
+            <el-tag :type="reqStatusTagType(reqForm.status)" size="small" effect="plain">
+              {{ reqStatusLabel(reqForm.status) }}
+            </el-tag>
+          </div>
+          <div class="dialog-id-sub">
+            {{ reqForm.reqCode || '暂无编码' }}
+            <span class="dot">·</span>{{ userName(reqForm.ownerUserId) }}
+          </div>
+        </div>
+      </div>
+
+      <div class="form-section-title">基本信息</div>
+      <!-- 标签比商机长（期望完成时间/期望上线时间），加宽标签避免折行 -->
+      <el-form :model="reqForm" label-width="112px" class="form-grid">
+        <el-form-item label="需求名称">
+          <el-input v-model="reqForm.reqName" maxlength="200" placeholder="如 客户要求增加移动端审批" />
+        </el-form-item>
+        <el-form-item label="所属客户">
+          <el-select
+            v-model="reqForm.customerId"
+            filterable
+            clearable
+            placeholder="可空，先记需求后补客户"
+          >
+            <template #prefix>
+              <el-icon><Search :size="14" /></el-icon>
+            </template>
+            <el-option
+              v-for="item in reqCustomerOptions"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="需求来源">
+          <el-input v-model="reqForm.source" placeholder="如 客户直接提出 / 招标 / 内部规划" />
+        </el-form-item>
+        <el-form-item label="优先级">
+          <el-select v-model="reqForm.priority" placeholder="选择优先级">
+            <el-option
+              v-for="item in dictOptions('dict_req_priority', reqPriorityFallback)"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="期望完成时间">
+          <el-date-picker
+            v-model="reqForm.expectFinishDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="客户期望完成日期"
+          />
+        </el-form-item>
+        <el-form-item label="期望上线时间">
+          <el-date-picker
+            v-model="reqForm.expectLaunchDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="客户期望上线日期"
+          />
+        </el-form-item>
+        <el-form-item label="预估金额">
+          <el-input-number
+            v-model="reqForm.expectAmount"
+            :min="0"
+            :precision="2"
+            :step="1"
+            controls-position="right"
+          >
+            <template #suffix>
+              <span class="amount-unit">万元</span>
+            </template>
+          </el-input-number>
+        </el-form-item>
+        <el-form-item v-if="reqEditingId" label="当前状态">
+          <el-select v-model="reqForm.status" placeholder="选择状态">
+            <el-option
+              v-for="item in dictOptions('dict_req_status', reqStatusFallback)"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="需求" class="span-2">
+          <el-input
+            v-model="reqForm.requirement"
+            type="textarea"
+            :rows="8"
+            maxlength="1000"
+            show-word-limit
+            placeholder="客户原话、功能范围、交付要求、关键时间节点…"
+          />
+        </el-form-item>
+      </el-form>
+
+      <div class="form-section-title">需求文件</div>
+      <el-upload
+        class="req-drop"
+        drag
+        multiple
+        action="#"
+        :show-file-list="false"
+        :disabled="reqUploading"
+        :http-request="doReqUpload"
+      >
+        <div v-loading="reqUploading" class="req-drop-text">
+          <b>把需求文件拖到这里，或点击选择</b>
+          <span>
+            {{
+              reqEditingId
+                ? '支持 pdf / word / excel / 图片 / 压缩包，单文件 ≤ 20MB'
+                : '先选好文件，保存需求后自动上传'
+            }}
+          </span>
+        </div>
+      </el-upload>
+      <ul v-if="reqPendingFiles.length" class="req-file-list">
+        <li v-for="(file, index) in reqPendingFiles" :key="`${file.name}-${index}`">
+          <span class="req-file-name" :title="file.name">{{ file.name }}</span>
+          <span class="req-file-meta">{{ fileSizeText(file.size) }} · 待上传</span>
+          <el-button link type="danger" size="small" @click="removePendingReqFile(index)">
+            移除
+          </el-button>
+        </li>
+      </ul>
+      <ul v-if="reqFiles.length" v-loading="reqFileLoading" class="req-file-list">
+        <li v-for="item in reqFiles" :key="item.fileId">
+          <span class="req-file-name" :title="item.fileName">{{ item.fileName }}</span>
+          <span class="req-file-meta">{{ fileSizeText(item.size) }} · {{ item.uploader || '—' }}</span>
+          <el-button link type="primary" size="small" @click="downloadReqFile(item)">下载</el-button>
+          <el-button v-if="canReq" link type="danger" size="small" @click="removeReqFile(item)">
+            删除
+          </el-button>
+        </li>
+      </ul>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <span class="form-tip">需求名称必填；客户可以后补，附件保存后仍可继续上传。</span>
+          <div class="dialog-actions">
+            <el-button @click="reqDialog = false">取消</el-button>
+            <el-button type="primary" :loading="reqUploading" @click="saveReq">保存</el-button>
+          </div>
+        </div>
       </template>
     </el-dialog>
 
@@ -2172,6 +2784,20 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   box-shadow: 0 1px 2px rgba(16, 35, 70, 0.08);
 }
 
+/* 页签上的条数：小一号、不抢主标题 */
+.seg button i {
+  margin-left: 6px;
+  font-style: normal;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--pms-text-3);
+}
+
+.seg button.is-active i {
+  color: inherit;
+  opacity: 0.7;
+}
+
 .list-total {
   font-size: 12.5px;
   color: var(--pms-text-3);
@@ -2362,6 +2988,69 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   margin: 2px 0 0;
   font-size: 12px;
   line-height: 1.7;
+  color: var(--pms-text-3);
+}
+
+/* 需求附件：拖拽区 + 文件清单（沿用项目文档的交互习惯） */
+.req-drop :deep(.el-upload) {
+  display: block;
+  width: 100%;
+}
+
+.req-drop :deep(.el-upload-dragger) {
+  padding: 18px 16px;
+  border-radius: 10px;
+}
+
+.req-drop-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--pms-text-3);
+}
+
+.req-drop-text b {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--pms-text-2);
+}
+
+.req-file-list {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--pms-line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.req-file-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+}
+
+.req-file-list li + li {
+  border-top: 1px solid var(--pms-line);
+}
+
+.req-file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--pms-text);
+}
+
+.req-file-meta {
+  flex: none;
+  font-variant-numeric: tabular-nums;
   color: var(--pms-text-3);
 }
 
