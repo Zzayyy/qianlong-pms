@@ -9,8 +9,10 @@ import {
   updateWeekly,
   weeklyDetail,
   weeklyOptions,
+  weeklyPreview,
   type WeeklyItem,
-  type WeeklyOptions
+  type WeeklyOptions,
+  type WeeklyPreview
 } from '@/api'
 import { useUserStore } from '@/stores/user'
 import { renderMarkdown, stripLeadingTitle } from '@/utils/markdown'
@@ -54,6 +56,14 @@ const total = ref(0)
 const page = reactive({ pageNum: 1, pageSize: 10 })
 const projectFilters = reactive({ weekStart: '', projectId: '', status: '' })
 const personalFilters = reactive({ weekStart: '' })
+
+/** 已选项目能否生成：只有该项目的项目经理 / PMO / 管理员可以（后端下发 canGenerate） */
+const selectedProject = computed(() =>
+  options.value.projects.find((item) => String(item.id) === String(projectFilters.projectId))
+)
+const canGenerate = computed(
+  () => Boolean(selectedProject.value) && selectedProject.value?.canGenerate !== false
+)
 
 const drawer = reactive({ visible: false, loading: false })
 const current = ref<WeeklyItem | null>(null)
@@ -163,6 +173,34 @@ const notifyAiHint = () => {
   ElMessage.info('AI 正在汇总本周日志，通常需要 10~30 秒')
 }
 
+/* ------------------------------ 依据日志预览 ------------------------------ */
+const preview = reactive({
+  visible: false,
+  loading: false,
+  data: null as WeeklyPreview | null
+})
+
+/** 生成前先看依据日志：口径与生成完全一致，避免生成完才发现数据不对。 */
+const openPreview = async () => {
+  if (!projectFilters.projectId) {
+    ElMessage.warning('请先选择项目')
+    return
+  }
+  preview.visible = true
+  preview.loading = true
+  preview.data = null
+  try {
+    preview.data = await weeklyPreview({
+      projectId: projectFilters.projectId,
+      weekStart: projectFilters.weekStart || undefined
+    })
+  } catch {
+    preview.visible = false
+  } finally {
+    preview.loading = false
+  }
+}
+
 const generateProject = async () => {
   if (!projectFilters.projectId) {
     ElMessage.warning('请先选择项目')
@@ -190,6 +228,12 @@ const generateProject = async () => {
   } finally {
     generating.value = false
   }
+}
+
+/** 预览抽屉里直接生成：关闭抽屉后走同一套生成逻辑（含覆盖确认）。 */
+const generateFromPreview = async () => {
+  preview.visible = false
+  await generateProject()
 }
 
 const generatePersonal = async () => {
@@ -356,7 +400,9 @@ onMounted(async () => {
               <el-option
                 v-for="item in options.projects"
                 :key="item.id"
-                :label="`${item.projectName}（${item.projectCode}）`"
+                :label="`${item.projectName}（${item.projectCode}）${
+                  item.canGenerate === false ? ' · 仅可查看' : ''
+                }`"
                 :value="item.id"
               />
             </el-select>
@@ -373,15 +419,24 @@ onMounted(async () => {
             <el-button @click="reset">重置</el-button>
             <span class="spacer"></span>
             <el-button :icon="RefreshCw" circle :loading="loading" aria-label="刷新" @click="loadList" />
+            <el-button :disabled="!projectFilters.projectId" @click="openPreview">
+              依据日志
+            </el-button>
+            <span v-if="!projectFilters.projectId" class="gen-hint">
+              {{ options.projects.length ? '请先在左侧选择项目' : '没有可生成周报的项目' }}
+            </span>
+            <span v-else-if="!canGenerate" class="gen-hint">
+              仅该项目的项目经理 / PMO 可生成
+            </span>
             <el-tooltip
-              :content="`按所选周次（${weekLabelOf(projectFilters.weekStart)}）汇总所选项目日志生成周报；已有则覆盖并升版本（需项目经理）`"
+              :content="`按所选周次（${weekLabelOf(projectFilters.weekStart)}）汇总所选项目日志生成周报；已有则覆盖并升版本（需该项目的项目经理）`"
               placement="top"
             >
               <el-button
                 type="primary"
                 :icon="Sparkles"
                 :loading="generating"
-                :disabled="!projectFilters.projectId"
+                :disabled="!canGenerate"
                 @click="generateProject"
               >
                 生成周报
@@ -573,6 +628,95 @@ onMounted(async () => {
         </div>
       </template>
     </el-drawer>
+
+    <!-- 生成前的依据日志：先核对数据，再点生成 -->
+    <el-drawer
+      v-model="preview.visible"
+      :title="
+        preview.data
+          ? `依据日志 · ${preview.data.projectName} · ${preview.data.weekLabel}`
+          : '依据日志'
+      "
+      size="min(1280px, 96vw)"
+      class="weekly-drawer"
+      :close-on-click-modal="false"
+      destroy-on-close
+    >
+      <div v-loading="preview.loading" class="preview-body">
+        <template v-if="preview.data">
+          <div class="preview-head">
+            <el-tag size="small" effect="plain">{{ preview.data.projectName }}</el-tag>
+            <el-tag size="small" effect="plain">{{ preview.data.weekLabel }}</el-tag>
+            <span class="preview-range">{{ preview.data.dateFrom }} ~ {{ preview.data.dateTo }}</span>
+          </div>
+
+          <div class="stats-row">
+            <div class="stat">
+              <span class="stat-label">日志</span>
+              <span class="stat-value"><b>{{ preview.data.logCount }}</b> 条</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">工时</span>
+              <span class="stat-value"><b>{{ preview.data.totalHours }}</b> h</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">参与人</span>
+              <span class="stat-value"><b>{{ preview.data.memberCount }}</b> 人</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">问题 / 风险</span>
+              <span class="stat-value"><b>{{ preview.data.riskLogCount }}</b> 条</span>
+            </div>
+          </div>
+
+          <el-alert
+            type="info"
+            :closable="false"
+            show-icon
+            class="preview-tip"
+            title="只统计已生效日志（提交 / 待确认 / 已确认），草稿与已驳回不计入；多项目日志按本项目的明细工时统计。"
+          />
+
+          <el-table :data="preview.data.entries" size="small" max-height="56vh">
+            <el-table-column label="日期" width="104" prop="date" />
+            <el-table-column label="提交人" width="120" prop="user" show-overflow-tooltip />
+            <el-table-column label="工时" width="80" align="right">
+              <template #default="{ row }">{{ row.hours }}h</template>
+            </el-table-column>
+            <el-table-column label="工作内容" min-width="220" show-overflow-tooltip prop="content" />
+            <el-table-column label="问题与阻塞" min-width="160" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.problem || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="明日计划" min-width="160" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.plan || '—' }}</template>
+            </el-table-column>
+            <template #empty>
+              <el-empty
+                description="该周没有已生效日志，生成会得到纯数据模板"
+                :image-size="64"
+              />
+            </template>
+          </el-table>
+        </template>
+      </div>
+
+      <template #footer>
+        <div class="drawer-footer">
+          <el-button @click="preview.visible = false">关闭</el-button>
+          <span class="spacer"></span>
+          <span v-if="!canGenerate" class="gen-hint">仅该项目的项目经理 / PMO 可生成</span>
+          <el-button
+            v-else
+            type="primary"
+            :icon="Sparkles"
+            :loading="generating"
+            @click="generateFromPreview"
+          >
+            生成周报
+          </el-button>
+        </div>
+      </template>
+    </el-drawer>
   </div>
 </template>
 
@@ -632,6 +776,12 @@ onMounted(async () => {
 
 .spacer {
   flex: 1;
+}
+
+/* 生成按钮置灰的原因直接写出来，避免用户以为按钮坏了 */
+.gen-hint {
+  font-size: 12px;
+  color: var(--pms-text-3, #8b93a7);
 }
 
 .hint {
@@ -733,6 +883,31 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 10px;
+}
+
+/* 依据日志预览（全局把 drawer body 的 padding 归零了，这里补回来） */
+.preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 28px;
+}
+
+.preview-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.preview-range {
+  font-size: 12.5px;
+  color: var(--pms-text-3, #8b93a7);
+  font-variant-numeric: tabular-nums;
+}
+
+.preview-tip {
+  margin: 0;
 }
 
 .stat {

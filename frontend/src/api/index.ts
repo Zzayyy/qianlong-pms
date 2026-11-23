@@ -392,7 +392,14 @@ export interface WeeklyOptions {
   weekLabel: string
   prevWeekStart: string
   today: string
-  projects: { id: string; projectCode: string; projectName: string; status: string }[]
+  projects: {
+    id: string
+    projectCode: string
+    projectName: string
+    status: string
+    /** 当前用户是否该项目的项目经理（决定能否生成周报） */
+    canGenerate?: boolean
+  }[]
   /** 每周五 12:00 自动生成开关 */
   autoEnabled: boolean
   aiConfigured: boolean
@@ -413,6 +420,39 @@ export const generateWeekly = (data: {
   projectId?: string
   weekStart?: string
 }) => post<WeeklyItem>('/weeklies/generate', data)
+
+/** 生成前的依据日志预览（只读，口径与生成一致）。 */
+export interface WeeklyPreviewEntry {
+  date: string
+  user: string
+  project: string
+  task: string
+  hours: number
+  content: string
+  problem: string
+  plan: string
+}
+
+export interface WeeklyPreview {
+  projectId: string
+  projectCode: string
+  projectName: string
+  weekStart: string
+  weekEnd: string
+  weekLabel: string
+  dateFrom: string
+  dateTo: string
+  totalHours: number
+  logCount: number
+  memberCount: number
+  riskLogCount: number
+  members: { name: string; hours: number; logCount: number }[]
+  byDay: { date: string; hours: number; count: number }[]
+  entries: WeeklyPreviewEntry[]
+}
+
+export const weeklyPreview = (params: Record<string, unknown>) =>
+  get<WeeklyPreview>('/weeklies/preview', params)
 
 /** 确认前编辑标题 / 正文。 */
 export const updateWeekly = (id: string, data: { title?: string; content: string }) =>

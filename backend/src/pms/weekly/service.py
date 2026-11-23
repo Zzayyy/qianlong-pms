@@ -87,12 +87,18 @@ async def _week_logs(
     project_id: int = 0,
     user_id: int = 0,
 ) -> list[WlWorklog]:
-    """取一段周区间内的有效日志（排除已驳回）。"""
+    """取一段周区间内的已生效日志（草稿、已驳回都不参与周报统计）。"""
     conditions = [
         WlWorklog.deleted == 0,
         WlWorklog.log_date >= start.isoformat(),
         WlWorklog.log_date <= end.isoformat(),
-        WlWorklog.status != WorklogStatus.REJECTED,
+        WlWorklog.status.in_(
+            [
+                WorklogStatus.SUBMITTED,
+                WorklogStatus.PENDING_APPROVE,
+                WorklogStatus.CONFIRMED,
+            ]
+        ),
     ]
     if user_id:
         conditions.append(WlWorklog.user_id == user_id)
@@ -474,11 +480,57 @@ async def ensure_can_generate(
             raise ParamError("项目周报需指定项目")
         project = await _load_project(session, project_id)
         if not await is_project_manager(session, context, project):
-            raise ForbiddenError("仅项目经理、PMO 或系统管理员可生成项目周报")
+            raise ForbiddenError(
+                "仅该项目的项目经理、PMO 或系统管理员可生成项目周报"
+            )
         return project
     if scope != WeeklyScope.PERSONAL:
         raise ParamError("scope 只能是 PROJECT / PERSONAL")
     return None
+
+
+async def preview_snapshot(
+    session: AsyncSession,
+    context: AuthContext,
+    *,
+    project_id: int,
+    week_start: date | None = None,
+    max_logs: int = 300,
+) -> dict[str, object]:
+    """生成前的依据日志预览：只读，不调 AI、不落库。
+
+    与生成的取数口径完全一致（已生效日志 + 多项目按明细归属），
+    便于项目经理点「生成」前先核对数据。
+    """
+    project = await _load_project(session, project_id)
+    if not await can_view_project_weekly(session, context, project):
+        raise ForbiddenError("无权查看该项目周报")
+    start, end = week_bounds(week_start)
+    snapshot = await _build_snapshot(
+        session,
+        scope=WeeklyScope.PROJECT,
+        start=start,
+        end=end,
+        project=project,
+        max_logs=max_logs,
+    )
+    return {
+        "projectId": project.id,
+        "projectCode": project.project_code,
+        "projectName": project.project_name,
+        "weekStart": start.isoformat(),
+        "weekEnd": end.isoformat(),
+        "weekLabel": snapshot["weekLabel"],
+        "dateFrom": snapshot["dateFrom"],
+        "dateTo": snapshot["dateTo"],
+        "totalHours": snapshot["totalHours"],
+        "logCount": snapshot["logCount"],
+        "memberCount": snapshot["memberCount"],
+        "riskLogCount": snapshot["riskLogCount"],
+        "members": snapshot["members"],
+        "byDay": snapshot["byDay"],
+        "entries": snapshot["entries"],
+    }
 
 
 async def generate(
@@ -840,6 +892,24 @@ async def list_options(session: AsyncSession, context: AuthContext) -> dict[str,
             .order_by(PrjProject.id.desc())
         )
     projects = list(result.scalars().all())
+    # 每个项目单独标记能否生成：系统角色「项目经理」不等于「该项目的项目经理」
+    if context.is_privileged or context.has_any_role("ADMIN"):
+        generatable = {int(project.id) for project in projects}
+    else:
+        pm_rows = await session.execute(
+            select(PrjMember.project_id).where(
+                PrjMember.user_id == context.user_id,
+                PrjMember.role_in_project == "PM",
+                PrjMember.deleted == 0,
+            )
+        )
+        pm_project_ids = {int(row[0]) for row in pm_rows.all()}
+        generatable = {
+            int(project.id)
+            for project in projects
+            if int(project.pm_id or 0) == context.user_id
+            or int(project.id) in pm_project_ids
+        }
     return {
         "weekStart": start.isoformat(),
         "weekEnd": end.isoformat(),
@@ -852,6 +922,8 @@ async def list_options(session: AsyncSession, context: AuthContext) -> dict[str,
                 "projectCode": project.project_code,
                 "projectName": project.project_name,
                 "status": project.status,
+                # 前端据此置灰「生成周报」，避免点了才报 403
+                "canGenerate": int(project.id) in generatable,
             }
             for project in projects
         ],

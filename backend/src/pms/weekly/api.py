@@ -65,6 +65,27 @@ async def options(
     return ok(await service.list_options(session, context))
 
 
+@router.get("/preview", summary="生成周报的依据日志")
+async def preview(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:view"))],
+    projectId: Annotated[int, Query(gt=0)],
+    weekStart: Annotated[str, Query()] = "",
+) -> object:
+    """生成前的依据日志（只读）：统计口径与生成一致，不含草稿/驳回。
+
+    注：必须定义在 `/{report_id}` 之前，否则会被路径参数路由抢先匹配。
+    """
+    return ok(
+        await service.preview_snapshot(
+            session,
+            context,
+            project_id=projectId,
+            week_start=_week_start(weekStart),
+        )
+    )
+
+
 @router.get("", summary="周报列表")
 async def list_weeklies(
     session: Annotated[AsyncSession, Depends(get_session)],
