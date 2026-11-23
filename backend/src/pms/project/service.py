@@ -1830,8 +1830,10 @@ async def create_risk(
     strategy: str = "",
     owner_id: int = 0,
     due_date: str | None = None,
+    source: str = "MANUAL",
+    source_key: str = "",
 ) -> PrjRisk:
-    """登记风险或问题。"""
+    """登记风险或问题（`source`/`source_key` 用于区分人工、日志与预警转正）。"""
     kind = (risk_type or "RISK").upper()
     if kind not in _RISK_TYPES:
         raise BizRuleError("类型只能是 RISK（风险）或 ISSUE（问题）")
@@ -1854,11 +1856,34 @@ async def create_risk(
         owner_id=owner_id,
         due_date=due_date or None,
         status="OPEN",
+        source=(source or "MANUAL").upper(),
+        source_key=source_key or "",
         create_by=operator_id,
     )
     session.add(risk)
     await session.flush()
     return risk
+
+
+async def find_risk_by_source_key(
+    session: AsyncSession, project_id: int, source_key: str
+) -> PrjRisk | None:
+    """按幂等键取风险（日志/预警转正去重）：同一条日志、同一个预警只落一条。"""
+    if not source_key:
+        return None
+    row = (
+        await session.execute(
+            select(PrjRisk)
+            .where(
+                PrjRisk.project_id == project_id,
+                PrjRisk.source_key == source_key,
+                PrjRisk.deleted == 0,
+            )
+            .order_by(PrjRisk.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return row
 
 
 async def update_risk(

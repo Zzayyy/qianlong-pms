@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pms.common.exceptions import ForbiddenError
+from pms.common.exceptions import BizRuleError, ForbiddenError
 from pms.common.response import ok, paged
 from pms.core.context import AuthContext
 from pms.core.deps import (
@@ -21,6 +21,7 @@ from pms.core.deps import (
     require_permissions,
 )
 from pms.org.models import SysDept, SysUser
+from pms.project import alerts as alert_service
 from pms.project import service
 from pms.project.models import PrjProject
 from pms.project.visibility import (
@@ -1211,6 +1212,9 @@ def _risk_out(risk: object, names: dict[int, str] | None = None) -> dict[str, ob
         "dueDate": risk.due_date,
         "closeTime": risk.close_time,
         "status": risk.status,
+        # 来源：MANUAL 人工 / WORKLOG 日志 / ALERT 预警转正（前端展示 + 筛选）
+        "source": risk.source,
+        "sourceKey": risk.source_key,
         "createTime": risk.create_time,
     }
 
@@ -1339,6 +1343,101 @@ async def delete_risk(
     await _refresh_health(session, project_id)
     await session.commit()
     return ok(message="已删除")
+
+
+# ------------------------------ 风险预警 ------------------------------
+
+
+class AlertKeyIn(BaseModel):
+    """预警转正 / 忽略的入参：只传 key，内容以服务端实时计算为准。"""
+
+    key: str = Field(min_length=1, max_length=128)
+
+
+class AlertIgnoreIn(AlertKeyIn):
+    """忽略预警：默认 7 天内不再提示。"""
+
+    days: int = 7
+
+
+def _alert_out(item: object) -> dict[str, object]:
+    """预警出参（不落库，转正后才写风险台账）。"""
+    assert isinstance(item, alert_service.Alert)
+    return {
+        "key": item.key,
+        "source": item.source,
+        "sourceLabel": alert_service.SOURCE_LABEL.get(item.source, item.source),
+        "riskType": item.risk_type,
+        "level": item.level,
+        "title": item.title,
+        "evidence": item.evidence,
+        "ownerId": item.owner_id,
+        "dueDate": item.due_date,
+    }
+
+
+@router.get("/{project_id}/alerts", summary="项目风险预警")
+async def project_alerts(
+    project_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
+) -> object:
+    """待处理预警：进度延期、里程碑逾期、日志问题（只读，转正后才进风险台账）。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_visible(session, context, project)
+    items = await alert_service.list_alerts(session, project_id)
+    return ok({"list": [_alert_out(item) for item in items], "count": len(items)})
+
+
+@router.post("/{project_id}/alerts/convert", summary="预警转为风险")
+async def convert_alert(
+    project_id: int,
+    body: AlertKeyIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+) -> object:
+    """把一条预警转成正式风险（幂等：同一个 key 只会落一条）。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_manager(session, context, project)
+    existing = await service.find_risk_by_source_key(session, project_id, body.key)
+    if existing is not None:
+        return ok({"id": existing.id})
+    alert = await alert_service.find_alert(session, project_id, body.key)
+    if alert is None:
+        raise BizRuleError("该预警已处理或已不成立，请刷新后重试")
+    risk = await service.create_risk(
+        session,
+        project_id,
+        context.user_id,
+        risk_type=alert.risk_type,
+        title=alert.title,
+        description=alert.evidence,
+        level=alert.level,
+        owner_id=alert.owner_id,
+        due_date=alert.due_date,
+        source="ALERT",
+        source_key=alert.key,
+    )
+    await _refresh_health(session, project_id)
+    await session.commit()
+    return ok({"id": risk.id})
+
+
+@router.post("/{project_id}/alerts/ignore", summary="忽略预警")
+async def ignore_alert(
+    project_id: int,
+    body: AlertIgnoreIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:edit"))],
+) -> object:
+    """忽略某个预警一段时间（默认 7 天），内部记录到 `t_prj_alert_mute`。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_manager(session, context, project)
+    until = await alert_service.mute_alert(
+        session, project_id, body.key, body.days, context.user_id
+    )
+    await session.commit()
+    return ok({"mutedUntil": until})
 
 
 # ------------------------------ 基线 ------------------------------

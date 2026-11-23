@@ -162,6 +162,20 @@ class PrjRisk(Base, CommonMixin):
     due_date: Mapped[str | None] = mapped_column(Date, default=None)
     close_time: Mapped[str | None] = mapped_column(Date, default=None)
     status: Mapped[str] = mapped_column(String(16), default="OPEN")
+    # 来源：MANUAL=人工登记，WORKLOG=日志自动生成，ALERT=预警转正
+    source: Mapped[str] = mapped_column(String(16), default="MANUAL")
+    # 幂等键（如 WORKLOG:WL2026...、STAGE_DELAY:12）：同一条日志/同一个预警只落一条风险
+    source_key: Mapped[str] = mapped_column(String(128), default="")
+
+
+class PrjAlertMute(Base, CommonMixin):
+    """预警忽略 `t_prj_alert_mute`：忽略后在 `muted_until` 之前不再提示同一个预警。"""
+
+    __tablename__ = "t_prj_alert_mute"
+
+    project_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    alert_key: Mapped[str] = mapped_column(String(128), default="")
+    muted_until: Mapped[str | None] = mapped_column(Date, default=None)
 
 
 class PrjBaseline(Base, CommonMixin):

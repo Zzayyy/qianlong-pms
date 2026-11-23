@@ -162,6 +162,19 @@ export const changeRiskStatus = (id: string, riskId: string, status: string) =>
 export const deleteRisk = (id: string, riskId: string) =>
   del<unknown>(`/projects/${id}/risks/${riskId}`)
 
+/**
+ * 项目风险预警：只读建议（进度延期 / 里程碑逾期 / 日志问题），
+ * 转正后才写风险台账，避免自动项污染统计口径。
+ */
+export const listProjectAlerts = (id: string) =>
+  get<{ list: Record<string, unknown>[]; count: number }>(`/projects/${id}/alerts`)
+
+export const convertProjectAlert = (id: string, key: string) =>
+  post<{ id: string }>(`/projects/${id}/alerts/convert`, { key })
+
+export const ignoreProjectAlert = (id: string, key: string, days = 7) =>
+  post<{ mutedUntil: string }>(`/projects/${id}/alerts/ignore`, { key, days })
+
 /** 项目基线（立项基线 + 每次变更通过后的冻结快照）。 */
 export const listBaselines = (id: string) =>
   get<Record<string, unknown>[]>(`/projects/${id}/baselines`)

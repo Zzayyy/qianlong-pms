@@ -24,7 +24,8 @@ from pms.common.exceptions import (
 from pms.core.context import AuthContext
 from pms.org.scope import project_visible, worklog_visible
 from pms.project import service as project_service
-from pms.project.models import PrjMember, PrjProject, PrjRisk, PrjTask
+from pms.project.alerts import log_risk_level, problem_summary
+from pms.project.models import PrjMember, PrjProject, PrjTask
 from pms.system.config_service import ConfigService
 from pms.worklog.models import WlComment, WlItem, WlReminder, WlWorklog
 from pms.worklog.rules import (
@@ -390,28 +391,45 @@ async def _apply_confirm_effects(
     session: AsyncSession, worklog: WlWorklog, operator_id: int
 ) -> None:
     """确认生效：回填任务工时/进度、生成风险项、重算项目进度。"""
-    for item in await list_items(session, worklog.id):
+    items = await list_items(session, worklog.id)
+    for item in items:
         if item.task_id:
             task = await session.get(PrjTask, item.task_id)
             if task is not None:
                 task.actual_hours = float(task.actual_hours) + float(item.hours)
                 if float(item.progress_after) > float(task.progress):
                     task.progress = float(item.progress_after)
-        project_id = item.project_id or worklog.project_id
-        if project_id and worklog.risk_flag:
-            session.add(
-                PrjRisk(
-                    project_id=project_id,
-                    risk_type="RISK",
-                    title=f"日志风险：{worklog.worklog_no}",
-                    description=worklog.problem or worklog.content,
-                    level="MEDIUM",
-                    owner_id=worklog.user_id,
-                    create_by=operator_id,
-                )
+    # 日志风险：一条日志只落一条风险（按日志编号幂等，避免多明细重复建/重复确认再建），
+    # 标题取「问题与阻塞」摘要，等级按关键词初判，来源标 WORKLOG 便于与人工登记区分
+    if worklog.risk_flag:
+        project_ids = {
+            int(item.project_id or worklog.project_id)
+            for item in items
+            if (item.project_id or worklog.project_id)
+        }
+        problem = str(worklog.problem or "").strip()
+        for project_id in project_ids:
+            key = f"WORKLOG:{worklog.worklog_no}"
+            if await project_service.find_risk_by_source_key(session, project_id, key):
+                continue
+            await project_service.create_risk(
+                session,
+                project_id,
+                operator_id,
+                risk_type="RISK",
+                title=(
+                    f"日志问题：{problem_summary(problem)}"
+                    if problem
+                    else f"日志风险：{worklog.worklog_no}"
+                ),
+                description=problem,
+                level=log_risk_level(problem),
+                owner_id=worklog.user_id,
+                source="WORKLOG",
+                source_key=key,
             )
     await session.flush()
-    for item in await list_items(session, worklog.id):
+    for item in items:
         if item.project_id:
             await project_service.recalc_progress(session, item.project_id)
 

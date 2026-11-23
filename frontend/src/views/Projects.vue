@@ -12,6 +12,7 @@ import {
   changeProjectStatus,
   changeRiskStatus,
   confirmWeekly,
+  convertProjectAlert,
   createMilestone,
   createProject,
   createRisk,
@@ -25,9 +26,11 @@ import {
   deptOptions,
   downloadProjectFile,
   generateWeekly,
+  ignoreProjectAlert,
   listBaselines,
   listMembers,
   listMilestones,
+  listProjectAlerts,
   listProjects,
   listRisks,
   listStages,
@@ -395,6 +398,85 @@ const loadRisks = async () => {
   risks.value = await listRisks(detail.value.id)
 }
 
+/* ------------------------------ 风险预警（只读建议） ------------------------------ */
+/**
+ * 预警来自进度延期、里程碑逾期与日志问题，不直接进风险台账：
+ * 由 PM/PMO 确认「转为风险」后才计入未关闭风险与健康度，或忽略 7 天。
+ */
+const alerts = ref<any[]>([])
+const alertsLoading = ref(false)
+const alertConverting = ref('')
+
+const ALERT_LEVEL: Record<string, { label: string; type: 'danger' | 'warning' | 'info' }> = {
+  HIGH: { label: '高', type: 'danger' },
+  MEDIUM: { label: '中', type: 'warning' },
+  LOW: { label: '低', type: 'info' }
+}
+const alertLevel = (code: string) => ALERT_LEVEL[String(code || '')] || ALERT_LEVEL.MEDIUM
+
+/** 风险来源：人工登记 / 日志自动生成 / 预警转正 */
+const RISK_SOURCE: Record<string, { label: string; type: 'info' | 'success' | 'warning' }> = {
+  MANUAL: { label: '人工', type: 'info' },
+  WORKLOG: { label: '日志', type: 'success' },
+  ALERT: { label: '预警', type: 'warning' }
+}
+const riskSource = (code: string) => RISK_SOURCE[String(code || '')] || RISK_SOURCE.MANUAL
+
+const loadAlerts = async () => {
+  if (!detail.value.id) {
+    alerts.value = []
+    return
+  }
+  alertsLoading.value = true
+  try {
+    const data = await listProjectAlerts(detail.value.id)
+    alerts.value = data.list || []
+  } catch {
+    alerts.value = []
+  } finally {
+    alertsLoading.value = false
+  }
+}
+
+/** 预警转正：内容以服务端实时计算为准，前端只传 key。 */
+const convertAlert = async (row: any) => {
+  try {
+    await ElMessageBox.confirm(
+      `将「${row.title}」登记为正式风险？登记后会计入未关闭风险与项目健康度。`,
+      '转为风险',
+      { type: 'info', confirmButtonText: '转为风险', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  alertConverting.value = String(row.key)
+  try {
+    await convertProjectAlert(detail.value.id, String(row.key))
+    ElMessage.success('已转为正式风险')
+    await loadRisks()
+    await loadAlerts()
+    detail.value = await projectDetail(detail.value.id)
+  } finally {
+    alertConverting.value = ''
+  }
+}
+
+/** 忽略预警：一段时间内不再提示，避免同一个延期反复打扰。 */
+const ignoreAlert = async (row: any) => {
+  try {
+    await ElMessageBox.confirm(
+      `忽略「${row.title}」？7 天内不再提示；如果情况恶化，仍可手动登记风险。`,
+      '忽略预警',
+      { type: 'info', confirmButtonText: '忽略 7 天', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  const result = await ignoreProjectAlert(detail.value.id, String(row.key), 7)
+  ElMessage.success(`已忽略至 ${result.mutedUntil}`)
+  await loadAlerts()
+}
+
 /**
  * 描述合并读取：老数据里「潜在影响 / 应对措施」是独立字段，
  * 编辑时并回描述，避免历史信息在合并后丢失。
@@ -492,6 +574,8 @@ const removeRisk = async (row: any) => {
   await deleteRisk(detail.value.id, String(row.id))
   ElMessage.success('已删除')
   await loadRisks()
+  // 删除的是预警转正的风险时，对应预警会重新出现
+  await loadAlerts()
   detail.value = await projectDetail(detail.value.id)
   await load()
 }
@@ -1004,6 +1088,7 @@ const refreshAll = async () => {
     members.value = await listMembers(detail.value.id)
     await loadNodeData()
     await loadRisks()
+    await loadAlerts()
     await loadBaselines()
   }
 }
@@ -1189,6 +1274,7 @@ const loadDetail = async (id: string, tab?: unknown) => {
     await loadNodeData()
     riskFilter.value = ''
     await loadRisks()
+    await loadAlerts()
     await loadBaselines()
     weeklyFilter.value = { weekStart: '', status: '' }
     weeklyPage.value.pageNum = 1
@@ -1210,6 +1296,11 @@ const loadDetail = async (id: string, tab?: unknown) => {
     detailLoading.value = false
   }
 }
+
+/** 切到「风险」时重新算一次预警，避免在计划页改完排期后仍然看到旧预警。 */
+watch(activeTab, (value) => {
+  if (isDetailView && value === 'risks' && detail.value.id) void loadAlerts()
+})
 
 /** 页签同步到地址栏，刷新后还能回到同一个页签。 */
 watch(activeTab, (value) => {
@@ -3189,6 +3280,46 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </el-tab-pane>
 
           <el-tab-pane label="风险" name="risks">
+            <!-- 系统预警：进度/里程碑逾期、日志问题，确认后才进风险台账 -->
+            <div v-if="alerts.length || alertsLoading" v-loading="alertsLoading" class="alert-panel">
+              <div class="alert-head">
+                <h4>待处理预警 <i>{{ alerts.length }}</i></h4>
+                <span class="block-tip">进度延期、里程碑逾期与日志问题自动推导，确认后才计入风险台账</span>
+                <span class="pane-spacer"></span>
+                <el-button link type="primary" size="small" @click="loadAlerts">刷新</el-button>
+              </div>
+              <div v-for="item in alerts" :key="item.key" class="alert-item">
+                <el-tag size="small" effect="plain" :type="alertLevel(item.level).type">
+                  {{ alertLevel(item.level).label }}
+                </el-tag>
+                <div class="alert-main">
+                  <div class="alert-title">{{ item.title }}</div>
+                  <div class="alert-meta">
+                    <span class="alert-source">{{ item.sourceLabel }}</span>
+                    {{ item.evidence }}
+                  </div>
+                </div>
+                <div class="alert-ops">
+                  <el-button
+                    size="small"
+                    type="primary"
+                    plain
+                    :disabled="!canManageRisk"
+                    :loading="alertConverting === item.key"
+                    @click="convertAlert(item)"
+                  >
+                    转为风险
+                  </el-button>
+                  <el-button size="small" link :disabled="!canManageRisk" @click="ignoreAlert(item)">
+                    忽略 7 天
+                  </el-button>
+                </div>
+              </div>
+              <p v-if="!canManageRisk" class="alert-hint">
+                预警由系统自动推导，仅项目经理 / PMO 可转为风险或忽略
+              </p>
+            </div>
+
             <div class="list-head">
               <div class="seg">
                 <button
@@ -3248,6 +3379,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 <template #default="{ row }">
                   <el-tag size="small" effect="plain" :type="dictOf(RISK_LEVEL, row.level).type">
                     {{ dictOf(RISK_LEVEL, row.level).label }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="来源" width="86">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="plain" :type="riskSource(row.source).type">
+                    {{ riskSource(row.source).label }}
                   </el-tag>
                 </template>
               </el-table-column>
@@ -4643,6 +4781,100 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   background: var(--pms-surface);
 }
 
+/* ---------------- 风险预警 ---------------- */
+/* 只读建议区：底色与风险台账区分开，避免被当成已登记的风险 */
+.alert-panel {
+  margin: 2px 0 14px;
+  padding: 12px 14px;
+  border: 1px solid #ffe0b8;
+  border-radius: var(--pms-radius-sm);
+  background: #fffaf1;
+}
+
+.alert-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.alert-head h4 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--pms-text);
+}
+
+.alert-head h4 i {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #ffe8c8;
+  color: #b96a00;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 600;
+}
+
+.alert-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 0;
+  border-top: 1px dashed #f0e0c8;
+}
+
+.alert-item:first-of-type {
+  border-top: 0;
+}
+
+.alert-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.alert-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--pms-text);
+}
+
+.alert-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--pms-text-3);
+}
+
+.alert-source {
+  color: var(--pms-text-2);
+}
+
+.alert-ops {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.alert-hint {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--pms-text-3);
+}
+
 .detail-head {
   display: flex;
   align-items: flex-start;
@@ -5171,6 +5403,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
   .detail-actions {
     padding: 10px 14px;
+  }
+
+  .alert-item {
+    flex-wrap: wrap;
+  }
+
+  .alert-ops {
+    width: 100%;
+    justify-content: flex-end;
   }
 
   .ops-select,
