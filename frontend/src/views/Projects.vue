@@ -207,8 +207,10 @@ const applyStatusFilter = (code: string) => {
 }
 
 const createVisible = ref(false)
-/** 立项即按这四段建立阶段；阶段负责人默认取项目经理，可在同一界面改。 */
-const DEFAULT_STAGES = ['设计', '开发', '测试', '交付']
+/** 立项即按这几段建立阶段；阶段负责人默认取项目经理，可在同一界面改。 */
+const DEFAULT_STAGES = ['设计', '开发', '测试', '交付', '在线问题修复', '结项']
+/** 默认权重按阶段数均分，保持合计 100（后端计算进度时仍会归一化）。 */
+const DEFAULT_STAGE_WEIGHT = Math.round((100 / DEFAULT_STAGES.length) * 100) / 100
 const createOptions = ref({
   approvalEnabled: false,
   retroDays: 7,
@@ -219,7 +221,7 @@ const buildStageDrafts = (ownerId: string) =>
   DEFAULT_STAGES.map((stageName, index) => ({
     stageName,
     ownerId,
-    weight: 25,
+    weight: DEFAULT_STAGE_WEIGHT,
     seq: index + 1,
     planStart: '',
     planEnd: ''
