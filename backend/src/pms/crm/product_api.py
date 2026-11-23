@@ -1,8 +1,8 @@
 """产品列表接口：报价与方案的基础档案（设计稿 04 §4.2.1）。
 
 权限口径：
-- 查看 `crm:product:view`（销售、项目经理、部门领导、PMO、公司领导、管理员）；
-- 新增 / 编辑 / 删除 `crm:product:manage`（公司领导只读）。
+- 查看：登录即可（产品档案是全公司共享的基础资料，菜单也是全员可见）；
+- 新增 / 编辑 / 删除：`crm:product:manage`，默认只授予「产品总监」与系统管理员。
 """
 
 from __future__ import annotations
@@ -29,13 +29,14 @@ class ProductIn(BaseModel):
     category: str = "SOFTWARE"
     spec: str = Field(default="", max_length=200)
     unit: str = Field(default="", max_length=16)
-    price: float = Field(default=0, ge=0)
+    # 字数下限在服务层校验，便于返回中文业务提示而不是 422
+    description: str = Field(default="", max_length=5000)
     status: str = ProductStatus.ACTIVE
     remark: str = Field(default="", max_length=2000)
 
 
 def _out(item: CrmProduct) -> dict[str, object]:
-    """产品出参。"""
+    """产品出参（参考价已停用，不再下发）。"""
     return {
         "id": item.id,
         "productCode": item.product_code,
@@ -43,7 +44,7 @@ def _out(item: CrmProduct) -> dict[str, object]:
         "category": item.category,
         "spec": item.spec,
         "unit": item.unit,
-        "price": float(item.price),
+        "description": item.description or "",
         "status": item.status,
         "remark": item.remark,
         "createTime": item.create_time.isoformat() if item.create_time else "",
@@ -59,7 +60,7 @@ async def list_products(
     category: Annotated[str, Query()] = "",
     status: Annotated[str, Query()] = "",
 ) -> object:
-    """分页查询产品档案；支持名称 / 编码 / 规格关键字与类别、状态筛选。"""
+    """分页查询产品档案（`crm:product:view`，默认对所有角色开放）。"""
     total = await service.count_products(session, keyword, category, status)
     items = await service.list_products(
         session,
@@ -83,7 +84,7 @@ async def product_detail(
     session: Annotated[AsyncSession, Depends(get_session)],
     context: Annotated[AuthContext, Depends(require_permissions("crm:product:view"))],
 ) -> object:
-    """产品详情。"""
+    """产品详情（含产品说明）。"""
     return ok(_out(await service.get_product(session, product_id)))
 
 
@@ -101,7 +102,7 @@ async def create_product(
         category=body.category,
         spec=body.spec,
         unit=body.unit,
-        price=body.price,
+        description=body.description,
         status=body.status,
         remark=body.remark,
     )
@@ -125,7 +126,7 @@ async def update_product(
         category=body.category,
         spec=body.spec,
         unit=body.unit,
-        price=body.price,
+        description=body.description,
         status=body.status,
         remark=body.remark,
     )

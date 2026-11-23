@@ -46,16 +46,27 @@ const syncWidth = () => {
 
 const editVisible = ref(false)
 const saving = ref(false)
+/** 产品说明字数下限（与后端 `_PRODUCT_DESC_MIN` 对齐）。 */
+const DESC_MIN = 500
+const DESC_MAX = 5000
 const editForm = ref<any>({
   id: '',
   productName: '',
   category: 'SOFTWARE',
   spec: '',
   unit: '套',
-  price: 0,
+  description: '',
   status: 'ACTIVE',
   remark: ''
 })
+
+/** 只读详情：产品说明较长，列表不展开，点「查看」看完整内容。 */
+const detailVisible = ref(false)
+const detailRow = ref<any>({})
+const openDetail = (row: any) => {
+  detailRow.value = row
+  detailVisible.value = true
+}
 
 const categoryText = (value: string) => CATEGORY[value] || value || '—'
 const statusMeta = (value: string) => STATUS[value] || { label: value || '—', type: 'info' as const }
@@ -102,7 +113,7 @@ const openCreate = () => {
     category: 'SOFTWARE',
     spec: '',
     unit: '套',
-    price: 0,
+    description: '',
     status: 'ACTIVE',
     remark: ''
   }
@@ -110,7 +121,7 @@ const openCreate = () => {
 }
 
 const openEdit = (row: any) => {
-  editForm.value = { ...row, price: Number(row.price || 0) }
+  editForm.value = { ...row, description: row.description || '' }
   editVisible.value = true
 }
 
@@ -119,9 +130,18 @@ const save = async () => {
     ElMessage.warning('请填写产品名称')
     return
   }
+  const description = String(editForm.value.description || '').trim()
+  if (description.length < DESC_MIN) {
+    ElMessage.warning(`产品说明至少 ${DESC_MIN} 字（当前 ${description.length} 字）`)
+    return
+  }
+  if (description.length > DESC_MAX) {
+    ElMessage.warning(`产品说明不能超过 ${DESC_MAX} 字`)
+    return
+  }
   saving.value = true
   try {
-    const payload = { ...editForm.value }
+    const payload = { ...editForm.value, description }
     delete payload.id
     if (editForm.value.id) {
       await updateProduct(String(editForm.value.id), payload)
@@ -175,7 +195,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-input
             v-model="keyword"
             class="filter-keyword"
-            placeholder="按产品名称 / 编码 / 规格搜索"
+            placeholder="按产品名称 / 编码 / 版本搜索"
             clearable
             @keyup.enter="onSearch"
             @clear="onSearch"
@@ -217,6 +237,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             :icon="Plus"
             class="pms-create-btn"
             :disabled="!canManage"
+            :title="canManage ? '' : '仅产品总监（或系统管理员）可新增产品'"
             @click="openCreate"
           >
             新增产品
@@ -238,16 +259,11 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <el-tag size="small" effect="plain">{{ categoryText(row.category) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="规格 / 版本" min-width="160" show-overflow-tooltip>
+        <el-table-column label="当前版本" min-width="140" show-overflow-tooltip>
           <template #default="{ row }">{{ row.spec || '—' }}</template>
         </el-table-column>
         <el-table-column label="单位" width="80">
           <template #default="{ row }">{{ row.unit || '—' }}</template>
-        </el-table-column>
-        <el-table-column label="参考价" width="130" align="right">
-          <template #default="{ row }">
-            {{ Number(row.price || 0).toLocaleString() }} 元
-          </template>
         </el-table-column>
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
@@ -264,14 +280,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         >
           <template #default="{ row }">{{ row.remark || '—' }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="110">
+        <el-table-column label="操作" :width="canManage ? 150 : 80">
           <template #default="{ row }">
-            <el-button link type="primary" :disabled="!canManage" @click="openEdit(row)">
-              编辑
-            </el-button>
-            <el-button link type="danger" :disabled="!canManage" @click="remove(row)">
-              删除
-            </el-button>
+            <el-button link type="primary" @click="openDetail(row)">查看</el-button>
+            <template v-if="canManage">
+              <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+              <el-button link type="danger" @click="remove(row)">删除</el-button>
+            </template>
           </template>
         </el-table-column>
       </el-table>
@@ -321,7 +336,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="规格/版本">
+        <el-form-item label="当前版本">
           <el-input v-model="editForm.spec" maxlength="200" placeholder="如 V3.2 / 标准版" />
         </el-form-item>
         <el-form-item label="单位">
@@ -335,14 +350,17 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <el-option v-for="unit in UNIT_OPTIONS" :key="unit" :label="unit" :value="unit" />
           </el-select>
         </el-form-item>
-        <el-form-item label="参考价">
-          <el-input-number
-            v-model="editForm.price"
-            :min="0"
-            :precision="2"
-            :step="1000"
-            controls-position="right"
+        <el-form-item label="产品说明" class="span-2" required>
+          <el-input
+            v-model="editForm.description"
+            type="textarea"
+            :rows="10"
+            resize="vertical"
+            :maxlength="DESC_MAX"
+            show-word-limit
+            :placeholder="`产品定位、功能范围、适用场景、交付形态等，至少 ${DESC_MIN} 字`"
           />
+          <p class="desc-tip">至少 {{ DESC_MIN }} 字，用于报价与方案时快速说明产品能力</p>
         </el-form-item>
         <el-form-item label="备注" class="span-2">
           <el-input
@@ -358,6 +376,36 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 只读详情：产品说明较长，列表不展开，所有人可查看 -->
+    <el-dialog v-model="detailVisible" title="产品详情" width="min(680px, 92vw)">
+      <div class="product-detail">
+        <div class="detail-head">
+          <div>
+            <h3>{{ detailRow.productName || '未命名产品' }}</h3>
+            <p class="detail-meta">{{ detailRow.productCode }}</p>
+          </div>
+          <div class="detail-tags">
+            <el-tag size="small" effect="plain">{{ categoryText(detailRow.category) }}</el-tag>
+            <el-tag size="small" effect="plain" :type="statusMeta(detailRow.status).type">
+              {{ statusMeta(detailRow.status).label }}
+            </el-tag>
+          </div>
+        </div>
+        <p class="detail-meta">
+          当前版本 {{ detailRow.spec || '—' }} · 单位 {{ detailRow.unit || '—' }}
+        </p>
+        <h4 class="detail-title">产品说明</h4>
+        <p class="detail-text">{{ detailRow.description || '暂无产品说明' }}</p>
+        <template v-if="detailRow.remark">
+          <h4 class="detail-title">备注</h4>
+          <p class="detail-text">{{ detailRow.remark }}</p>
+        </template>
+      </div>
+      <template #footer>
+        <el-button @click="detailVisible = false">关闭</el-button>
       </template>
     </el-dialog>
   </div>
@@ -426,6 +474,56 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .form-grid :deep(.el-select),
 .form-grid :deep(.el-input-number) {
   width: 100%;
+}
+
+.desc-tip {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--pms-text-3);
+}
+
+/* ---------------- 产品详情（只读） ---------------- */
+.product-detail .detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.product-detail h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--pms-text);
+}
+
+.product-detail .detail-meta {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--pms-text-3);
+}
+
+.product-detail .detail-tags {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.detail-title {
+  margin: 16px 0 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--pms-text);
+}
+
+.detail-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--pms-text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 :deep(.el-pagination) {

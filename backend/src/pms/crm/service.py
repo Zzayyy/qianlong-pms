@@ -975,6 +975,9 @@ _PRODUCT_CATEGORIES: Final[frozenset[str]] = frozenset(
 _PRODUCT_STATUS_VALUES: Final[frozenset[str]] = frozenset(
     item.value for item in ProductStatus
 )
+#: 产品说明字数下限 / 上限：太短的说明对报价与方案没有参考价值
+_PRODUCT_DESC_MIN: Final[int] = 500
+_PRODUCT_DESC_MAX: Final[int] = 5000
 
 
 async def next_product_code(session: AsyncSession) -> str:
@@ -1058,21 +1061,27 @@ async def get_product(session: AsyncSession, product_id: int) -> CrmProduct:
 
 
 def _validate_product(
-    *, product_name: str, category: str, status: str, price: float
-) -> tuple[str, str, str, float]:
-    """校验产品入参：名称必填、类别/状态合法、单价非负。"""
+    *, product_name: str, category: str, status: str, description: str
+) -> tuple[str, str, str, str]:
+    """校验产品入参：名称必填、类别/状态合法、产品说明至少 500 字。"""
     name = (product_name or "").strip()
     if not name:
         raise BizRuleError("请填写产品名称")
     if len(name) > 200:
         raise BizRuleError("产品名称不能超过 200 字")
-    if price is not None and float(price) < 0:
-        raise BizRuleError("参考价不能为负数")
+    desc = (description or "").strip()
+    if len(desc) < _PRODUCT_DESC_MIN:
+        raise BizRuleError(
+            f"产品说明至少 {_PRODUCT_DESC_MIN} 字（当前 {len(desc)} 字），"
+            "请补充产品定位、功能范围与适用场景"
+        )
+    if len(desc) > _PRODUCT_DESC_MAX:
+        raise BizRuleError(f"产品说明不能超过 {_PRODUCT_DESC_MAX} 字")
     return (
         name,
         _enum_value(category or "SOFTWARE", _PRODUCT_CATEGORIES, "产品类别"),
         _enum_value(status or ProductStatus.ACTIVE, _PRODUCT_STATUS_VALUES, "产品状态"),
-        float(price or 0),
+        desc,
     )
 
 
@@ -1084,13 +1093,13 @@ async def create_product(
     category: str = "SOFTWARE",
     spec: str = "",
     unit: str = "",
-    price: float = 0,
+    description: str = "",
     status: str = ProductStatus.ACTIVE,
     remark: str = "",
 ) -> CrmProduct:
     """新增产品档案。"""
-    name, category_value, status_value, price_value = _validate_product(
-        product_name=product_name, category=category, status=status, price=price
+    name, category_value, status_value, desc = _validate_product(
+        product_name=product_name, category=category, status=status, description=description
     )
     product = CrmProduct(
         product_code=await next_product_code(session),
@@ -1098,7 +1107,7 @@ async def create_product(
         category=category_value,
         spec=(spec or "").strip()[:200],
         unit=(unit or "").strip()[:16],
-        price=price_value,
+        description=desc,
         status=status_value,
         remark=remark or "",
         create_by=context.user_id,
@@ -1117,20 +1126,20 @@ async def update_product(
     category: str = "SOFTWARE",
     spec: str = "",
     unit: str = "",
-    price: float = 0,
+    description: str = "",
     status: str = ProductStatus.ACTIVE,
     remark: str = "",
 ) -> CrmProduct:
     """编辑产品档案（整体覆盖）。"""
     product = await get_product(session, product_id)
-    name, category_value, status_value, price_value = _validate_product(
-        product_name=product_name, category=category, status=status, price=price
+    name, category_value, status_value, desc = _validate_product(
+        product_name=product_name, category=category, status=status, description=description
     )
     product.product_name = name
     product.category = category_value
     product.spec = (spec or "").strip()[:200]
     product.unit = (unit or "").strip()[:16]
-    product.price = price_value
+    product.description = desc
     product.status = status_value
     product.remark = remark or ""
     product.update_by = context.user_id

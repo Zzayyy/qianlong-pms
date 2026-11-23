@@ -669,21 +669,23 @@ export const deleteCustomer = (id: string) => del<{ id: string }>(`/crm/customer
 
 /* ------------------------------ 产品列表 ------------------------------ */
 
-/** 产品档案（全公司共享，按 `crm:product:*` 权限控制）。 */
+/** 产品档案（查看全员开放，维护限产品总监 / 系统管理员）。 */
 export interface ProductItem {
   id: string
   productCode: string
   productName: string
   category: string
+  /** 当前版本（历史字段名 spec） */
   spec: string
   unit: string
-  price: number
+  /** 产品说明（不少于 500 字） */
+  description: string
   status: string
   remark: string
   createTime: string
 }
 
-/** 产品列表：支持名称 / 编码 / 规格关键字与类别、状态筛选。 */
+/** 产品列表：支持名称 / 编码 / 版本关键字与类别、状态筛选。 */
 export const listProducts = (params: Record<string, unknown>) =>
   get<Page<ProductItem>>('/products', params)
 

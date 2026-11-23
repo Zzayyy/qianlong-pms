@@ -140,12 +140,15 @@ class CrmProduct(Base, CommonMixin):
     product_name: Mapped[str] = mapped_column(String(200), default="")
     #: 产品类别：SOFTWARE / HARDWARE / SERVICE / SOLUTION / OTHER
     category: Mapped[str] = mapped_column(String(32), default="SOFTWARE")
-    #: 规格 / 版本
+    #: 当前版本（沿用历史的 spec 列，避免老数据迁移）
     spec: Mapped[str] = mapped_column(String(200), default="")
     #: 计量单位：套 / 人天 / 年 …
     unit: Mapped[str] = mapped_column(String(16), default="")
+    #: 参考价已停用：列保留用于历史数据，新数据不再采集
     price: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
     status: Mapped[str] = mapped_column(String(16), default=ProductStatus.ACTIVE)
+    #: 产品说明（新增/编辑时必填，至少 500 字）
+    description: Mapped[str] = mapped_column(Text, default="")
     remark: Mapped[str] = mapped_column(Text, default="")
 
 

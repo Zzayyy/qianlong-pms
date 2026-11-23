@@ -201,6 +201,11 @@ _ROLE_VIEW_ALL: Final[tuple[str, ...]] = (
 ROLE_REVOKES: Final[tuple[tuple[str, str], ...]] = (
     ("DEPT_HEAD", "org:role:view"),
     ("EXEC", "org:role:view"),
+    # 产品档案维护收口到「产品总监」：其他角色只保留查看
+    ("PMO", "crm:product:manage"),
+    ("DEPT_HEAD", "crm:product:manage"),
+    ("SALES", "crm:product:manage"),
+    ("PM", "crm:product:manage"),
 )
 
 ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
@@ -276,13 +281,25 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
         ),
     ),
     (
+        "PRODUCT_DIRECTOR",
+        "产品总监",
+        "ALL",
+        _ROLE_VIEW_ALL
+        + (
+            # 产品档案唯一维护角色（系统管理员另由 ADMIN 角色兜底）
+            "crm:product:view",
+            "crm:product:manage",
+            "worklog:create",
+            "report:export",
+        ),
+    ),
+    (
         "PMO",
         "PMO",
         "ALL",
         _ROLE_VIEW_ALL
         + (
             "crm:product:view",
-            "crm:product:manage",
             "org:dept:manage",
             "org:user:manage",
             "org:role:view",
@@ -316,7 +333,6 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
         _ROLE_VIEW_ALL
         + (
             "crm:product:view",
-            "crm:product:manage",
             "worklog:create",
             "worklog:confirm",
             "project:doc:upload",
@@ -339,7 +355,6 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
             "crm:opp:view",
             "crm:opp:manage",
             "crm:product:view",
-            "crm:product:manage",
             "project:view",
             "project:task:manage",
             "project:doc:upload",
@@ -365,9 +380,8 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
             "project:doc:manage",
             "change:create",
             "change:view",
-            # 产品经理维护产品档案，报价与方案可直接引用
+            # 产品清单可查看，维护交给「产品总监」角色
             "crm:product:view",
-            "crm:product:manage",
             "change:execute",
             "worklog:create",
             "worklog:view",
@@ -389,6 +403,8 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
             "worklog:create",
             "worklog:view",
             "report:view",
+            # 产品清单全员可见（维护仍限产品总监）
+            "crm:product:view",
         ),
     ),
     (
@@ -404,6 +420,8 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
             "worklog:create",
             "worklog:view",
             "report:view",
+            # 产品清单全员可见（维护仍限产品总监）
+            "crm:product:view",
         ),
     ),
     (
@@ -420,6 +438,8 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
             "worklog:create",
             "worklog:view",
             "report:view",
+            # 产品清单全员可见（维护仍限产品总监）
+            "crm:product:view",
         ),
     ),
 )
@@ -443,7 +463,8 @@ USERS: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
     ("ceo", "公司领导", "ROOT", ("EXEC",)),
     ("pmo", "PMO 专员", "PMO", ("PMO",)),
     ("sales_lead", "销售部经理", "SALES", ("DEPT_HEAD", "SALES")),
-    ("pm_lead", "产品部经理", "PRODUCT", ("DEPT_HEAD", "PM")),
+    # 产品总监：产品部负责人，产品档案的唯一维护角色（系统管理员另由 ADMIN 兜底）
+    ("pm_lead", "产品部经理", "PRODUCT", ("DEPT_HEAD", "PM", "PRODUCT_DIRECTOR")),
     ("dev_lead", "开发部经理", "DEV", ("DEPT_HEAD", "DEV")),
     ("test_lead", "测试部经理", "TEST", ("DEPT_HEAD", "TEST")),
     ("ops_lead", "运维部经理", "OPS", ("DEPT_HEAD", "OPS")),

@@ -469,7 +469,7 @@ async def customer_detail(
             "productName": item.product_name,
             "category": item.category,
             "unit": item.unit,
-            "price": float(item.price),
+            "spec": item.spec,
             "status": item.status,
         }
         for item in products
