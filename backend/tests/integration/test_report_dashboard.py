@@ -104,6 +104,7 @@ async def test_dashboards_and_aggregate(worklog_confirm_required: None) -> None:
                 log_date=_TODAY,
                 total_hours=8,
                 content="开发",
+                plan="继续开发",
                 items=[{"projectId": project.id, "taskId": task.id, "hours": 8, "progressAfter": 60}],
             )
             created[WlWorklog].append(worklog.id)

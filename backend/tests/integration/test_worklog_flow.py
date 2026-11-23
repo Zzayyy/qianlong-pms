@@ -104,6 +104,7 @@ async def test_worklog_confirm_and_visibility(worklog_confirm_required: None) ->
                 log_date=_TODAY,
                 total_hours=6,
                 content="完成接口开发",
+                plan="继续联调",
                 items=[{"projectId": project.id, "taskId": task.id, "hours": 6, "progressAfter": 50}],
             )
             created[WlWorklog].append(worklog.id)
@@ -123,6 +124,7 @@ async def test_worklog_confirm_and_visibility(worklog_confirm_required: None) ->
                 task_id=task.id,
                 total_hours=3,
                 content="继续联调",
+                plan="回归测试",
             )
             created[WlWorklog].append(second.id)
             assert second.id != worklog.id
@@ -173,6 +175,7 @@ async def test_worklog_confirm_and_visibility(worklog_confirm_required: None) ->
                 log_date=_LATE_DAY,
                 total_hours=2,
                 content="补填",
+                plan="补齐记录",
                 items=[{"projectId": project.id, "taskId": task.id, "hours": 2}],
             )
             created[WlWorklog].append(late.id)

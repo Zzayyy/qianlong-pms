@@ -3,13 +3,22 @@ defineOptions({ name: 'WorklogsPage' })
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowRight, Bell, CalendarClock, Download, FileText, RefreshCw, X } from 'lucide-vue-next'
+import {
+  ArrowRight,
+  Bell,
+  CalendarClock,
+  Check,
+  Download,
+  FileText,
+  RefreshCw,
+  Search,
+  X
+} from 'lucide-vue-next'
 import {
   addWorklogComment,
   deleteWorklog,
   deleteWorklogComment,
   exportWorklogs,
-  listTasks,
   listWorklogs,
   readAllWorklogReminders,
   readWorklogReminder,
@@ -42,11 +51,6 @@ interface WorklogOption {
   step: number
   today: string
   projects: WorklogProject[]
-}
-
-interface TaskItem {
-  id: string
-  taskName: string
 }
 
 interface WorklogRow {
@@ -668,7 +672,22 @@ const editable = (row: any) =>
 const authorLabel = (row: any) =>
   row.realName || row.userName || (String(row.userId) === currentUserId.value ? '我' : `用户 ${row.userId}`)
 
-/* ------------------------------ 选项与任务 ------------------------------ */
+/** 一条日志可能覆盖多个项目：列表按明细拼名称，悬浮看各项目工时。 */
+const rowProjectList = (row: any) => (row.projects?.length ? row.projects : [])
+const rowProjectText = (row: any) => {
+  const list = rowProjectList(row)
+  if (!list.length) return row.projectName || '非项目'
+  return list.map((item: any) => item.projectName || '未知项目').join('、')
+}
+const rowProjectTitle = (row: any) => {
+  const list = rowProjectList(row)
+  if (!list.length) return row.projectName || ''
+  return list
+    .map((item: any) => `${item.projectName || '未知项目'} ${Number(item.hours || 0)}h`)
+    .join('，')
+}
+
+/* ------------------------------ 选项与项目列表 ------------------------------ */
 const options = ref<WorklogOption>({
   backfillMaxDays: 5,
   warnHours: 8,
@@ -677,7 +696,6 @@ const options = ref<WorklogOption>({
   today: localToday(),
   projects: []
 })
-const tasks = ref<TaskItem[]>([])
 
 const loadOptions = async () => {
   try {
@@ -687,14 +705,94 @@ const loadOptions = async () => {
   }
 }
 
-const loadTasks = async (projectId: string) => {
-  tasks.value = []
-  if (!projectId) return
-  try {
-    tasks.value = (await listTasks(projectId)) as unknown as TaskItem[]
-  } catch {
-    tasks.value = []
+/** 左侧项目栏：按关键字过滤我参与/负责的项目。 */
+const projectKeyword = ref('')
+const filteredProjects = computed(() => {
+  const key = projectKeyword.value.trim().toLowerCase()
+  if (!key) return options.value.projects
+  return options.value.projects.filter((item) =>
+    `${item.projectName} ${item.projectCode}`.toLowerCase().includes(key)
+  )
+})
+
+const projectOf = (projectId: string) =>
+  options.value.projects.find((item) => String(item.id) === projectId) || null
+
+const isPicked = (projectId: string | number) =>
+  form.items.some((item) => item.projectId === String(projectId))
+
+const pickedCount = computed(() => form.items.length)
+
+const pickedProjectNames = computed(() =>
+  form.items.map((item) => projectOf(item.projectId)?.projectName || '未知项目')
+)
+
+/** 合计工时 = 各项目工时之和（后端按明细合计校验）。 */
+const totalHours = computed(() => {
+  const sum = form.items.reduce((acc, item) => acc + (Number(item.hours) || 0), 0)
+  return Math.round(sum * 100) / 100
+})
+
+/** 新增时第一个项目默认一整个工作日。 */
+const DEFAULT_DAY_HOURS = 8
+
+const defaultHours = () => (formMode.value === 'create' ? DEFAULT_DAY_HOURS : undefined)
+
+/** 点击左侧项目：多选，一次日志可覆盖多个项目；多选后自动平分工时。 */
+const toggleProject = (project: WorklogProject) => {
+  form.logType = 'PROJECT'
+  const key = String(project.id)
+  const index = form.items.findIndex((item) => item.projectId === key)
+  if (index >= 0) {
+    form.items.splice(index, 1)
+    if (form.items.length > 1) distributeHours()
+    // 回到单项目时恢复整天工时，避免留下均分后的半天数字
+    else if (form.items.length === 1 && formMode.value === 'create') {
+      form.items[0].hours = DEFAULT_DAY_HOURS
+    }
+    return
   }
+  form.items.push({
+    projectId: key,
+    taskId: '',
+    hours: form.items.length === 0 ? defaultHours() : undefined,
+    progressAfter: 0
+  })
+  if (form.items.length > 1) distributeHours()
+  if (form.items.length === 1) focusEditor()
+}
+
+const removeItem = (projectId: string) => {
+  const index = form.items.findIndex((item) => item.projectId === projectId)
+  if (index >= 0) form.items.splice(index, 1)
+}
+
+/**
+ * 平均分配：把当前合计（没填过就按 8h）按步长均分到各项目，
+ * 除不尽的余数留给最后一个，保证合计不变。
+ */
+const distributeHours = () => {
+  const count = form.items.length
+  if (count < 2) {
+    ElMessage.info('选择一个以上项目后可以平均分配')
+    return
+  }
+  const total = totalHours.value > 0 ? totalHours.value : DEFAULT_DAY_HOURS
+  const step = Number(options.value.step || 0.5) || 0.5
+  const base = Math.floor(total / count / step) * step
+  if (base <= 0) {
+    ElMessage.warning('工时太少，无法均分到每个项目')
+    return
+  }
+  let assigned = 0
+  form.items.forEach((item, index) => {
+    if (index === count - 1) {
+      item.hours = Math.round((total - assigned) * 100) / 100
+    } else {
+      item.hours = Math.round(base * 100) / 100
+      assigned += item.hours
+    }
+  })
 }
 
 const disabledDate = (time: Date) => {
@@ -716,29 +814,27 @@ const LOG_TYPE_LABELS: Record<string, string> = {
   MEETING_PROJECT: '项目会议'
 }
 
-const MEETING_TYPES = [
-  { value: 'MEETING_COMPANY', label: '公司会议' },
-  { value: 'MEETING_DEPT', label: '部门会议' },
-  { value: 'MEETING_PROJECT', label: '项目会议' }
-] as const
-
 const logTypeLabel = (value: string | undefined) =>
   LOG_TYPE_LABELS[String(value || 'PROJECT').toUpperCase()] || '项目'
 const isProjectType = (value: string | undefined) => !value || value === 'PROJECT'
-const isMeetingType = (value: string | undefined) => String(value || '').startsWith('MEETING_')
 
 const editorRef = ref<HTMLElement>()
 const formMode = ref<'create' | 'edit'>('create')
 const formSaving = ref(false)
 const formSubmitting = ref(false)
+/** 日志明细：一条日志可同时记多个项目，各自带工时。 */
+interface LogFormItem {
+  projectId: string
+  taskId: string
+  hours: number | undefined
+  progressAfter: number
+}
+
 const form = reactive({
   id: '',
   logType: 'PROJECT',
   logDate: localToday(),
-  projectId: '',
-  taskId: '',
-  totalHours: undefined as number | undefined,
-  progressAfter: 0,
+  items: [] as LogFormItem[],
   riskFlag: false,
   content: '',
   problem: '',
@@ -751,37 +847,17 @@ const resetForm = () => {
     id: '',
     logType: 'PROJECT',
     logDate: localToday(),
-    projectId: '',
-    taskId: '',
-    totalHours: undefined,
-    progressAfter: 0,
+    items: [] as LogFormItem[],
     riskFlag: false,
     content: '',
     problem: '',
     plan: ''
   })
-  tasks.value = []
 }
 
 /** 内联表单：切到编辑态或补填日期时滚动到编辑区。 */
 const focusEditor = () => {
   nextTick(() => editorRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
-}
-
-const switchLogType = (type: string) => {
-  form.logType = type
-  if (!isProjectType(type)) {
-    form.projectId = ''
-    form.taskId = ''
-    form.progressAfter = 0
-    form.riskFlag = false
-    tasks.value = []
-  }
-}
-
-/** 点「会议」时保留已选会议级别，否则默认项目会议。 */
-const pickMeeting = () => {
-  switchLogType(isMeetingType(form.logType) ? form.logType : 'MEETING_PROJECT')
 }
 
 /** 从催办日期直接进入补填；超出窗口时提示。 */
@@ -809,20 +885,36 @@ const openEdit = async (row: any) => {
     const data = (await worklogDetail(row.id)) as unknown as WorklogDetail
     const worklog = data.worklog
     formMode.value = 'edit'
+    // 历史日志可能没有明细（只有主表项目），补一条避免编辑后工时丢失
+    const rawItems = data.items?.length
+      ? data.items
+      : worklog.projectId
+        ? [
+            {
+              projectId: worklog.projectId,
+              taskId: worklog.taskId,
+              hours: worklog.totalHours,
+              progressAfter: 0
+            }
+          ]
+        : []
     Object.assign(form, {
       id: worklog.id,
       logType: worklog.logType || 'PROJECT',
       logDate: worklog.logDate,
-      projectId: String(worklog.projectId || ''),
-      taskId: String(worklog.taskId || ''),
-      totalHours: Number(worklog.totalHours) || undefined,
-      progressAfter: Number(data.items?.[0]?.progressAfter || 0),
+      items: rawItems
+        .map((item: any) => ({
+          projectId: String(item.projectId || ''),
+          taskId: String(item.taskId || ''),
+          hours: Number(item.hours) || undefined,
+          progressAfter: Number(item.progressAfter || 0)
+        }))
+        .filter((item) => item.projectId),
       riskFlag: Boolean(worklog.riskFlag),
       content: worklog.content || '',
       problem: worklog.problem || '',
       plan: worklog.plan || ''
     })
-    if (form.logType === 'PROJECT') await loadTasks(form.projectId)
     await loadDaySummary()
     detailVisible.value = false
     focusEditor()
@@ -836,11 +928,6 @@ const cancelEdit = () => {
   formMode.value = 'create'
   resetForm()
   loadDaySummary()
-}
-
-const onProjectChange = async () => {
-  form.taskId = ''
-  await loadTasks(form.projectId)
 }
 
 const loadDaySummary = async () => {
@@ -864,16 +951,22 @@ const dayStrip = computed(() => {
 })
 
 const validateForm = () => {
-  if (isProjectType(form.logType) && !form.projectId) {
-    ElMessage.warning('请选择项目')
-    return false
-  }
-  if (!form.totalHours || Number(form.totalHours) <= 0) {
-    ElMessage.warning('请填写大于 0 的工时')
-    return false
+  if (isProjectType(form.logType)) {
+    if (!form.items.length) {
+      ElMessage.warning('请从左侧选择项目')
+      return false
+    }
+    if (form.items.some((item) => !item.hours || Number(item.hours) <= 0)) {
+      ElMessage.warning('请为每个项目填写大于 0 的工时')
+      return false
+    }
   }
   if (!form.content.trim()) {
     ElMessage.warning('请填写工作内容')
+    return false
+  }
+  if (!form.plan.trim()) {
+    ElMessage.warning('请填写明日计划')
     return false
   }
   return true
@@ -886,17 +979,27 @@ const persistForm = async (submitAfter: boolean) => {
   else formSaving.value = true
   try {
     const isProject = isProjectType(form.logType)
+    const items = isProject
+      ? form.items.map((item) => ({
+          projectId: String(item.projectId),
+          taskId: String(item.taskId || 0),
+          hours: Number(item.hours || 0),
+          progressAfter: Number(item.progressAfter || 0)
+        }))
+      : []
     const payload = {
       logType: form.logType,
       logDate: form.logDate,
-      projectId: isProject ? form.projectId : 0,
-      taskId: isProject ? form.taskId || 0 : 0,
-      totalHours: Number(form.totalHours),
+      // 主表字段取第一条项目：老列表/团队视角仍能按单项目显示
+      projectId: items[0]?.projectId || 0,
+      taskId: items[0]?.taskId || 0,
+      totalHours: items.reduce((sum, item) => sum + item.hours, 0),
       content: form.content.trim(),
       problem: form.problem,
       plan: form.plan,
       riskFlag: isProject ? form.riskFlag : false,
-      progressAfter: isProject ? Number(form.progressAfter) : 0
+      progressAfter: 0,
+      items
     }
     const saved =
       formMode.value === 'edit' ? await updateWorklog(form.id, payload) : await saveWorklog(payload)
@@ -1303,78 +1406,71 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       </section>
     </transition>
 
-    <div class="worklog-main" :class="{ 'is-single': !canCreate }">
-      <div v-if="canCreate" ref="editorRef" class="pms-card editor-card">
+    <div v-if="canCreate" class="log-layout">
+      <!-- 左侧：我的项目（可多选，一次写完日志） -->
+      <aside class="pms-card project-rail">
+        <div class="rail-head">
+          <h3>我的项目</h3>
+          <span class="rail-count">
+            {{ options.projects.length }} 个<template v-if="pickedCount"> · 已选 {{ pickedCount }}</template>
+          </span>
+        </div>
+        <el-input
+          v-model="projectKeyword"
+          class="rail-search"
+          size="small"
+          placeholder="搜索项目名称 / 编号"
+          clearable
+          :prefix-icon="Search"
+        />
+        <p class="rail-hint">可多选项目，一次写完；多选后自动平分工时</p>
+        <div class="rail-list">
+          <button
+            v-for="item in filteredProjects"
+            :key="String(item.id)"
+            type="button"
+            class="rail-item"
+            :class="{ 'is-active': isPicked(item.id) }"
+            :title="`${item.projectName}（${item.projectCode}）`"
+            @click="toggleProject(item)"
+          >
+            <span class="rail-check" :class="{ 'is-on': isPicked(item.id) }">
+              <Check v-if="isPicked(item.id)" :size="12" :stroke-width="3" />
+            </span>
+            <span class="rail-item-main">
+              <span class="rail-item-name">{{ item.projectName }}</span>
+              <span class="rail-item-code">{{ item.projectCode }}</span>
+            </span>
+          </button>
+          <div v-if="!filteredProjects.length" class="rail-empty">
+            {{ options.projects.length ? '没有匹配的项目' : '暂无可填报项目' }}
+          </div>
+        </div>
+        <p v-if="!options.projects.length" class="rail-tip">
+          请联系项目经理把你加入项目成员后再填写
+        </p>
+      </aside>
+
+      <!-- 右侧：填写区 -->
+      <section ref="editorRef" class="pms-card editor-card">
         <div class="editor-head">
           <div class="editor-title">
             <h3>{{ formMode === 'edit' ? '编辑日志' : '写日志' }}</h3>
-            <span>{{
-              formMode === 'edit' ? '修改后保存即生效' : '直接在下方填写，保存草稿或直接提交'
-            }}</span>
+            <span v-if="pickedCount" class="editor-project">
+              {{ pickedProjectNames.join('、') }}
+            </span>
+            <span v-else>从左侧选择项目（可多选）</span>
           </div>
-          <div class="seg log-type-seg">
-            <button
-              type="button"
-              :class="{ 'is-active': isProjectType(form.logType) }"
-              @click="switchLogType('PROJECT')"
-            >
-              项目日志
-            </button>
-            <button
-              type="button"
-              :class="{ 'is-active': form.logType === 'PERSONAL' }"
-              @click="switchLogType('PERSONAL')"
-            >
-              个人日志
-            </button>
-            <button
-              type="button"
-              :class="{ 'is-active': form.logType === 'STUDY' }"
-              @click="switchLogType('STUDY')"
-            >
-              学习
-            </button>
-            <button
-              type="button"
-              :class="{ 'is-active': form.logType === 'OUTING' }"
-              @click="switchLogType('OUTING')"
-            >
-              外出
-            </button>
-            <button
-              type="button"
-              :class="{ 'is-active': isMeetingType(form.logType) }"
-              @click="pickMeeting"
-            >
-              会议
-            </button>
-          </div>
+          <el-tag v-if="!pickedCount" type="info" size="small" effect="plain">
+            未选项目
+          </el-tag>
+          <el-tag v-else type="primary" size="small" effect="plain">
+            {{ pickedCount }} 个项目
+          </el-tag>
         </div>
 
-        <div v-if="isMeetingType(form.logType)" class="seg meeting-seg">
-          <button
-            v-for="item in MEETING_TYPES"
-            :key="item.value"
-            type="button"
-            :class="{ 'is-active': form.logType === item.value }"
-            @click="switchLogType(item.value)"
-          >
-            {{ item.label }}
-          </button>
-        </div>
-
-        <el-alert
-          v-if="isProjectType(form.logType) && !options.projects.length"
-          type="info"
-          :closable="false"
-          show-icon
-          title="暂无可填报项目"
-          description="请先联系项目经理将你加入项目成员，再填写工作日志。"
-          style="margin-bottom: 12px"
-        />
-
-        <div class="form-grid">
-          <div class="field">
+        <div class="log-meta">
+          <div class="field meta-date">
             <label>日期 <em>*</em></label>
             <el-date-picker
               v-model="form.logDate"
@@ -1384,50 +1480,58 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               @change="loadDaySummary"
             />
           </div>
-          <div v-if="form.logType === 'PROJECT'" class="field">
-            <label>项目 <em>*</em></label>
-            <el-select
-              v-model="form.projectId"
-              filterable
-              placeholder="选择我参与的项目"
-              @change="onProjectChange"
-            >
-              <el-option
-                v-for="item in options.projects"
-                :key="String(item.id)"
-                :label="`${item.projectName}（${item.projectCode}）`"
-                :value="String(item.id)"
-              />
-            </el-select>
-          </div>
-          <div v-if="form.logType === 'PROJECT'" class="field">
-            <label>任务</label>
-            <el-select v-model="form.taskId" filterable clearable placeholder="可选，选择所属任务">
-              <el-option
-                v-for="item in tasks"
-                :key="String(item.id)"
-                :label="item.taskName"
-                :value="String(item.id)"
-              />
-            </el-select>
-          </div>
-          <div class="field">
-            <label>本人工时（h） <em>*</em></label>
-            <el-input-number
-              v-model="form.totalHours"
-              placeholder="请输入工时"
-              :step="Number(options.step || 0.5)"
-              :min="0"
-              :max="Number(options.maxHours || 24)"
-            />
-          </div>
-          <div v-if="form.logType === 'PROJECT'" class="field">
-            <label>任务进度（%）</label>
-            <el-input-number v-model="form.progressAfter" :min="0" :max="100" />
-          </div>
-          <div v-if="form.logType === 'PROJECT'" class="field">
+          <div class="field meta-risk">
             <label>风险标记</label>
             <el-switch v-model="form.riskFlag" active-text="存在风险" />
+          </div>
+          <div class="meta-total">
+            合计 <b>{{ totalHours }}</b> h
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="field span-full">
+            <div class="field-label">
+              <label>项目与工时 <em>*</em></label>
+              <el-button
+                v-if="form.items.length > 1"
+                link
+                type="primary"
+                size="small"
+                @click="distributeHours"
+              >
+                平均分配
+              </el-button>
+            </div>
+            <div class="ph-list">
+              <div v-for="item in form.items" :key="item.projectId" class="ph-row">
+                <span class="ph-name" :title="projectOf(item.projectId)?.projectName">
+                  {{ projectOf(item.projectId)?.projectName || '未知项目' }}
+                </span>
+                <span class="ph-hours">
+                  <el-input-number
+                    v-model="item.hours"
+                    size="small"
+                    placeholder="工时"
+                    :step="Number(options.step || 0.5)"
+                    :min="0"
+                    :max="Number(options.maxHours || 24)"
+                    controls-position="right"
+                  />
+                </span>
+                <el-button
+                  link
+                  type="danger"
+                  size="small"
+                  @click="removeItem(item.projectId)"
+                >
+                  移除
+                </el-button>
+              </div>
+              <div v-if="!form.items.length" class="ph-empty">
+                从左侧点击项目加入（可多选），再为每个项目填工时
+              </div>
+            </div>
           </div>
           <div class="field span-full">
             <label>工作内容 <em>*</em></label>
@@ -1440,24 +1544,25 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               placeholder="今天完成了什么？建议写清产出与结果"
             />
           </div>
-          <div class="field span-3">
-            <label>问题与阻塞</label>
-            <el-input
-              v-model="form.problem"
-              type="textarea"
-              :rows="3"
-              maxlength="500"
-              placeholder="遇到的技术/协作/资源问题（可选）"
-            />
-          </div>
-          <div class="field span-3">
-            <label>明日计划</label>
+          <div class="field span-full">
+            <label>明日计划 <em>*</em></label>
             <el-input
               v-model="form.plan"
               type="textarea"
               :rows="3"
               maxlength="500"
-              placeholder="下一步要做的事（可选）"
+              show-word-limit
+              placeholder="明天要做什么？没有计划可写「暂无」"
+            />
+          </div>
+          <div class="field span-full">
+            <label>问题与阻塞</label>
+            <el-input
+              v-model="form.problem"
+              type="textarea"
+              :rows="2"
+              maxlength="500"
+              placeholder="遇到的技术/协作/资源问题（可选）"
             />
           </div>
         </div>
@@ -1486,9 +1591,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             提交
           </el-button>
         </div>
-      </div>
+      </section>
+    </div>
 
-      <div class="pms-card insight-card">
+    <div class="pms-card insight-card">
         <div class="insight-head">
           <h3>本周工时分布</h3>
           <span>{{ weekRange }}</span>
@@ -1595,7 +1701,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <span>{{ heatTip.hours }} 小时 · {{ heatTip.count }} 条日志</span>
           </div>
         </div>
-      </div>
     </div>
 
     <div class="pms-card list-card">
@@ -1698,8 +1803,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </el-table-column>
         <el-table-column label="项目 / 类型" min-width="170">
           <template #default="{ row }">
-            <span v-if="isProjectType(row.logType)" class="project-cell">
-              {{ row.projectName || '非项目' }}
+            <span
+              v-if="isProjectType(row.logType)"
+              class="project-cell"
+              :title="rowProjectTitle(row)"
+            >
+              {{ rowProjectText(row) }}
             </span>
             <el-tag
               v-else
@@ -2388,28 +2497,264 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 /* ---------------- 页头与内联填写 ---------------- */
-.worklog-main {
+/* 左侧项目栏 + 右侧填写区：宽屏并排，窄屏自动堆叠 */
+.log-layout {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 280px minmax(0, 1fr);
+  /* 两栏等高：左侧项目栏与右侧表单底边对齐 */
   align-items: stretch;
   gap: 16px;
   margin-bottom: 14px;
 }
 
-.worklog-main.is-single {
-  grid-template-columns: minmax(0, 1fr);
+.project-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 0;
+}
+
+.rail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rail-head h3 {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--pms-text);
+}
+
+.rail-count {
+  font-size: 12px;
+  color: var(--pms-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.rail-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--pms-text-3);
+}
+
+/* 项目很多时单独滚动，不把右侧表单顶长；弹性填充让底边与右栏对齐 */
+.rail-list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 140px;
+  max-height: 560px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.rail-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--pms-line);
+  border-radius: 8px;
+  background: #fbfcff;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+/* 多选勾选框：一眼看出可以选多个 */
+.rail-check {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border: 1px solid #cfd8e6;
+  border-radius: 4px;
+  background: #fff;
+  color: #fff;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease;
+}
+
+.rail-check.is-on {
+  border-color: var(--pms-primary);
+  background: var(--pms-primary);
+}
+
+.rail-item-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rail-item:hover {
+  border-color: var(--pms-primary);
+  background: #f4f8ff;
+}
+
+.rail-item.is-active {
+  border-color: var(--pms-primary);
+  background: #eef4ff;
+  box-shadow: inset 0 0 0 1px var(--pms-primary);
+}
+
+.rail-item-name {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--pms-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-item.is-active .rail-item-name {
+  color: var(--pms-primary-deep);
+}
+
+.rail-item-code {
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--pms-text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-empty {
+  padding: 14px 10px;
+  border: 1px dashed var(--pms-line);
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--pms-text-3);
+  text-align: center;
+}
+
+.rail-tip {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #b8770f;
 }
 
 .editor-card {
   margin-bottom: 0;
 }
 
-.insight-card {
+.editor-project {
+  overflow: hidden;
+  max-width: 100%;
+  font-weight: 500;
+  color: var(--pms-primary-deep);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 顶部一行：日期（窄）+ 风险 + 合计工时，避免日期框被拉太长 */
+.log-meta {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.log-meta .meta-date {
+  flex: none;
+  width: 180px;
+}
+
+.log-meta .meta-risk {
+  flex: none;
+}
+
+.meta-total {
+  margin-left: auto;
+  padding-bottom: 6px;
+  font-size: 12.5px;
+  color: var(--pms-text-3);
+}
+
+.meta-total b {
+  margin: 0 2px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--pms-text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 多项目工时：一行一个项目，只填工时 */
+.ph-list {
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  gap: 14px;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--pms-line-soft);
+  border-radius: 8px;
+  background: #fbfcff;
+}
+
+.ph-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ph-name {
+  flex: 1 1 auto;
+  overflow: hidden;
   min-width: 0;
+  font-size: 13px;
+  color: var(--pms-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ph-hours {
+  display: block;
+  flex: none;
+  width: 120px;
+}
+
+.ph-hours :deep(.el-input-number) {
+  width: 100%;
+}
+
+.ph-empty {
+  padding: 6px 2px;
+  font-size: 12.5px;
+  color: var(--pms-text-3);
+}
+
+/* 本周工时分布（移到底部）：左侧统计与项目工时，右侧热力图 */
+.insight-card {
+  display: grid;
+  grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+  align-items: start;
+  gap: 14px 24px;
+  min-width: 0;
+}
+
+.insight-head,
+.insight-stats,
+.project-bars {
+  grid-column: 1;
+}
+
+.insight-card .heatmap-panel {
+  grid-column: 2;
+  grid-row: 2 / span 2;
 }
 
 .insight-stats {
@@ -2523,8 +2868,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .insight-card .heatmap-panel {
   position: relative;
   min-width: 0;
-  padding-top: 14px;
-  border-top: 1px solid var(--pms-line-soft);
+  padding: 0 0 0 22px;
+  border-left: 1px solid var(--pms-line-soft);
 }
 
 .insight-card .heatmap-head {
@@ -2729,8 +3074,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .editor-title {
   display: flex;
   align-items: baseline;
-  gap: 10px;
   flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
 }
 
 .editor-title h3 {
@@ -2892,24 +3238,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 /* ---------------- 填写表单 ---------------- */
-.log-type-seg {
-  margin-bottom: 0;
-}
-
-.log-type-seg button {
-  padding: 0 12px;
-}
-
-.meeting-seg {
-  margin-bottom: 12px;
-}
-
-.meeting-seg button {
-  height: 26px;
-  padding: 0 12px;
-  font-size: 12px;
-}
-
 .form-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -3174,9 +3502,25 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   flex: 1;
 }
 
-@media (max-width: 1280px) {
-  .worklog-main {
+@media (max-width: 1080px) {
+  .log-layout {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rail-list {
+    max-height: 220px;
+  }
+
+  .insight-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .insight-card .heatmap-panel {
+    grid-column: 1;
+    grid-row: auto;
+    padding: 14px 0 0;
+    border-top: 1px solid var(--pms-line-soft);
+    border-left: 0;
   }
 }
 

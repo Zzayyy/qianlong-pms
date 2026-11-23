@@ -40,6 +40,7 @@ from pms.worklog.rules import (
     round_hours,
     submit_status,
     validate_hours,
+    validate_required_text,
     workdays_between,
 )
 
@@ -128,10 +129,10 @@ async def save_draft(
 ) -> WlWorklog:
     """保存一条日志草稿（新增或按 `worklog_id` 更新）。
 
-    模型约定（v1.1.17 起）：
-    - `log_type=PROJECT`：一条日志对应一个项目 / 一个任务，团队可见；
+    模型约定：
+    - `log_type=PROJECT`：一条日志可覆盖多个项目（每个项目一条 `t_wl_item` 明细、
+      各自带工时），主表 `project_id/task_id` 取第一条项目做兼容展示；
     - `log_type=PERSONAL`：不绑定项目，默认仅本人可见，提交即生效；
-    - `t_wl_item` 仅用于项目日志的唯一任务明细；
     - 日期必须落在补填窗口内（默认最近 5 天，参数 `worklog.backfill.maxDays`）。
     """
     config = ConfigService(session)
@@ -163,32 +164,54 @@ async def save_draft(
         risk_flag = False
         items = None
 
-    # 兼容明细入参：一条日志只允许一个任务明细，避免主表与明细口径不一致
-    if items:
-        if len(items) > 1:
-            raise BizRuleError("一条日志只支持一个项目/任务明细，请按项目分别记录")
-        payload = items[0]
-        project_id = int(payload.get("projectId", project_id) or project_id)
-        task_id = int(payload.get("taskId", task_id) or task_id)
-        total_hours = float(payload.get("hours", total_hours) or total_hours)
-        content = str(payload.get("content", content) or content)
-        progress_after = float(payload.get("progressAfter", progress_after) or progress_after)
-
+    # 项目日志支持一条日志记多个项目：每个明细带自己的工时，主表取第一条项目做兼容
+    normalized: list[dict[str, object]] = []
     if meta.requires_project:
-        await _ensure_project_target(session, context, project_id, task_id)
-
-    hours = float(total_hours)
-    items = []
-    if project_id or task_id:
-        items = [
+        payloads = items or [
             {
                 "projectId": project_id,
                 "taskId": task_id,
-                "hours": hours,
-                "content": content,
+                "hours": total_hours,
                 "progressAfter": progress_after,
             }
         ]
+        seen: set[int] = set()
+        for payload in payloads:
+            pid = int(payload.get("projectId", 0) or 0)
+            tid = int(payload.get("taskId", 0) or 0)
+            item_hours = round_hours(float(payload.get("hours", 0) or 0), step)
+            if pid <= 0:
+                raise BizRuleError("请选择项目")
+            if item_hours <= 0:
+                raise BizRuleError("每个项目的工时需大于 0")
+            if pid in seen:
+                raise BizRuleError("同一项目只能填写一条工时")
+            seen.add(pid)
+            normalized.append(
+                {
+                    "projectId": pid,
+                    "taskId": tid,
+                    "hours": item_hours,
+                    "content": content,
+                    "progressAfter": float(payload.get("progressAfter", 0) or 0),
+                }
+            )
+        for payload in normalized:
+            await _ensure_project_target(
+                session,
+                context,
+                int(payload["projectId"]),
+                int(payload["taskId"]),
+            )
+        project_id = int(normalized[0]["projectId"])
+        task_id = int(normalized[0]["taskId"])
+        hours = sum(float(payload["hours"]) for payload in normalized)
+    else:
+        project_id = 0
+        task_id = 0
+        hours = float(total_hours)
+
+    items = normalized
 
     if worklog is None:
         worklog = WlWorklog(
@@ -239,6 +262,8 @@ async def submit(session: AsyncSession, worklog_id: int, user_id: int = 0) -> Wl
         else float(worklog.total_hours)
     )
     errors.extend(validate_hours(float(worklog.total_hours), item_hours, limits))
+    # 工作内容与明日计划必填：前端已拦截，这里兜底防止绕过草稿提交空日志
+    errors.extend(validate_required_text(worklog.content, worklog.plan))
     if errors:
         raise BizRuleError("；".join(errors))
 
@@ -385,6 +410,26 @@ async def project_names(
         select(PrjProject.id, PrjProject.project_name).where(PrjProject.id.in_(ids))
     )
     return {int(project_id): str(name) for project_id, name in result.all()}
+
+
+async def worklog_item_projects(
+    session: AsyncSession, worklog_ids: list[int]
+) -> dict[int, list[dict[str, object]]]:
+    """批量取日志的多项目明细（列表展示「项目A、项目B」用，避免逐条查询）。"""
+    ids = [int(item) for item in worklog_ids if item]
+    if not ids:
+        return {}
+    rows = await session.execute(
+        select(WlItem.worklog_id, WlItem.project_id, WlItem.hours)
+        .where(WlItem.worklog_id.in_(ids), WlItem.deleted == 0)
+        .order_by(WlItem.id)
+    )
+    result: dict[int, list[dict[str, object]]] = {}
+    for worklog_id, project_id, hours in rows.all():
+        result.setdefault(int(worklog_id), []).append(
+            {"projectId": int(project_id or 0), "hours": float(hours or 0)}
+        )
+    return result
 
 
 async def _apply_confirm_effects(
@@ -986,17 +1031,18 @@ async def can_view(
     ):
         return False
 
-    # 与项目可见性联动：项目不可见则其日志不可见
+    # 与项目可见性联动：一条日志可能覆盖多个项目，只要有一个项目本人可见即可
     dept_visible = await config.get_bool("project.dept.visible")
     public_visible = await config.get_bool("project.public.visible")
     is_project_owner = False
+    any_visible = False
     for project_id in project_ids:
         project = await session.get(PrjProject, project_id)
         if project is None:
             continue
         if project.pm_id == context.user_id:
             is_project_owner = True
-        if not project_visible(
+        if project_visible(
             secret_level=project.secret_level,
             is_member=await project_service.is_member(session, project_id, context.user_id),
             is_pm=project.pm_id == context.user_id,
@@ -1005,7 +1051,9 @@ async def can_view(
             is_all_scope=context.is_all_scope,
             public_visible=public_visible,
         ):
-            return False
+            any_visible = True
+    if project_ids and not any_visible:
+        return False
 
     # 团队日志角色隔离：同项目组内，普通成员只看与自身组内角色有交集的日志；
     # 本人 / 直属下级 / 项目负责人 / 部门领导 / PMO / 公司领导不受限制。

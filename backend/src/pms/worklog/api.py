@@ -74,6 +74,7 @@ def _out(
     user_name: str = "",
     real_name: str = "",
     task_name: str = "",
+    projects: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """日志出参。"""
     from pms.worklog.models import WlWorklog
@@ -89,6 +90,8 @@ def _out(
         "logType": worklog.log_type,
         "projectId": worklog.project_id,
         "projectName": project_name,
+        # 一条日志可覆盖多个项目：列表按此渲染「项目A、项目B」
+        "projects": projects or [],
         "taskId": worklog.task_id,
         "taskName": task_name,
         "logDate": worklog.log_date,
@@ -104,6 +107,22 @@ def _out(
         "confirmTime": worklog.confirm_time.isoformat() if worklog.confirm_time else "",
         "rejectReason": worklog.reject_reason,
     }
+
+
+def _row_projects(
+    worklog_id: int,
+    item_map: dict[int, list[dict[str, object]]],
+    names: dict[int, str],
+) -> list[dict[str, object]]:
+    """列表行的多项目明细（项目名 + 工时）。"""
+    return [
+        {
+            "projectId": item["projectId"],
+            "projectName": names.get(int(item["projectId"]), ""),
+            "hours": item["hours"],
+        }
+        for item in item_map.get(int(worklog_id), [])
+    ]
 
 
 @router.get("/options", summary="填报选项")
@@ -342,6 +361,17 @@ async def list_worklogs(
         visible = matched[pagination.offset : pagination.offset + pagination.page_size]
 
     names = await service.project_names(session, {row.project_id for row in visible})
+    item_map = await service.worklog_item_projects(session, [row.id for row in visible])
+    names.update(
+        await service.project_names(
+            session,
+            {
+                int(entry["projectId"])
+                for entries in item_map.values()
+                for entry in entries
+            },
+        )
+    )
     users = await service.user_names(session, {row.user_id for row in visible})
     tasks = await service.task_names(session, {row.task_id for row in visible})
     return paged(
@@ -352,6 +382,7 @@ async def list_worklogs(
                 user_name=users.get(row.user_id, ("", ""))[0],
                 real_name=users.get(row.user_id, ("", ""))[1],
                 task_name=tasks.get(row.task_id, ""),
+                projects=_row_projects(row.id, item_map, names),
             )
             for row in visible
         ],
@@ -411,6 +442,17 @@ async def team_worklogs(
     summary = await service.team_summary(session, **filters)  # type: ignore[arg-type]
 
     names = await service.project_names(session, {row.project_id for row in rows})
+    item_map = await service.worklog_item_projects(session, [row.id for row in rows])
+    names.update(
+        await service.project_names(
+            session,
+            {
+                int(entry["projectId"])
+                for entries in item_map.values()
+                for entry in entries
+            },
+        )
+    )
     users = await service.user_names(session, {row.user_id for row in rows})
     tasks = await service.task_names(session, {row.task_id for row in rows})
     page_size = pagination.page_size
@@ -423,6 +465,7 @@ async def team_worklogs(
                     user_name=users.get(row.user_id, ("", ""))[0],
                     real_name=users.get(row.user_id, ("", ""))[1],
                     task_name=tasks.get(row.task_id, ""),
+                    projects=_row_projects(row.id, item_map, names),
                 )
                 for row in rows
             ],

@@ -113,6 +113,16 @@ def validate_hours(
     return errors
 
 
+def validate_required_text(content: str, plan: str) -> list[str]:
+    """提交校验：工作内容与明日计划必填（返回错误清单，空表示通过）。"""
+    errors: list[str] = []
+    if not str(content or "").strip():
+        errors.append("请填写工作内容")
+    if not str(plan or "").strip():
+        errors.append("请填写明日计划")
+    return errors
+
+
 def round_hours(value: float, step: float = 0.5) -> float:
     """按步长取整工时（默认 0.5h，四舍五入而非银行家舍入）。"""
     if step <= 0:
