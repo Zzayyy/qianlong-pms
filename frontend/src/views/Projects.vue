@@ -2321,6 +2321,24 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             </el-tag>
           </template>
         </el-table-column>
+        <!-- 当前阶段：按顺序第一个未完成的阶段，全部完成时显示「全部完成」 -->
+        <el-table-column label="当前阶段" min-width="140">
+          <template #default="{ row }">
+            <el-tag v-if="row.currentStageStatus === 'DONE'" size="small" type="success" effect="plain">
+              {{ row.currentStage || '全部完成' }}
+            </el-tag>
+            <div v-else-if="row.currentStage">
+              <div class="cell-main">{{ row.currentStage }}</div>
+              <div class="cell-sub">
+                {{ dictOf(NODE_STATUS, row.currentStageStatus).label }}
+                <template v-if="row.currentStageStatus === 'IN_PROGRESS'">
+                  · {{ Math.round(Number(row.currentStageProgress || 0)) }}%
+                </template>
+              </div>
+            </div>
+            <span v-else class="cell-sub">未排阶段</span>
+          </template>
+        </el-table-column>
         <el-table-column label="健康度" width="92">
           <template #default="{ row }">
             <span class="health" :class="`is-${healthMeta(row.health).key}`">

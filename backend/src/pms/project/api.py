@@ -23,7 +23,7 @@ from pms.core.deps import (
 from pms.org.models import SysDept, SysUser
 from pms.project import alerts as alert_service
 from pms.project import service
-from pms.project.models import PrjProject
+from pms.project.models import PrjProject, PrjStage
 from pms.project.visibility import (
     can_manage_stage_tasks,
     can_view_project,
@@ -51,6 +51,47 @@ async def _user_names(session: AsyncSession, user_ids: set[int]) -> dict[int, st
         select(SysUser.id, SysUser.real_name).where(SysUser.id.in_(ids), SysUser.deleted == 0)
     )
     return {row[0]: row[1] for row in rows.all()}
+
+
+async def _current_stage_map(
+    session: AsyncSession, project_ids: set[int]
+) -> dict[int, dict[str, object]]:
+    """批量取各项目「当前阶段」：按顺序第一个未完成且未取消的阶段。
+
+    列表页需要「项目走到哪一步」，逐项目查会 N+1，这里按当前页一次性取回；
+    全部阶段都完成时返回「全部完成」，没有阶段的项目不下发该字段。
+    """
+    if not project_ids:
+        return {}
+    rows = await session.execute(
+        select(PrjStage.project_id, PrjStage.stage_name, PrjStage.status, PrjStage.progress)
+        .where(PrjStage.project_id.in_(project_ids), PrjStage.deleted == 0)
+        .order_by(PrjStage.project_id, PrjStage.seq, PrjStage.id)
+    )
+    stages: dict[int, dict[str, object]] = {}
+    totals: dict[int, int] = {}
+    for project_id, stage_name, status, progress in rows.all():
+        code = str(status or "")
+        if code == "CANCELLED":
+            continue
+        key = int(project_id)
+        totals[key] = totals.get(key, 0) + 1
+        # 已完成的阶段跳过，第一个未完成的就是「当前阶段」
+        if code == "DONE" or key in stages:
+            continue
+        stages[key] = {
+            "currentStage": str(stage_name or ""),
+            "currentStageStatus": code,
+            "currentStageProgress": round(float(progress or 0), 1),
+        }
+    for key, total in totals.items():
+        if key not in stages and total > 0:
+            stages[key] = {
+                "currentStage": "全部完成",
+                "currentStageStatus": "DONE",
+                "currentStageProgress": 100.0,
+            }
+    return stages
 
 
 def _can_view_amount(context: AuthContext) -> bool:
@@ -352,9 +393,17 @@ async def list_projects(
     visible_items = [item for item in items if await _can_view(session, context, item)]
     names = await _user_names(session, {item.pm_id for item in visible_items})
     show_amount = _can_view_amount(context)
+    # 「当前阶段」按当前页批量取，避免逐项目查询
+    stage_map = await _current_stage_map(session, {item.id for item in visible_items})
     return paged(
         [
-            _project_out(item, names.get(item.pm_id, ""), show_amount=show_amount)
+            {
+                **_project_out(item, names.get(item.pm_id, ""), show_amount=show_amount),
+                **stage_map.get(
+                    item.id,
+                    {"currentStage": "", "currentStageStatus": "", "currentStageProgress": None},
+                ),
+            }
             for item in visible_items
         ],
         len(visible_items) if len(visible_items) != len(items) else total,
