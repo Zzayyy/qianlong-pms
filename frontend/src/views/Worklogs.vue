@@ -767,6 +767,75 @@ const removeItem = (projectId: string) => {
   if (index >= 0) form.items.splice(index, 1)
 }
 
+/** 工作内容里可 @ 的候选：当前已选项目（去重，按选择顺序）。 */
+const mentionOptions = computed(() => {
+  const names = form.items
+    .map((item) => projectOf(item.projectId)?.projectName || '')
+    .filter(Boolean)
+  return names
+    .filter((name, index) => names.indexOf(name) === index)
+    .map((name) => ({ value: name, label: name }))
+})
+
+const mentionRef = ref<any>()
+
+/** 左侧项目的 @ 按钮：先选中项目，再把 `@项目名` 插到光标处（首次选中则追加到末尾）。 */
+const insertProjectMention = async (project: WorklogProject) => {
+  const hadEditor = Boolean(mentionRef.value)
+  if (!isPicked(project.id)) {
+    toggleProject(project)
+    await nextTick()
+  }
+  const token = `@${project.projectName} `
+  const textarea = mentionRef.value?.input?.textarea as HTMLTextAreaElement | undefined
+  if (!textarea || !hadEditor) {
+    const glue = form.content && !form.content.endsWith(' ') ? ' ' : ''
+    form.content = `${form.content}${glue}${token}`
+    return
+  }
+  const start = textarea.selectionStart ?? form.content.length
+  const end = textarea.selectionEnd ?? start
+  form.content = `${form.content.slice(0, start)}${token}${form.content.slice(end)}`
+  await nextTick()
+  textarea.focus()
+  const pos = start + token.length
+  textarea.setSelectionRange(pos, pos)
+}
+
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * 按「@项目名」把工作内容拆到各项目。
+ * 没写 @ 时返回空 Map，沿用原来的整段内容。
+ */
+const splitContentByProject = (text: string): Map<string, string> => {
+  const result = new Map<string, string>()
+  const items = form.items
+    .map((item) => ({ id: item.projectId, name: projectOf(item.projectId)?.projectName || '' }))
+    .filter((item) => item.name)
+  if (!items.length) return result
+  // 长名优先，避免「期权宝1」抢先匹配「期权宝12」
+  const sorted = [...items].sort((a, b) => b.name.length - a.name.length)
+  const pattern = new RegExp(
+    `@(${sorted.map((item) => escapeRegExp(item.name)).join('|')})`,
+    'g'
+  )
+  const matches = Array.from(text.matchAll(pattern))
+  if (!matches.length) return result
+  matches.forEach((match, index) => {
+    const target = items.find((item) => item.name === match[1])
+    if (!target) return
+    const start = (match.index || 0) + match[0].length
+    const end =
+      index + 1 < matches.length ? matches[index + 1].index || text.length : text.length
+    const segment = text.slice(start, end).trim()
+    if (!segment) return
+    const prev = result.get(target.id) || ''
+    result.set(target.id, prev ? `${prev}\n${segment}` : segment)
+  })
+  return result
+}
+
 /**
  * 平均分配：把当前合计（没填过就按 8h）按步长均分到各项目，
  * 除不尽的余数留给最后一个，保证合计不变。
@@ -979,11 +1048,14 @@ const persistForm = async (submitAfter: boolean) => {
   else formSaving.value = true
   try {
     const isProject = isProjectType(form.logType)
+    // 用 @项目名 分段时，顺便把每段内容写给对应明细，周报/统计按项目取用
+    const contentByProject = splitContentByProject(form.content.trim())
     const items = isProject
       ? form.items.map((item) => ({
           projectId: String(item.projectId),
           taskId: String(item.taskId || 0),
           hours: Number(item.hours || 0),
+          content: contentByProject.get(item.projectId) || '',
           progressAfter: Number(item.progressAfter || 0)
         }))
       : []
@@ -1425,14 +1497,17 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         />
         <p class="rail-hint">可多选项目，一次写完；多选后自动平分工时</p>
         <div class="rail-list">
-          <button
+          <div
             v-for="item in filteredProjects"
             :key="String(item.id)"
-            type="button"
             class="rail-item"
             :class="{ 'is-active': isPicked(item.id) }"
             :title="`${item.projectName}（${item.projectCode}）`"
+            role="button"
+            tabindex="0"
             @click="toggleProject(item)"
+            @keydown.enter="toggleProject(item)"
+            @keydown.space.prevent="toggleProject(item)"
           >
             <span class="rail-check" :class="{ 'is-on': isPicked(item.id) }">
               <Check v-if="isPicked(item.id)" :size="12" :stroke-width="3" />
@@ -1441,7 +1516,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <span class="rail-item-name">{{ item.projectName }}</span>
               <span class="rail-item-code">{{ item.projectCode }}</span>
             </span>
-          </button>
+            <button
+              type="button"
+              class="rail-at"
+              title="在工作内容中插入 @项目名"
+              @click.stop="insertProjectMention(item)"
+            >
+              @
+            </button>
+          </div>
           <div v-if="!filteredProjects.length" class="rail-empty">
             {{ options.projects.length ? '没有匹配的项目' : '暂无可填报项目' }}
           </div>
@@ -1535,7 +1618,19 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </div>
           <div class="field span-full">
             <label>工作内容 <em>*</em></label>
+            <el-mention
+              v-if="form.items.length"
+              ref="mentionRef"
+              v-model="form.content"
+              type="textarea"
+              :rows="6"
+              maxlength="1000"
+              show-word-limit
+              :options="mentionOptions"
+              placeholder="今天完成了什么？建议写清产出与结果（输入 @ 可以 @项目）"
+            />
             <el-input
+              v-else
               v-model="form.content"
               type="textarea"
               :rows="6"
@@ -1543,6 +1638,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               show-word-limit
               placeholder="今天完成了什么？建议写清产出与结果"
             />
+            <p v-if="form.items.length > 1" class="field-tip">
+              多个项目建议用 @ 标注每段内容：项目周报只取该项目的段落，避免互相串项。
+            </p>
           </div>
           <div class="field span-full">
             <label>明日计划 <em>*</em></label>
@@ -2500,7 +2598,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 /* 左侧项目栏 + 右侧填写区：宽屏并排，窄屏自动堆叠 */
 .log-layout {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  /* 左侧给 320px：项目名可以放两行，@ 按钮也不会贴着滚动条 */
+  grid-template-columns: 320px minmax(0, 1fr);
   /* 两栏等高：左侧项目栏与右侧表单底边对齐 */
   align-items: stretch;
   gap: 16px;
@@ -2548,8 +2647,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   gap: 6px;
   min-height: 140px;
   max-height: 560px;
-  overflow: auto;
-  padding-right: 2px;
+  /* 只竖向滚动：横向滚动条会把 @ 按钮挤到边缘 */
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .rail-item {
@@ -2557,6 +2658,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   align-items: flex-start;
   gap: 8px;
   width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   padding: 8px 10px;
   border: 1px solid var(--pms-line);
   border-radius: 8px;
@@ -2600,6 +2703,42 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   min-width: 0;
 }
 
+/* 项目行右侧的 @ 快捷按钮：hover / 选中时才出现，平时不占视觉 */
+.rail-at {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  width: 20px;
+  height: 20px;
+  margin-left: 2px;
+  border: 1px solid var(--pms-line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--pms-text-3);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 0.16s ease,
+    color 0.16s ease,
+    border-color 0.16s ease;
+}
+
+.rail-item:hover .rail-at,
+.rail-item:focus-within .rail-at,
+.rail-item.is-active .rail-at {
+  opacity: 1;
+}
+
+.rail-at:hover {
+  border-color: var(--pms-primary);
+  color: var(--pms-primary);
+}
+
 .rail-item:hover {
   border-color: var(--pms-primary);
   background: #f4f8ff;
@@ -2611,13 +2750,18 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   box-shadow: inset 0 0 0 1px var(--pms-primary);
 }
 
+/* 项目名很长时折两行再省略；完整名称看行的 title 提示 */
 .rail-item-name {
+  display: -webkit-box;
   overflow: hidden;
   font-size: 13px;
   font-weight: 500;
+  line-height: 1.45;
   color: var(--pms-text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
 }
 
 .rail-item.is-active .rail-item-name {

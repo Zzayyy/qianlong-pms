@@ -429,6 +429,8 @@ export interface WeeklyPreviewEntry {
   task: string
   hours: number
   content: string
+  /** 这条日志还涉及的其他项目：周报会提示 AI 不得写入这些项目的内容 */
+  relatedProjects?: string[]
   problem: string
   plan: string
 }

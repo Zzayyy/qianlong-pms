@@ -683,7 +683,21 @@ onMounted(async () => {
             <el-table-column label="工时" width="80" align="right">
               <template #default="{ row }">{{ row.hours }}h</template>
             </el-table-column>
-            <el-table-column label="工作内容" min-width="220" show-overflow-tooltip prop="content" />
+            <el-table-column label="工作内容" min-width="220" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-tag
+                  v-if="row.relatedProjects?.length"
+                  size="small"
+                  type="warning"
+                  effect="plain"
+                  class="rel-tag"
+                  :title="`同一条日志还涉及：${row.relatedProjects.join('、')}`"
+                >
+                  涉 {{ row.relatedProjects.length + 1 }} 项目
+                </el-tag>
+                {{ row.content || '—' }}
+              </template>
+            </el-table-column>
             <el-table-column label="问题与阻塞" min-width="160" show-overflow-tooltip>
               <template #default="{ row }">{{ row.problem || '—' }}</template>
             </el-table-column>
@@ -908,6 +922,11 @@ onMounted(async () => {
 
 .preview-tip {
   margin: 0;
+}
+
+/* 多项目日志标记：提醒 PM 生成前核对是否串项 */
+.rel-tag {
+  margin-right: 6px;
 }
 
 .stat {

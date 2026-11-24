@@ -187,12 +187,17 @@ async def save_draft(
             if pid in seen:
                 raise BizRuleError("同一项目只能填写一条工时")
             seen.add(pid)
+            # 多项目时前端按「@项目名」拆好每段内容：
+            # 传了 content 就按传的来（空串表示该项目不写内容）；
+            # 没传（老客户端）才整段带过去。
+            raw_content = payload.get("content", None)
+            item_content = content if raw_content is None else str(raw_content or "").strip()
             normalized.append(
                 {
                     "projectId": pid,
                     "taskId": tid,
                     "hours": item_hours,
-                    "content": content,
+                    "content": item_content,
                     "progressAfter": float(payload.get("progressAfter", 0) or 0),
                 }
             )
@@ -420,14 +425,19 @@ async def worklog_item_projects(
     if not ids:
         return {}
     rows = await session.execute(
-        select(WlItem.worklog_id, WlItem.project_id, WlItem.hours)
+        select(WlItem.worklog_id, WlItem.project_id, WlItem.hours, WlItem.content)
         .where(WlItem.worklog_id.in_(ids), WlItem.deleted == 0)
         .order_by(WlItem.id)
     )
     result: dict[int, list[dict[str, object]]] = {}
-    for worklog_id, project_id, hours in rows.all():
+    for worklog_id, project_id, hours, content in rows.all():
         result.setdefault(int(worklog_id), []).append(
-            {"projectId": int(project_id or 0), "hours": float(hours or 0)}
+            {
+                "projectId": int(project_id or 0),
+                "hours": float(hours or 0),
+                # 按项目填写的内容（用 @项目 分段时才有），周报据此避免串项
+                "content": str(content or ""),
+            }
         )
     return result
 

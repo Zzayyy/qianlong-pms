@@ -258,6 +258,30 @@ async def _build_snapshot(
             projects.get(row.project_id, "") or "未命名项目"
         )
 
+    def scoped_content(row: WlWorklog) -> str:
+        """项目视角只取本项目那段内容（用 `@项目名` 分段时），避免串项目。"""
+        entries = item_map.get(int(row.id), [])
+        if project is None or not entries:
+            return (row.content or "").strip()
+        # 只要日志按项目拆过内容，就只认本项目那段；未标注的项目不带正文
+        if any(str(entry.get("content") or "").strip() for entry in entries):
+            for entry in entries:
+                if int(entry["projectId"]) == project.id:
+                    return str(entry.get("content") or "").strip()
+            return ""
+        return (row.content or "").strip()
+
+    def related_projects(row: WlWorklog) -> list[str]:
+        """该日志涉及的其他项目（项目视角下用于提示 AI 不要串项）。"""
+        if project is None:
+            return []
+        names = [
+            projects.get(int(entry["projectId"]), "") or "未命名项目"
+            for entry in item_map.get(int(row.id), [])
+            if int(entry["projectId"]) != project.id
+        ]
+        return list(dict.fromkeys(names))
+
     entries = [
         {
             "date": _date_text(row.log_date),
@@ -265,7 +289,9 @@ async def _build_snapshot(
             "project": entry_project(row),
             "task": tasks.get(row.task_id, ""),
             "hours": scoped_hours(row),
-            "content": (row.content or "").strip()[:_CONTENT_LIMIT],
+            "content": scoped_content(row)[:_CONTENT_LIMIT],
+            # 日志同时涉及的其他项目：提示词据此要求 AI 不得写入本报告
+            "relatedProjects": related_projects(row),
             "problem": (row.problem or "").strip()[:_CONTENT_LIMIT],
             "plan": (row.plan or "").strip()[:_CONTENT_LIMIT],
         }
@@ -327,7 +353,11 @@ def _project_messages(snapshot: dict[str, object]) -> list[dict[str, str]]:
         "2. 进展按人员或任务归并，每条要点不超过 60 字，不要逐条罗列日志；\n"
         "3. 问题与风险优先列出阻塞项、风险标记与延期情况；\n"
         "4. 下周计划依据日志中「明日计划」归纳；\n"
-        "5. 语气客观简洁，可直接发给项目干系人。\n\n"
+        "5. 语气客观简洁，可直接发给项目干系人；\n"
+        "6. 一条日志可能同时记录多个项目（条目里的 relatedProjects 字段）："
+        f"只提取与本项目「{snapshot.get('projectName', '')}」相关的内容，"
+        "relatedProjects 或其他项目的进展、问题、计划一律不得写入本报告；"
+        "无法区分归属时按本项目工时客观描述，禁止臆造。\n\n"
         f"## 项目与统计\n```json\n{json.dumps(data, ensure_ascii=False, indent=1)}\n```\n\n"
         f"## 本周工作日志\n```json\n"
         f"{json.dumps(snapshot['entries'], ensure_ascii=False, indent=1)}\n```\n"
