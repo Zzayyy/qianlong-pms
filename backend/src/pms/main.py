@@ -33,6 +33,7 @@ from pms.core.redis import close_redis
 from pms.crm import api as crm_api
 from pms.crm import product_api
 from pms.file import api as file_api
+from pms.issue import api as issue_api
 from pms.jobs import shutdown_scheduler, start_scheduler
 from pms.notice import api as notice_api
 from pms.notice import mail_api
@@ -146,6 +147,7 @@ def create_app() -> FastAPI:
     app.include_router(product_api.router)
     app.include_router(project_api.router)
     app.include_router(change_api.router)
+    app.include_router(issue_api.router)
     app.include_router(worklog_api.router)
     app.include_router(weekly_api.router)
     app.include_router(report_api.router)

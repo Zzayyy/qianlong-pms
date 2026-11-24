@@ -104,6 +104,25 @@ export async function upload<T>(url: string, form: FormData): Promise<T> {
   return response.data.data
 }
 
+/**
+ * 带鉴权取文件：返回可直接给 `<img>` / `el-image` 用的 objectURL。
+ *
+ * 图片接口需要 Bearer token，`<img src>` 发不出自定义头，只能先用 fetch 取 blob。
+ * `path` 传接口路径（如 `/issues/1/attachments/2/download`，自动补 `/api/v1`），
+ * 也接受完整 `/api/...` 地址。调用方在组件卸载时记得 `URL.revokeObjectURL`。
+ */
+export async function fileObjectUrl(path: string): Promise<string> {
+  const token = localStorage.getItem('pms_token')
+  const url = path.startsWith('/api/') ? path : `/api/v1${path}`
+  const response = await fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!response.ok) {
+    throw new Error('图片加载失败')
+  }
+  return URL.createObjectURL(await response.blob())
+}
+
 /** 带鉴权下载二进制文件并触发浏览器保存。 */
 export async function download(url: string, fileName: string): Promise<void> {
   const token = localStorage.getItem('pms_token')

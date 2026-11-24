@@ -43,6 +43,7 @@ const moduleLabels: [string, string][] = [
   ['crm', '客户与商机'],
   ['project', '项目周期'],
   ['change', '变更记录'],
+  ['issue', '问题跟踪'],
   ['worklog', '工作日志'],
   ['weekly', '周报总结'],
   ['report', '统计看板'],

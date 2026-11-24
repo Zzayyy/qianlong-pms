@@ -19,7 +19,8 @@ from pms.system.models import SysFile
 
 BIZ_TYPES: Final[frozenset[str]] = frozenset(
     # OTHER：不属于任何节点/任务的散装资料（合同扫描件、会议纪要等）
-    {"PROJECT", "STAGE", "MILESTONE", "TASK", "CHANGE", "OTHER"}
+    # ISSUE：问题跟踪的附件/截图，biz_id 为问题 ID
+    {"PROJECT", "STAGE", "MILESTONE", "TASK", "CHANGE", "ISSUE", "OTHER"}
 )
 
 
@@ -99,6 +100,13 @@ async def _ensure_biz_owner(
         if task is None or task.deleted or task.project_id != project_id:
             raise NotFoundError("任务不存在")
         return task.task_code or task.task_name
+    if biz_type == "ISSUE":
+        from pms.issue.models import IssIssue
+
+        issue = await session.get(IssIssue, biz_id)
+        if issue is None or issue.deleted or issue.project_id != project_id:
+            raise NotFoundError("问题不存在")
+        return issue.issue_no
     return ""
 
 

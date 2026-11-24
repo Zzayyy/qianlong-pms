@@ -84,7 +84,10 @@ const navSections: NavSection[] = [
     label: '项目',
     items: [
       { path: '/projects', label: '项目周期', icon: FolderKanban, permission: 'project:view' },
-      { path: '/changes', label: '变更记录', icon: GitPullRequest, permission: 'change:view' }
+      { path: '/changes', label: '变更记录', icon: GitPullRequest, permission: 'change:view' },
+      // Bug 与生产问题共用一套页面，按类型过滤
+      { path: '/bugs', label: 'Bug 列表', icon: ClipboardList, permission: 'issue:view' },
+      { path: '/prod-issues', label: '生产问题', icon: ShieldAlert, permission: 'issue:view' }
     ]
   },
   {

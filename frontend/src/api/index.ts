@@ -1,6 +1,8 @@
-import { del, download, get, post, put, upload, type Page } from './http'
+import { del, download, fileObjectUrl, get, post, put, upload, type Page } from './http'
 
 export type { Page }
+/** 带鉴权取图（图片需转 objectURL 才能预览）。 */
+export { fileObjectUrl }
 
 /* ------------------------------ 认证 ------------------------------ */
 
@@ -981,3 +983,97 @@ export interface ArchiveReport {
 
 export const archiveAudit = (data: { keepMonths: number; dryRun: boolean }) =>
   post<ArchiveReport>('/audit/archive', data)
+
+/* ------------------------------ 问题跟踪 ------------------------------ */
+
+export interface IssueItem {
+  id: string
+  issueNo: string
+  issueType: string
+  projectId: string
+  projectName: string
+  title: string
+  description: string
+  severity: string
+  priority: string
+  status: string
+  ownerId: string
+  ownerName: string
+  reporterId: string
+  reporterName: string
+  foundDate: string
+  closeDate: string
+  remark: string
+  createTime: string
+}
+
+export interface IssueFormOptions {
+  projects: { id: string; projectCode: string; projectName: string }[]
+  users: { id: string; name: string }[]
+  types: string[]
+  statuses: string[]
+  severities: string[]
+  priorities: string[]
+  canManage: boolean
+}
+
+export interface IssueLogItem {
+  id: string
+  action: string
+  field: string
+  oldValue: string
+  newValue: string
+  operatorId: string
+  operatorName: string
+  createTime: string
+}
+
+export interface IssueAttachment {
+  id: string
+  fileId: string
+  fileName: string
+  size: number
+  mime: string
+  uploader: string
+  uploadTime: string
+}
+
+export interface IssueDetailData extends IssueItem {
+  logs: IssueLogItem[]
+  attachments: IssueAttachment[]
+  /** 项目成员 / 提报人 / 负责人 / 问题管理员才可上传附件 */
+  canUpload?: boolean
+}
+
+export const listIssues = (params: Record<string, unknown>) =>
+  get<Page<IssueItem>>('/issues', params)
+
+export const issueOptions = () => get<IssueFormOptions>('/issues/options')
+
+export const issueDetail = (id: string) => get<IssueDetailData>(`/issues/${id}`)
+
+/** 问题附件：上传图片/文档后挂在问题项目下。 */
+export const uploadIssueFile = (id: string, form: FormData) =>
+  upload<IssueAttachment>(`/issues/${id}/attachments`, form)
+
+export const deleteIssueFile = (id: string, fileId: string) =>
+  del<unknown>(`/issues/${id}/attachments/${fileId}`)
+
+/** 问题附件下载：走问题自己的接口，不受项目成员限制。 */
+export const downloadIssueFile = (id: string, fileId: string, fileName: string) =>
+  download(`/issues/${id}/attachments/${fileId}/download`, fileName)
+
+/** 问题图片取 objectURL（同样走问题接口，提报人不是项目成员也能看）。 */
+export const issueAttachmentUrl = (id: string, fileId: string) =>
+  fileObjectUrl(`/issues/${id}/attachments/${fileId}/download`)
+
+export const createIssue = (data: Record<string, unknown>) =>
+  post<{ id: string; issueNo: string }>('/issues', data)
+
+export const updateIssue = (id: string, data: Record<string, unknown>) =>
+  put<{ id: string }>(`/issues/${id}`, data)
+
+export const changeIssueStatus = (id: string, status: string) =>
+  post<{ id: string; status: string; closeDate: string }>(`/issues/${id}/status`, { status })
+
+export const deleteIssue = (id: string) => del<{ id: string }>(`/issues/${id}`)

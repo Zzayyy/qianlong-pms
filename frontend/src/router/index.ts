@@ -28,6 +28,22 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '项目详情', permission: 'project:view', parentPath: '/projects' }
       },
       { path: 'changes', name: 'changes', component: () => import('@/views/Changes.vue'), meta: { title: '变更记录', permission: 'change:view' } },
+      // Bug 与生产问题共用一个页面，靠 meta.issueType 区分
+      { path: 'bugs', name: 'bugs', component: () => import('@/views/Issues.vue'), meta: { title: 'Bug 列表', permission: 'issue:view', issueType: 'BUG' } },
+      { path: 'prod-issues', name: 'prod-issues', component: () => import('@/views/Issues.vue'), meta: { title: '生产问题', permission: 'issue:view', issueType: 'PROD' } },
+      // 问题详情独立成页：可刷新、可分享，面包屑回挂到对应列表
+      {
+        path: 'bugs/:id',
+        name: 'bug-detail',
+        component: () => import('@/views/IssueDetail.vue'),
+        meta: { title: 'Bug 详情', permission: 'issue:view', issueType: 'BUG', parentPath: '/bugs' }
+      },
+      {
+        path: 'prod-issues/:id',
+        name: 'prod-issue-detail',
+        component: () => import('@/views/IssueDetail.vue'),
+        meta: { title: '生产问题详情', permission: 'issue:view', issueType: 'PROD', parentPath: '/prod-issues' }
+      },
       { path: 'worklogs', name: 'worklogs', component: () => import('@/views/Worklogs.vue'), meta: { title: '工作日志', permission: 'worklog:view' } },
       { path: 'weeklies', name: 'weeklies', component: () => import('@/views/Weeklies.vue'), meta: { title: '周报总结', permission: 'worklog:view' } },
       { path: 'dept-board', name: 'dept-board', component: () => import('@/views/Reports.vue'), meta: { title: '部门看板', permission: 'report:dept:view' } },
