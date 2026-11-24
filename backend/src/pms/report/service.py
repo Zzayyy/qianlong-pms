@@ -236,11 +236,22 @@ async def _health_thresholds(config: ConfigService) -> HealthThresholds:
     )
 
 
-async def project_metric(session: AsyncSession, project: PrjProject) -> ProjectMetric:
-    """计算单个项目指标（进度、SPI/CPI、健康度、风险、变更、填写率）。"""
+async def project_metric(
+    session: AsyncSession, project: PrjProject, actual_hours: float | None = None
+) -> ProjectMetric:
+    """计算单个项目指标（进度、SPI/CPI、健康度、风险、变更、填写率）。
+
+    实际工时口径：**已生效日志明细汇总**（`worklog_service.project_actual_hours`），
+    任务实际工时只是它的下钻视图，因此没建任务的项目同样有实际工时。
+    批量场景（看板、日聚合）由调用方预先算好 `actual_hours` 传入，避免逐个查询。
+    """
     tasks = await project_service.list_tasks(session, project.id)
     planned = float(sum(float(task.plan_hours) for task in tasks))
-    actual = float(sum(float(task.actual_hours) for task in tasks))
+    actual = (
+        float(actual_hours)
+        if actual_hours is not None
+        else await worklog_service.project_actual_hours(session, project.id)
+    )
     progress = float(project.progress)
     start_date = project.plan_start
     if start_date is not None and not isinstance(start_date, date):
@@ -653,9 +664,12 @@ async def aggregate_daily(session: AsyncSession, stat_date: str | None = None) -
         delete(StProjectDaily).where(StProjectDaily.stat_date == day)
     )
     projects = await project_service.list_projects(session, 0, 1000)
+    hours_map = await worklog_service.project_actual_hours_map(
+        session, {project.id for project in projects}
+    )
     count_projects = 0
     for project in projects:
-        metric = await project_metric(session, project)
+        metric = await project_metric(session, project, hours_map.get(project.id, 0.0))
         # 顺带回写项目健康度，列表页才有非默认值（终态项目保持健康）
         if str(project.status) in _HEALTH_ACTIVE and str(project.health) != metric.health:
             project.health = metric.health
@@ -729,7 +743,14 @@ async def _metrics_of(
     if dept_ids:
         stmt = stmt.where(PrjProject.dept_id.in_(dept_ids))
     result = await session.execute(stmt.order_by(PrjProject.id.desc()).limit(500))
-    return [await project_metric(session, project) for project in result.scalars().all()]
+    projects = list(result.scalars().all())
+    hours_map = await worklog_service.project_actual_hours_map(
+        session, {project.id for project in projects}
+    )
+    return [
+        await project_metric(session, project, hours_map.get(project.id, 0.0))
+        for project in projects
+    ]
 
 
 def _metric_out(metric: ProjectMetric, dept_name: str | None = None) -> dict[str, object]:

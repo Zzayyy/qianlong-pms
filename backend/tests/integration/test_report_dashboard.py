@@ -110,13 +110,29 @@ async def test_dashboards_and_aggregate(worklog_confirm_required: None) -> None:
             created[WlWorklog].append(worklog.id)
             await worklog_service.submit(session, worklog.id, member.id)
             await worklog_service.confirm(session, worklog.id, pm.id)
+
+            # 未绑定任务的日志：工时同样计入项目，只是不进任务工时（任务仅作下钻）
+            unassigned = await worklog_service.save_draft(
+                session,
+                member_ctx,
+                log_date=_TODAY,
+                total_hours=4,
+                content="需求澄清",
+                plan="继续开发",
+                items=[{"projectId": project.id, "hours": 4}],
+            )
+            created[WlWorklog].append(unassigned.id)
+            await worklog_service.submit(session, unassigned.id, member.id)
+            await worklog_service.confirm(session, unassigned.id, pm.id)
             await session.commit()
 
-            # 1. 项目看板
+            # 1. 项目看板：实际工时 = 日志明细汇总（含未分配任务的部分）
             dashboard = await report_service.project_dashboard(session, project.id)
             metric = dashboard["metric"]
-            assert float(metric["actualHours"]) == 8
+            assert float(metric["actualHours"]) == 12
             assert float(metric["plannedHours"]) == 100
+            await session.refresh(task)
+            assert float(task.actual_hours) == 8
             assert metric["health"] in {"GREEN", "YELLOW", "RED"}
             assert float(metric["progress"]) == 60
             # SPI 按项目时间轴折算应完成量，进度 60% 至少不算落后（0.6 为旧口径下限）
@@ -138,7 +154,7 @@ async def test_dashboards_and_aggregate(worklog_confirm_required: None) -> None:
                 date_to=_TODAY,
             )
             assert personal["stats"]["submittedDays"] == 1
-            assert personal["byProject"][0]["hours"] == 8
+            assert personal["byProject"][0]["hours"] == 12
 
             # 4. 日聚合（幂等覆盖）
             result = await report_service.aggregate_daily(session, _TODAY)
@@ -159,6 +175,10 @@ async def test_dashboards_and_aggregate(worklog_confirm_required: None) -> None:
             await session.commit()
             assert again["projects"] == result["projects"]
         finally:
+            if created[WlWorklog]:
+                await session.execute(
+                    delete(WlItem).where(WlItem.worklog_id.in_(created[WlWorklog]))
+                )
             for model, ids in created.items():
                 if ids:
                     await session.execute(delete(model).where(model.id.in_(ids)))

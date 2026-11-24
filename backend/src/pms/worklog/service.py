@@ -442,18 +442,81 @@ async def worklog_item_projects(
     return result
 
 
+async def project_actual_hours_map(
+    session: AsyncSession, project_ids: set[int] | list[int]
+) -> dict[int, float]:
+    """项目实际工时（批量）。
+
+    口径：**日志明细是工时的唯一事实来源**——只统计已生效日志（`CONFIRMED`）
+    中落到该项目的明细工时，要求绑定项目但**不要求绑定任务**，
+    因此没建任务的项目同样有实际工时。
+    """
+    ids = {int(project_id) for project_id in project_ids if project_id}
+    if not ids:
+        return {}
+    result = await session.execute(
+        select(WlItem.project_id, func.sum(WlItem.hours))
+        .join(WlWorklog, WlWorklog.id == WlItem.worklog_id)
+        .where(
+            WlItem.project_id.in_(ids),
+            WlItem.deleted == 0,
+            WlWorklog.deleted == 0,
+            WlWorklog.status == WorklogStatus.CONFIRMED,
+        )
+        .group_by(WlItem.project_id)
+    )
+    return {int(project_id): float(hours or 0) for project_id, hours in result.all()}
+
+
+async def project_actual_hours(session: AsyncSession, project_id: int) -> float:
+    """单个项目的实际工时（口径同 `project_actual_hours_map`）。"""
+    totals = await project_actual_hours_map(session, [project_id])
+    return totals.get(int(project_id), 0.0)
+
+
+async def _recalc_task_hours(session: AsyncSession, task_ids: set[int]) -> None:
+    """按已生效日志明细重算任务实际工时（覆盖写，幂等）。
+
+    任务工时只是日志工时的下钻视图：确认、撤销确认、驳回都走同一套重算，
+    不再做 ± 累加，避免日志反复修改导致工时漂移。
+    """
+    ids = {int(task_id) for task_id in task_ids if task_id}
+    if not ids:
+        return
+    # 先把日志状态变更刷到库里，保证聚合查询读到的状态是最新的
+    await session.flush()
+    result = await session.execute(
+        select(WlItem.task_id, func.sum(WlItem.hours))
+        .join(WlWorklog, WlWorklog.id == WlItem.worklog_id)
+        .where(
+            WlItem.task_id.in_(ids),
+            WlItem.deleted == 0,
+            WlWorklog.deleted == 0,
+            WlWorklog.status == WorklogStatus.CONFIRMED,
+        )
+        .group_by(WlItem.task_id)
+    )
+    totals = {int(task_id): float(hours or 0) for task_id, hours in result.all()}
+    for task_id in ids:
+        task = await session.get(PrjTask, task_id)
+        if task is not None:
+            task.actual_hours = totals.get(task_id, 0.0)
+    await session.flush()
+
+
 async def _apply_confirm_effects(
     session: AsyncSession, worklog: WlWorklog, operator_id: int
 ) -> None:
-    """确认生效：回填任务工时/进度、生成风险项、重算项目进度。"""
+    """确认生效：重算任务实际工时、回填任务进度、生成风险项、重算项目进度。"""
     items = await list_items(session, worklog.id)
+    await _recalc_task_hours(
+        session, {int(item.task_id) for item in items if item.task_id}
+    )
     for item in items:
         if item.task_id:
             task = await session.get(PrjTask, item.task_id)
-            if task is not None:
-                task.actual_hours = float(task.actual_hours) + float(item.hours)
-                if float(item.progress_after) > float(task.progress):
-                    task.progress = float(item.progress_after)
+            if task is not None and float(item.progress_after) > float(task.progress):
+                task.progress = float(item.progress_after)
     # 日志风险：一条日志只落一条风险（按日志编号幂等，避免多明细重复建/重复确认再建），
     # 标题取「问题与阻塞」摘要，等级按关键词初判，来源标 WORKLOG 便于与人工登记区分
     if worklog.risk_flag:
@@ -507,26 +570,27 @@ async def reject(
 ) -> WlWorklog:
     """PM 驳回：回到可修改状态。"""
     worklog = await _get(session, worklog_id)
-    if worklog.status == WorklogStatus.CONFIRMED:
-        await _rollback_effort(session, worklog)
+    was_confirmed = worklog.status == WorklogStatus.CONFIRMED
     worklog.status = WorklogStatus.REJECTED
     worklog.reject_reason = reason
     worklog.update_by = operator_id
     await session.flush()
+    if was_confirmed:
+        await _rollback_effort(session, worklog)
     return worklog
 
 
 async def unconfirm(session: AsyncSession, worklog_id: int, operator_id: int) -> WlWorklog:
-    """撤销确认：反向扣减工时后回到待确认（R-LOG-08）。"""
+    """撤销确认：工时随状态重算归零后回到待确认（R-LOG-08）。"""
     worklog = await _get(session, worklog_id)
     if worklog.status != WorklogStatus.CONFIRMED:
         raise ConflictError("仅已确认日志可撤销确认")
-    await _rollback_effort(session, worklog)
     worklog.status = WorklogStatus.SUBMITTED
     worklog.confirm_by = 0
     worklog.confirm_time = None
     worklog.update_by = operator_id
     await session.flush()
+    await _rollback_effort(session, worklog)
     return worklog
 
 
@@ -1435,13 +1499,11 @@ async def _replace_items(
 
 
 async def _rollback_effort(session: AsyncSession, worklog: WlWorklog) -> None:
-    """撤销/驳回时反向扣减任务实际工时。"""
-    for item in await list_items(session, worklog.id):
-        if item.task_id:
-            task = await session.get(PrjTask, item.task_id)
-            if task is not None:
-                task.actual_hours = max(float(task.actual_hours) - float(item.hours), 0)
-    await session.flush()
+    """撤销/驳回后按新状态重算任务实际工时（该日志不再计入即自然归零）。"""
+    items = await list_items(session, worklog.id)
+    await _recalc_task_hours(
+        session, {int(item.task_id) for item in items if item.task_id}
+    )
 
 
 async def _is_subordinate(session: AsyncSession, context: AuthContext, author_id: int) -> bool:

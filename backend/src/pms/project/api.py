@@ -462,6 +462,19 @@ async def project_detail(
         session, context, project
     )
 
+    # 工时口径：实际工时取已生效日志明细汇总（任务工时是它的下钻视图），
+    # assignedHours 为已归到任务的工时，两者之差即「未分配任务工时」
+    from pms.worklog import service as worklog_service
+
+    tasks = await service.list_tasks(session, project_id)
+    data["planHours"] = round(float(sum(float(task.plan_hours) for task in tasks)), 2)
+    data["actualHours"] = round(
+        await worklog_service.project_actual_hours(session, project_id), 2
+    )
+    data["assignedHours"] = round(
+        float(sum(float(task.actual_hours) for task in tasks)), 2
+    )
+
     # 读取详情时顺带校准健康度：单项目计算开销小，避免列表长期停留在默认 GREEN
     from pms.report import service as report_service
 
