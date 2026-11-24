@@ -19,6 +19,7 @@ import {
   deleteWorklog,
   deleteWorklogComment,
   exportWorklogs,
+  listTasks,
   listWorklogs,
   readAllWorklogReminders,
   readWorklogReminder,
@@ -51,6 +52,15 @@ interface WorklogOption {
   step: number
   today: string
   projects: WorklogProject[]
+}
+
+/** 项目下的任务（日志下钻用，选填）。 */
+interface WorklogTask {
+  id: string
+  taskName: string
+  progress: number
+  planHours: number
+  status: string
 }
 
 interface WorklogRow {
@@ -738,6 +748,35 @@ const DEFAULT_DAY_HOURS = 8
 
 const defaultHours = () => (formMode.value === 'create' ? DEFAULT_DAY_HOURS : undefined)
 
+/* 任务下钻：按项目懒加载任务列表（任务选填，不选只记项目级工时） */
+const taskMap = ref<Record<string, WorklogTask[]>>({})
+const taskLoading = ref<Record<string, boolean>>({})
+
+const loadProjectTasks = async (projectId: string) => {
+  const key = String(projectId || '')
+  if (!key || taskMap.value[key] !== undefined || taskLoading.value[key]) return
+  taskLoading.value = { ...taskLoading.value, [key]: true }
+  try {
+    const rows = (await listTasks(key)) as unknown as WorklogTask[]
+    taskMap.value = { ...taskMap.value, [key]: Array.isArray(rows) ? rows : [] }
+  } catch {
+    taskMap.value = { ...taskMap.value, [key]: [] }
+  } finally {
+    taskLoading.value = { ...taskLoading.value, [key]: false }
+  }
+}
+
+const tasksOf = (projectId: string) => taskMap.value[String(projectId)] || []
+
+const taskOf = (projectId: string, taskId: string) =>
+  tasksOf(projectId).find((task) => String(task.id) === String(taskId)) || null
+
+/** 进度输入占位：提示任务当前进度，留空/0 表示不调整进度。 */
+const taskProgressPlaceholder = (projectId: string, taskId: string) => {
+  const task = taskOf(projectId, taskId)
+  return task ? `当前 ${Math.round(Number(task.progress || 0))}%` : '进度%（选填）'
+}
+
 /** 点击左侧项目：多选，一次日志可覆盖多个项目；多选后自动平分工时。 */
 const toggleProject = (project: WorklogProject) => {
   form.logType = 'PROJECT'
@@ -758,6 +797,7 @@ const toggleProject = (project: WorklogProject) => {
     hours: form.items.length === 0 ? defaultHours() : undefined,
     progressAfter: 0
   })
+  void loadProjectTasks(key)
   if (form.items.length > 1) distributeHours()
   if (form.items.length === 1) focusEditor()
 }
@@ -984,6 +1024,8 @@ const openEdit = async (row: any) => {
       problem: worklog.problem || '',
       plan: worklog.plan || ''
     })
+    // 回显任务下拉：编辑历史日志时按项目把任务列表补回来
+    form.items.forEach((item) => void loadProjectTasks(item.projectId))
     await loadDaySummary()
     detailVisible.value = false
     focusEditor()
@@ -1591,6 +1633,31 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 <span class="ph-name" :title="projectOf(item.projectId)?.projectName">
                   {{ projectOf(item.projectId)?.projectName || '未知项目' }}
                 </span>
+                <span class="ph-task">
+                  <el-select
+                    v-model="item.taskId"
+                    size="small"
+                    clearable
+                    filterable
+                    placeholder="任务（选填）"
+                    :loading="taskLoading[item.projectId]"
+                    @visible-change="(open: boolean) => open && loadProjectTasks(item.projectId)"
+                  >
+                    <el-option
+                      v-for="task in tasksOf(item.projectId)"
+                      :key="String(task.id)"
+                      :label="task.taskName"
+                      :value="String(task.id)"
+                    >
+                      <span class="task-opt">
+                        <span class="task-opt-name">{{ task.taskName }}</span>
+                        <span class="task-opt-meta">
+                          {{ Math.round(Number(task.progress || 0)) }}%
+                        </span>
+                      </span>
+                    </el-option>
+                  </el-select>
+                </span>
                 <span class="ph-hours">
                   <el-input-number
                     v-model="item.hours"
@@ -1599,6 +1666,17 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                     :step="Number(options.step || 0.5)"
                     :min="0"
                     :max="Number(options.maxHours || 24)"
+                    controls-position="right"
+                  />
+                </span>
+                <span v-if="item.taskId" class="ph-progress">
+                  <el-input-number
+                    v-model="item.progressAfter"
+                    size="small"
+                    :min="0"
+                    :max="100"
+                    :step="5"
+                    :placeholder="taskProgressPlaceholder(item.projectId, item.taskId)"
                     controls-position="right"
                   />
                 </span>
@@ -2070,7 +2148,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 <template #default="{ row }">{{ row.hours }}h</template>
               </el-table-column>
               <el-table-column label="进度" width="84" align="right">
-                <template #default="{ row }">{{ row.progressAfter }}%</template>
+                <template #default="{ row }">
+                  {{ row.taskId ? `${row.progressAfter}%` : '—' }}
+                </template>
               </el-table-column>
             </el-table>
             <el-empty v-else description="暂无任务明细" :image-size="60" />
@@ -2852,17 +2932,56 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .ph-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
 .ph-name {
-  flex: 1 1 auto;
+  flex: 1 1 160px;
   overflow: hidden;
   min-width: 0;
   font-size: 13px;
   color: var(--pms-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 任务下拉（选填）：不选任务时工时只记到项目 */
+.ph-task {
+  flex: 0 0 200px;
+}
+
+.ph-task :deep(.el-select) {
+  width: 100%;
+}
+
+.ph-progress {
+  display: block;
+  flex: 0 0 118px;
+}
+
+.ph-progress :deep(.el-input-number) {
+  width: 100%;
+}
+
+.task-opt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-opt-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-opt-meta {
+  flex: none;
+  font-size: 12px;
+  color: var(--pms-text-3);
+  font-variant-numeric: tabular-nums;
 }
 
 .ph-hours {

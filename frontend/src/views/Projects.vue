@@ -2020,6 +2020,13 @@ const hoursText = (plan: unknown, actual: unknown) => {
   return real > 0 ? `${planned}h / ${real}h` : `${planned}h`
 }
 
+/** 未分配任务工时 = 项目实际工时 - 任务工时合计（日志没挑任务的部分）。 */
+const unassignedHours = computed(() => {
+  const actual = Number(detail.value.actualHours || 0)
+  const assigned = Number(detail.value.assignedHours || 0)
+  return Math.max(0, Math.round((actual - assigned) * 10) / 10)
+})
+
 /** 树形行斑马区分：阶段行深一档，任务行浅一档。 */
 const planRowClass = ({ row }: any) => (row.__kind === 'task' ? 'plan-row-task' : 'plan-row-stage')
 
@@ -2905,6 +2912,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <div class="metric">
             <span>进度</span>
             <b>{{ Math.round(Number(detail.progress || 0)) }}%</b>
+          </div>
+          <div class="metric">
+            <span>工时（计划 / 实际）</span>
+            <b>{{ hoursText(detail.planHours, detail.actualHours) }}</b>
+            <em v-if="unassignedHours > 0" class="metric-note">
+              未分配任务 {{ unassignedHours }}h
+            </em>
           </div>
           <div class="metric">
             <span>计划周期</span>
@@ -4922,7 +4936,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px;
   margin: 16px 0 14px;
 }
@@ -4950,6 +4964,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--pms-text);
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 工时卡片里的口径提示：有多少日志工时还没归到任务 */
+.metric-note {
+  font-size: 11.5px;
+  font-style: normal;
+  color: var(--pms-warning, #b88230);
   font-variant-numeric: tabular-nums;
 }
 
