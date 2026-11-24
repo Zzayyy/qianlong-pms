@@ -140,6 +140,36 @@ export const setProjectDirectors = (id: string, userIds: string[]) =>
 export const projectAttachments = (id: string, params: Record<string, unknown> = {}) =>
   get<Record<string, unknown>[]>(`/projects/${id}/attachments`, params)
 
+/** 项目「问题」页签：Bug / 生产问题数量、工时占比与列表。 */
+export interface ProjectIssueRow {
+  id: string
+  issueNo: string
+  issueType: string
+  title: string
+  status: string
+  severity: string
+  ownerName: string
+  foundDate: string
+  closeDate: string
+}
+
+export interface ProjectIssueStats {
+  bugTotal: number
+  prodTotal: number
+  openTotal: number
+  bugOpen: number
+  prodOpen: number
+  projectHours: number
+  issueHours: number
+  hoursRatio: number
+  bySeverity: Record<string, number>
+  byStatus: Record<string, number>
+  list: ProjectIssueRow[]
+}
+
+export const projectIssueStats = (id: string) =>
+  get<ProjectIssueStats>(`/projects/${id}/issues`)
+
 export const uploadProjectFile = (form: FormData) =>
   upload<Record<string, unknown>>('/files', form)
 

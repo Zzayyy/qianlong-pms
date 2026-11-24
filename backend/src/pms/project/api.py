@@ -908,6 +908,74 @@ async def recalc(
     return ok({"projectId": project_id, "progress": value})
 
 
+@router.get("/{project_id}/issues", summary="项目问题统计")
+async def project_issues(
+    project_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("issue:view"))],
+) -> object:
+    """项目下的 Bug / 生产问题统计与列表（项目详情「问题」页签）。
+
+    工时占比口径：问题工时 / 项目实际工时。问题工时依赖日志明细关联问题
+    （`WlItem.issue_id`，下一步接入），当前按 0 返回，接上后自动生效。
+    """
+    from pms.issue import service as issue_service
+    from pms.worklog import service as worklog_service
+
+    project = await service.get_project(session, project_id)
+    await ensure_project_visible(session, context, project)
+    rows = await issue_service.list_issues(
+        session, project_id=project_id, offset=0, limit=1000
+    )
+    names = await _user_names(session, {row.owner_id for row in rows})
+    bug_total = sum(1 for row in rows if row.issue_type == "BUG")
+    prod_total = len(rows) - bug_total
+    bug_open = sum(
+        1 for row in rows if row.issue_type == "BUG" and row.status != "CLOSED"
+    )
+    prod_open = sum(
+        1 for row in rows if row.issue_type == "PROD" and row.status != "CLOSED"
+    )
+    by_severity: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    for row in rows:
+        by_severity[row.severity] = by_severity.get(row.severity, 0) + 1
+        by_status[row.status] = by_status.get(row.status, 0) + 1
+
+    project_hours = await worklog_service.project_actual_hours(session, project_id)
+    issue_hours = 0.0
+    return ok(
+        {
+            "bugTotal": bug_total,
+            "prodTotal": prod_total,
+            "openTotal": bug_open + prod_open,
+            "bugOpen": bug_open,
+            "prodOpen": prod_open,
+            "projectHours": round(project_hours, 2),
+            "issueHours": round(issue_hours, 2),
+            "hoursRatio": (
+                round(issue_hours / project_hours * 100, 1) if project_hours > 0 else 0.0
+            ),
+            "bySeverity": by_severity,
+            "byStatus": by_status,
+            "list": [
+                {
+                    "id": row.id,
+                    "issueNo": row.issue_no,
+                    "issueType": row.issue_type,
+                    "title": row.title,
+                    "status": row.status,
+                    "severity": row.severity,
+                    "ownerName": names.get(int(row.owner_id), ""),
+                    "foundDate": row.found_date,
+                    "closeDate": row.close_date,
+                }
+                for row in rows
+            ],
+        }
+    )
+
+
 @router.get("/{project_id}/milestones", summary="里程碑列表")
 async def milestones(
     project_id: int,

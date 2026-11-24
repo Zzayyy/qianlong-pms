@@ -40,6 +40,7 @@ import {
   projectAttachments,
   projectDetail,
   projectDirectors,
+  projectIssueStats,
   projectOptions,
   projectTeamWorklogs,
   rejectProject,
@@ -58,6 +59,7 @@ import {
   uploadProjectFile,
   userOptions,
   weeklyDetail,
+  type ProjectIssueStats,
   type TeamWorklogSummary,
   type WeeklyItem
 } from '@/api'
@@ -361,6 +363,58 @@ const loadNodeData = async () => {
   directors.value = await projectDirectors(detail.value.id)
   directorIds.value = directors.value.map((item: any) => String(item.userId))
   docs.value = await projectAttachments(detail.value.id)
+}
+
+/* ------------------------------ 问题（Bug / 生产问题） ------------------------------ */
+/** 项目问题页签：数量、工时占比与列表（切到页签时懒加载）。 */
+const issueStats = ref<ProjectIssueStats>({
+  bugTotal: 0,
+  prodTotal: 0,
+  openTotal: 0,
+  bugOpen: 0,
+  prodOpen: 0,
+  projectHours: 0,
+  issueHours: 0,
+  hoursRatio: 0,
+  bySeverity: {},
+  byStatus: {},
+  list: []
+})
+const issueLoading = ref(false)
+
+const ISSUE_SEVERITY: Record<string, { label: string; type: 'info' | 'warning' | 'danger' }> = {
+  LOW: { label: '低', type: 'info' },
+  MEDIUM: { label: '中', type: 'warning' },
+  HIGH: { label: '高', type: 'danger' },
+  URGENT: { label: '紧急', type: 'danger' }
+}
+const ISSUE_STATUS: Record<
+  string,
+  { label: string; type: 'info' | 'success' | 'warning' | 'danger' }
+> = {
+  OPEN: { label: '待处理', type: 'danger' },
+  IN_PROGRESS: { label: '处理中', type: 'warning' },
+  CLOSED: { label: '已关闭', type: 'success' }
+}
+
+const issueSeverityMeta = (value: string) => ISSUE_SEVERITY[value] || ISSUE_SEVERITY.MEDIUM
+const issueStatusMeta = (value: string) =>
+  ISSUE_STATUS[value] || { label: value || '—', type: 'info' as const }
+const issueTypeLabel = (value: string) => (value === 'PROD' ? '生产问题' : 'Bug')
+
+const loadIssueStats = async () => {
+  if (!detail.value.id) return
+  issueLoading.value = true
+  try {
+    issueStats.value = await projectIssueStats(detail.value.id)
+  } finally {
+    issueLoading.value = false
+  }
+}
+
+/** 点问题行跳到对应的独立详情页（Bug / 生产问题两个路由）。 */
+const openIssueDetail = (row: any) => {
+  router.push(row.issueType === 'PROD' ? `/prod-issues/${row.id}` : `/bugs/${row.id}`)
 }
 
 /* ------------------------------ 风险与问题 ------------------------------ */
@@ -1276,6 +1330,8 @@ const loadDetail = async (id: string, tab?: unknown) => {
     await loadRisks()
     await loadAlerts()
     await loadBaselines()
+    // 页签标题要显示问题数量，详情加载时就取一次（切页签时再刷新）
+    await loadIssueStats()
     weeklyFilter.value = { weekStart: '', status: '' }
     weeklyPage.value.pageNum = 1
     weeklyTargetReport.value = null
@@ -1283,7 +1339,7 @@ const loadDetail = async (id: string, tab?: unknown) => {
     // 标签栏与面包屑改用项目名，同时打开多个项目时不再是一排「项目详情」
     setPageTitle(pagePath, String(detail.value.projectName || ''))
     const target = typeof tab === 'string' ? tab : 'team'
-    const allowed = new Set(['team', 'plan', 'risks', 'docs'])
+    const allowed = new Set(['team', 'plan', 'risks', 'issues', 'docs'])
     if (store.has('change:view')) allowed.add('changes')
     if (canViewWeekly.value) allowed.add('weekly')
     activeTab.value = allowed.has(target) ? target : 'team'
@@ -1300,6 +1356,7 @@ const loadDetail = async (id: string, tab?: unknown) => {
 /** 切到「风险」时重新算一次预警，避免在计划页改完排期后仍然看到旧预警。 */
 watch(activeTab, (value) => {
   if (isDetailView && value === 'risks' && detail.value.id) void loadAlerts()
+  if (isDetailView && value === 'issues' && detail.value.id) void loadIssueStats()
 })
 
 /** 页签同步到地址栏，刷新后还能回到同一个页签。 */
@@ -3489,6 +3546,92 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             />
           </el-tab-pane>
 
+          <el-tab-pane
+            :label="`问题（${issueStats.bugTotal + issueStats.prodTotal}）`"
+            name="issues"
+          >
+            <div v-loading="issueLoading" class="issue-summary">
+              <div class="issue-kpi">
+                <span>Bug</span>
+                <b>{{ issueStats.bugTotal }}</b>
+                <em>未关闭 {{ issueStats.bugOpen }}</em>
+              </div>
+              <div class="issue-kpi">
+                <span>生产问题</span>
+                <b>{{ issueStats.prodTotal }}</b>
+                <em>未关闭 {{ issueStats.prodOpen }}</em>
+              </div>
+              <div class="issue-kpi">
+                <span>未关闭合计</span>
+                <b>{{ issueStats.openTotal }}</b>
+                <em>全部 {{ issueStats.bugTotal + issueStats.prodTotal }} 条</em>
+              </div>
+              <div class="issue-kpi">
+                <span>问题工时 / 项目工时</span>
+                <b>{{ issueStats.issueHours }}h / {{ issueStats.projectHours }}h</b>
+                <em>占比 {{ issueStats.hoursRatio }}%</em>
+              </div>
+            </div>
+
+            <el-table
+              v-if="issueStats.list.length"
+              :data="issueStats.list"
+              size="small"
+              class="issue-table"
+            >
+              <el-table-column label="编号" width="110">
+                <template #default="{ row }">
+                  <el-button link type="primary" @click="openIssueDetail(row)">
+                    {{ row.issueNo }}
+                  </el-button>
+                </template>
+              </el-table-column>
+              <el-table-column label="类型" width="100">
+                <template #default="{ row }">
+                  <el-tag
+                    size="small"
+                    effect="plain"
+                    :type="row.issueType === 'PROD' ? 'warning' : 'primary'"
+                  >
+                    {{ issueTypeLabel(row.issueType) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="标题" min-width="220" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.title }}</template>
+              </el-table-column>
+              <el-table-column label="严重程度" width="92">
+                <template #default="{ row }">
+                  <el-tag
+                    size="small"
+                    effect="plain"
+                    :type="issueSeverityMeta(row.severity).type"
+                  >
+                    {{ issueSeverityMeta(row.severity).label }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="92">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="plain" :type="issueStatusMeta(row.status).type">
+                    {{ issueStatusMeta(row.status).label }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="负责人" width="110" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.ownerName || '未指派' }}</template>
+              </el-table-column>
+              <el-table-column label="发现日期" width="112">
+                <template #default="{ row }">{{ row.foundDate || '—' }}</template>
+              </el-table-column>
+            </el-table>
+            <el-empty v-else description="该项目暂无 Bug / 生产问题" :image-size="64" />
+
+            <p class="issue-tip">
+              工时占比 = 问题工时 / 项目实际工时；问题工时需在日志中关联问题后统计（下一步接入）。
+            </p>
+          </el-tab-pane>
+
           <el-tab-pane label="文档" name="docs">
             <div class="list-head">
               <div class="seg">
@@ -4854,6 +4997,48 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   padding: 12px 20px;
   border-top: 1px solid var(--pms-line-soft);
   background: var(--pms-surface);
+}
+
+/* ---------------- 项目问题页签 ---------------- */
+.issue-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.issue-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid var(--pms-line);
+  border-radius: 8px;
+  background: #fafbfe;
+}
+
+.issue-kpi span {
+  font-size: 11.5px;
+  color: var(--pms-text-3);
+}
+
+.issue-kpi b {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--pms-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.issue-kpi em {
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--pms-text-3);
+}
+
+.issue-tip {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--pms-text-3);
 }
 
 /* ---------------- 风险预警 ---------------- */
