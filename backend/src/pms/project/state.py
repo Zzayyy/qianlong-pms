@@ -33,6 +33,29 @@ class TaskStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class TaskType(StrEnum):
+    """任务类型：需求 / 开发 / 测试 / 文档 / 运维。
+
+    只做分类标签，不参与进度与工时计算；空值表示未分类（历史数据）。
+    """
+
+    REQ = "REQ"
+    DEV = "DEV"
+    TEST = "TEST"
+    DOC = "DOC"
+    OPS = "OPS"
+
+
+#: 前端下拉顺序
+TASK_TYPES: tuple[str, ...] = (
+    TaskType.REQ,
+    TaskType.DEV,
+    TaskType.TEST,
+    TaskType.DOC,
+    TaskType.OPS,
+)
+
+
 class MilestoneStatus(StrEnum):
     """里程碑状态。"""
 

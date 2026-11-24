@@ -245,6 +245,8 @@ class TaskIn(BaseModel):
     planStart: str | None = None
     planEnd: str | None = None
     priority: str = "MEDIUM"
+    #: 任务类型：REQ / DEV / TEST / DOC / OPS，空值=未分类
+    taskType: str = ""
 
     @field_validator("planStart", "planEnd", mode="before")
     @classmethod
@@ -752,6 +754,7 @@ async def tasks(
                 "planEnd": item.plan_end,
                 "status": item.status,
                 "priority": item.priority,
+                "taskType": item.task_type,
                 "canEdit": manager or (task_perm and item.stage_id in my_stage_ids),
             }
             for item in items
@@ -789,6 +792,7 @@ async def create_task(
         plan_start=body.planStart,
         plan_end=body.planEnd,
         priority=body.priority,
+        task_type=body.taskType,
     )
     await session.commit()
     return ok({"id": task.id})
@@ -827,6 +831,8 @@ async def update_task(
         plan_start=body.planStart,
         plan_end=body.planEnd,
         priority=body.priority,
+        # 空串表示不修改类型（编辑表单未传时不清空）
+        task_type=body.taskType or None,
         operator_id=context.user_id,
     )
     await session.commit()

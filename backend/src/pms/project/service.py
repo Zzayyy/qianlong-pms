@@ -34,6 +34,7 @@ from pms.project.models import (
 )
 from pms.project.progress import StageProgress, TaskProgress, project_progress, stage_progress
 from pms.project.state import (
+    TASK_TYPES,
     MilestoneStatus,
     ProjectStatus,
     TaskStatus,
@@ -1080,6 +1081,14 @@ async def list_stages(session: AsyncSession, project_id: int) -> list[PrjStage]:
     return list(result.scalars().all())
 
 
+def normalize_task_type(value: str | None) -> str:
+    """归一化任务类型：空值表示未分类，非法值直接拒绝。"""
+    text = (value or "").strip().upper()
+    if text and text not in TASK_TYPES:
+        raise BizRuleError(f"任务类型无效：{text}")
+    return text
+
+
 async def create_task(
     session: AsyncSession,
     project_id: int,
@@ -1092,8 +1101,9 @@ async def create_task(
     plan_start: str | None = None,
     plan_end: str | None = None,
     priority: str = "MEDIUM",
+    task_type: str = "",
 ) -> PrjTask:
-    """创建 WBS 任务。"""
+    """创建 WBS 任务（`task_type` 仅作分类：需求/开发/测试/文档/运维）。"""
     task = PrjTask(
         task_code=f"T{next_id() % 100000:05d}",
         project_id=project_id,
@@ -1106,6 +1116,7 @@ async def create_task(
         plan_start=plan_start,
         plan_end=plan_end,
         priority=priority,
+        task_type=normalize_task_type(task_type),
     )
     session.add(task)
     await session.flush()
@@ -1179,14 +1190,17 @@ async def update_task(
     plan_start: str | None = None,
     plan_end: str | None = None,
     priority: str | None = None,
+    task_type: str | None = None,
     operator_id: int = 0,
 ) -> PrjTask:
-    """编辑任务（名称/阶段/负责人/权重/工时/计划起止/优先级）。"""
+    """编辑任务（名称/阶段/负责人/权重/工时/计划起止/优先级/类型）。"""
     task = await session.get(PrjTask, task_id)
     if task is None or task.deleted or task.project_id != project_id:
         raise NotFoundError("任务不存在")
     if task_name is not None:
         task.task_name = task_name
+    if task_type is not None:
+        task.task_type = normalize_task_type(task_type)
     if stage_id is not None:
         task.stage_id = stage_id
     if owner_id is not None:

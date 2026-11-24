@@ -1942,6 +1942,19 @@ const doTerminate = async () => {
 }
 
 /* 任务：新增 / 编辑 / 删除 / 进度 */
+/** 任务类型：只作分类标签，不参与进度与工时计算。 */
+const TASK_TYPE: Record<
+  string,
+  { label: string; type: 'primary' | 'success' | 'warning' | 'info' | 'danger' }
+> = {
+  REQ: { label: '需求', type: 'primary' },
+  DEV: { label: '开发', type: 'success' },
+  TEST: { label: '测试', type: 'warning' },
+  DOC: { label: '文档', type: 'info' },
+  OPS: { label: '运维', type: 'danger' }
+}
+const taskTypeMeta = (value: string) => TASK_TYPE[String(value || '')] || null
+
 const taskVisible = ref(false)
 const taskForm = ref<any>({
   id: '',
@@ -1952,7 +1965,8 @@ const taskForm = ref<any>({
   planHours: 8,
   planStart: '',
   planEnd: '',
-  priority: 'MEDIUM'
+  priority: 'MEDIUM',
+  taskType: 'DEV'
 })
 
 /** 人员候选分组：给定「优先人员」后拆成两组，供下拉分组展示。 */
@@ -2067,7 +2081,8 @@ const openTask = (row?: any, presetStageId?: string) => {
         planHours: Number(row.planHours || 0),
         planStart: row.planStart || '',
         planEnd: row.planEnd || '',
-        priority: row.priority || 'MEDIUM'
+        priority: row.priority || 'MEDIUM',
+        taskType: row.taskType || ''
       }
     : {
         id: '',
@@ -2083,7 +2098,8 @@ const openTask = (row?: any, presetStageId?: string) => {
         // 任务不再要求排期：工期由阶段承载，任务只填名称/负责人/工时
         planStart: '',
         planEnd: '',
-        priority: 'MEDIUM'
+        priority: 'MEDIUM',
+        taskType: 'DEV'
       }
   taskVisible.value = true
 }
@@ -2102,7 +2118,8 @@ const saveTask = async () => {
     // 未排期一律传 null：MySQL DATE 列不接受空串
     planStart: taskForm.value.planStart || null,
     planEnd: taskForm.value.planEnd || null,
-    priority: taskForm.value.priority
+    priority: taskForm.value.priority,
+    taskType: taskForm.value.taskType || ''
   }
   if (taskForm.value.id) {
     await updateTask(detail.value.id, taskForm.value.id, payload)
@@ -3118,6 +3135,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                     <span v-if="row.__kind === 'task'" class="plan-bullet"></span>
                     <div class="plan-name-text">
                       <div class="cell-main">
+                        <el-tag
+                          v-if="row.__kind === 'task' && taskTypeMeta(row.taskType)"
+                          size="small"
+                          effect="plain"
+                          :type="taskTypeMeta(row.taskType)!.type"
+                          class="task-type-tag"
+                        >
+                          {{ taskTypeMeta(row.taskType)!.label }}
+                        </el-tag>
                         {{ row.__kind === 'task' ? row.taskName : row.stageName }}
                       </div>
                       <div class="cell-sub">
@@ -3871,6 +3897,17 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-input v-model="taskForm.taskName" maxlength="200" show-word-limit placeholder="如：接口联调 / 回归测试" />
         </div>
         <div class="field">
+          <label>任务类型</label>
+          <el-select v-model="taskForm.taskType" clearable placeholder="未分类">
+            <el-option
+              v-for="(meta, value) in TASK_TYPE"
+              :key="value"
+              :label="meta.label"
+              :value="value"
+            />
+          </el-select>
+        </div>
+        <div class="field">
           <label>所属阶段</label>
           <el-select v-model="taskForm.stageId" clearable placeholder="未分阶段">
             <el-option v-for="item in stages" :key="item.id" :label="item.stageName" :value="String(item.id)" />
@@ -4204,6 +4241,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .cell-main {
   font-weight: 500;
   color: var(--pms-text);
+}
+
+/* 任务类型标签：跟在任务名前面，不影响阶段行 */
+.task-type-tag {
+  margin-right: 6px;
+  vertical-align: 1px;
 }
 
 .cell-sub {

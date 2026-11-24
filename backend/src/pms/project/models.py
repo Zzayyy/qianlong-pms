@@ -141,6 +141,8 @@ class PrjTask(Base, CommonMixin):
     weight: Mapped[float] = mapped_column(Numeric(8, 2), default=0)
     progress: Mapped[float] = mapped_column(Numeric(5, 2), default=0)
     priority: Mapped[str] = mapped_column(String(16), default="MEDIUM")
+    # 任务类型：REQ / DEV / TEST / DOC / OPS，空值=未分类（仅作分类标签，不参与计算）
+    task_type: Mapped[str] = mapped_column(String(16), default="")
     status: Mapped[str] = mapped_column(String(32), default=TaskStatus.NOT_STARTED)
     depend_on: Mapped[str] = mapped_column(String(256), default="")
 
