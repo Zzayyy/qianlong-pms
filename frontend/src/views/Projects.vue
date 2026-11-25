@@ -2195,7 +2195,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 </el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
-                    <el-dropdown-item command="team">团队</el-dropdown-item>
                     <el-dropdown-item command="plan">阶段</el-dropdown-item>
                     <el-dropdown-item command="risks">风险</el-dropdown-item>
                     <el-dropdown-item v-if="store.has('change:view')" command="changes">
@@ -2203,6 +2202,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                     </el-dropdown-item>
                     <el-dropdown-item command="docs">文档</el-dropdown-item>
                     <el-dropdown-item command="weekly">周报</el-dropdown-item>
+                    <el-dropdown-item command="team">项目成员</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -2845,138 +2845,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             </el-empty>
           </el-tab-pane>
 
-          <el-tab-pane label="团队" name="team">
-            <div class="block-head">
-              <h4>项目经理</h4>
-              <span class="block-tip">当前 {{ detail.pmName || userName(detail.pmId) }}</span>
-            </div>
-            <!-- 无 project:edit 的角色（如销售）看不到下拉，只展示项目经理姓名 -->
-            <div v-if="canEdit" class="pane-ops">
-              <el-select
-                v-model="newPmId"
-                class="ops-select"
-                filterable
-                size="small"
-                placeholder="选择新的项目经理"
-              >
-                <el-option
-                  v-for="user in users"
-                  :key="user.id"
-                  :label="`${user.realName}（${user.username}）`"
-                  :value="user.id"
-                />
-              </el-select>
-              <el-button
-                size="small"
-                type="primary"
-                :disabled="String(newPmId) === String(detail.pmId)"
-                @click="doChangePm"
-              >
-                设为项目经理
-              </el-button>
-            </div>
-            <p v-else class="empty-tip">项目经理：{{ detail.pmName || userName(detail.pmId) }}</p>
-
-            <div class="block-head block-head-gap">
-              <h4>项目总监</h4>
-            </div>
-            <div class="pane-ops">
-              <PersonPicker
-                v-model="directorIds"
-                class="director-picker"
-                size="small"
-                :users="directorPickerUsers"
-                :depts="depts"
-                title="选择项目总监"
-                placeholder="选择总监"
-                :disabled="!canEdit || !canManage"
-              />
-            </div>
-            <p v-if="!directorIds.length" class="empty-tip">未指派时无法提交变更评估</p>
-
-            <div class="block-head block-head-gap">
-              <h4>项目成员</h4>
-              <span class="block-tip">共 {{ members.length }} 人</span>
-            </div>
-            <div class="pane-ops">
-              <!-- 成员维护属项目管理动作：无 project:edit 或非本项目管理者不可选，避免点了才报 403 -->
-              <PersonPicker
-                v-model="addMemberIds"
-                class="member-picker"
-                size="small"
-                :users="memberCandidates"
-                :depts="depts"
-                title="选择要加入的成员"
-                placeholder="选择成员"
-                :disabled="!canManageMembers"
-              />
-            </div>
-            <el-table :data="members" size="small" empty-text="暂无成员">
-              <el-table-column label="姓名" min-width="130">
-                <template #default="{ row }">
-                  <span :class="{ muted: row.userMissing }">{{ row.realName || '账号已删除' }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column prop="username" label="账号" min-width="120" class-name="pms-mobile-hide" />
-              <el-table-column label="组内角色" width="176">
-                <template #default="{ row }">
-                  <div class="role-cell">
-                    <!-- 角色直接行内调整：添加成员时不用先选角色，减少一次判断 -->
-                    <el-select
-                      v-if="
-                        canManageMembers &&
-                        String(row.userId) !== String(detail.pmId) &&
-                        row.roleInProject !== 'DIRECTOR'
-                      "
-                      size="small"
-                      :model-value="row.roleInProject"
-                      @change="(value: any) => changeMemberRole(row, String(value))"
-                    >
-                      <el-option
-                        v-for="(label, code) in ASSIGNABLE_MEMBER_ROLE"
-                        :key="code"
-                        :label="label"
-                        :value="code"
-                      />
-                    </el-select>
-                    <el-tag
-                      v-else
-                      size="small"
-                      effect="plain"
-                      :type="dictOf(MEMBER_ROLE, row.roleInProject).type"
-                    >
-                      {{ dictOf(MEMBER_ROLE, row.roleInProject).label }}
-                    </el-tag>
-                    <!-- 总监身份由「项目总监」区管理，这里只读叠加，避免与会签权脱节 -->
-                    <el-tag
-                      v-if="isProjectDirector(row) && row.roleInProject !== 'DIRECTOR'"
-                      size="small"
-                      type="warning"
-                      effect="plain"
-                    >
-                      总监
-                    </el-tag>
-                    <span v-if="String(row.userId) === String(detail.pmId)" class="owner-mark">当前</span>
-                  </div>
-                </template>
-              </el-table-column>
-              <el-table-column prop="joinDate" label="加入日期" width="120" class-name="pms-mobile-hide" />
-              <el-table-column label="操作" width="90">
-                <template #default="{ row }">
-                  <el-button
-                    link
-                    type="danger"
-                    :disabled="!canManageMembers || String(row.userId) === String(detail.pmId)"
-                    :title="String(row.userId) === String(detail.pmId) ? '项目经理需先变更项目经理' : ''"
-                    @click="doRemoveMember(row)"
-                  >
-                    移出
-                  </el-button>
-                </template>
-              </el-table-column>
-            </el-table>
-          </el-tab-pane>
-
           <el-tab-pane label="风险" name="risks">
             <!-- 系统预警：进度延期、日志问题，确认后才进风险台账 -->
             <div v-if="alerts.length || alertsLoading" v-loading="alertsLoading" class="alert-panel">
@@ -3448,6 +3316,144 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               class="weekly-pager"
               @current-change="loadWeeklies"
             />
+          </el-tab-pane>
+
+          <el-tab-pane label="项目成员" name="team">
+            <!-- 三个维护入口压成一行，把空间留给成员列表 -->
+            <div class="member-toolbar">
+              <template v-if="canEdit">
+                <span class="member-label">项目经理</span>
+                <el-select
+                  v-model="newPmId"
+                  class="member-pm-select"
+                  filterable
+                  size="small"
+                  placeholder="更换项目经理"
+                >
+                  <el-option
+                    v-for="user in users"
+                    :key="user.id"
+                    :label="`${user.realName}（${user.username}）`"
+                    :value="user.id"
+                  />
+                </el-select>
+                <el-button
+                  size="small"
+                  :disabled="String(newPmId) === String(detail.pmId)"
+                  @click="doChangePm"
+                >
+                  设为项目经理
+                </el-button>
+              </template>
+              <span v-else class="member-label">
+                项目经理
+                <b class="member-pm">{{ detail.pmName || userName(detail.pmId) }}</b>
+              </span>
+
+              <span class="member-divider" aria-hidden="true"></span>
+
+              <el-tooltip
+                v-if="!directorIds.length"
+                content="未指派时无法提交变更评估"
+                placement="top"
+              >
+                <span class="member-label is-warn">项目总监</span>
+              </el-tooltip>
+              <span v-else class="member-label">项目总监</span>
+              <PersonPicker
+                v-model="directorIds"
+                class="director-picker"
+                size="small"
+                :users="directorPickerUsers"
+                :depts="depts"
+                title="选择项目总监"
+                placeholder="未指派"
+                :disabled="!canEdit || !canManage"
+              />
+
+              <span class="member-divider" aria-hidden="true"></span>
+
+              <span class="member-label">添加成员</span>
+              <!-- 选完即入组：成员维护属项目管理动作，无权限时不可选 -->
+              <PersonPicker
+                v-model="addMemberIds"
+                class="member-picker"
+                size="small"
+                :users="memberCandidates"
+                :depts="depts"
+                title="选择要加入的成员"
+                placeholder="选择成员"
+                :disabled="!canManageMembers"
+              />
+
+              <span class="pane-spacer"></span>
+              <span class="member-count">共 {{ members.length }} 人</span>
+            </div>
+
+            <el-table :data="members" size="small" empty-text="暂无成员">
+              <el-table-column label="姓名" min-width="130">
+                <template #default="{ row }">
+                  <span :class="{ muted: row.userMissing }">{{ row.realName || '账号已删除' }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="username" label="账号" min-width="120" class-name="pms-mobile-hide" />
+              <el-table-column label="组内角色" width="176">
+                <template #default="{ row }">
+                  <div class="role-cell">
+                    <!-- 角色直接行内调整：添加成员时不用先选角色，减少一次判断 -->
+                    <el-select
+                      v-if="
+                        canManageMembers &&
+                        String(row.userId) !== String(detail.pmId) &&
+                        row.roleInProject !== 'DIRECTOR'
+                      "
+                      size="small"
+                      :model-value="row.roleInProject"
+                      @change="(value: any) => changeMemberRole(row, String(value))"
+                    >
+                      <el-option
+                        v-for="(label, code) in ASSIGNABLE_MEMBER_ROLE"
+                        :key="code"
+                        :label="label"
+                        :value="code"
+                      />
+                    </el-select>
+                    <el-tag
+                      v-else
+                      size="small"
+                      effect="plain"
+                      :type="dictOf(MEMBER_ROLE, row.roleInProject).type"
+                    >
+                      {{ dictOf(MEMBER_ROLE, row.roleInProject).label }}
+                    </el-tag>
+                    <!-- 总监身份由「项目总监」入口管理，这里只读叠加，避免与会签权脱节 -->
+                    <el-tag
+                      v-if="isProjectDirector(row) && row.roleInProject !== 'DIRECTOR'"
+                      size="small"
+                      type="warning"
+                      effect="plain"
+                    >
+                      总监
+                    </el-tag>
+                    <span v-if="String(row.userId) === String(detail.pmId)" class="owner-mark">当前</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column prop="joinDate" label="加入日期" width="120" class-name="pms-mobile-hide" />
+              <el-table-column label="操作" width="90">
+                <template #default="{ row }">
+                  <el-button
+                    link
+                    type="danger"
+                    :disabled="!canManageMembers || String(row.userId) === String(detail.pmId)"
+                    :title="String(row.userId) === String(detail.pmId) ? '项目经理需先变更项目经理' : ''"
+                    @click="doRemoveMember(row)"
+                  >
+                    移出
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
           </el-tab-pane>
         </el-tabs>
       </div>
@@ -4659,11 +4665,54 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   width: 200px;
 }
 
-/* 团队页签：选择器不铺满整行，与同排的小尺寸下拉、按钮统一高度 */
-.member-picker,
-.director-picker {
-  flex: 1 1 240px;
-  max-width: 340px;
+/* 项目成员页签：三个维护入口压成一行，空间留给成员列表 */
+.member-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.member-label {
+  flex: none;
+  font-size: 12.5px;
+  color: var(--pms-text-3);
+}
+
+.member-label.is-warn {
+  color: var(--el-color-warning);
+}
+
+.member-pm {
+  margin-left: 4px;
+  font-weight: 600;
+  color: var(--pms-text);
+}
+
+.member-divider {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  background: var(--pms-line-soft, #e6ebf2);
+}
+
+.member-pm-select {
+  width: 180px;
+}
+
+.member-toolbar .member-picker,
+.member-toolbar .director-picker {
+  flex: 0 1 200px;
+  min-width: 150px;
+  max-width: 240px;
+}
+
+.member-count {
+  flex: none;
+  font-size: 12px;
+  color: var(--pms-text-3);
+  font-variant-numeric: tabular-nums;
 }
 
 .ops-select.narrow {
@@ -4752,26 +4801,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   vertical-align: middle;
 }
 
-/* ---------------- 区块标题（团队内的小节） ---------------- */
-.block-head {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.block-head h4 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--pms-text);
-}
-
-.block-head-gap {
-  margin-top: 18px;
-}
-
 .block-tip {
   font-size: 12px;
   color: var(--pms-text-3);
@@ -4799,10 +4828,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   padding: 0;
 }
 
-.empty-tip {
-  font-size: 12.5px;
-  color: var(--pms-text-3);
-}
 
 /* ---------------- 文档 ---------------- */
 .doc-head-side {
@@ -5016,11 +5041,17 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
   .ops-select,
   .ops-select.narrow,
+  .member-pm-select,
   .member-picker,
   .director-picker {
     flex: 1 1 100%;
     width: 100%;
     max-width: none;
+  }
+
+  /* 窄屏一行放不下：隐藏分隔线，标签与控件各占一行更清爽 */
+  .member-divider {
+    display: none;
   }
 
   .weekly-week {
