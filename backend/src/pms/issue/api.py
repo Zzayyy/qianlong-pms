@@ -136,6 +136,8 @@ def _out(
         "foundDate": issue.found_date,
         "closeDate": issue.close_date,
         "remark": issue.remark,
+        #: 累计工时：工作日志确认后按 issue_id 汇总回写
+        "actualHours": float(issue.actual_hours or 0),
         "createTime": issue.create_time,
     }
 

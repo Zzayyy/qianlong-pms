@@ -22,6 +22,8 @@ from pms.common.exceptions import (
     NotFoundError,
 )
 from pms.core.context import AuthContext
+from pms.issue.models import IssIssue
+from pms.issue.state import IssueStatus, IssueType
 from pms.org.scope import project_visible, worklog_visible
 from pms.project import service as project_service
 from pms.project.alerts import log_risk_level, problem_summary
@@ -119,6 +121,7 @@ async def save_draft(
     log_type: str = "PROJECT",
     project_id: int = 0,
     task_id: int = 0,
+    issue_id: int = 0,
     total_hours: float = 0,
     content: str = "",
     problem: str = "",
@@ -131,7 +134,8 @@ async def save_draft(
 
     模型约定：
     - `log_type=PROJECT`：一条日志可覆盖多个项目（每个项目一条 `t_wl_item` 明细、
-      各自带工时），主表 `project_id/task_id` 取第一条项目做兼容展示；
+      各自带工时），主表 `project_id/task_id/issue_id` 取第一条项目做兼容展示；
+    - 明细可挂任务或问题单（Bug / 生产问题），二者选填且互斥；
     - `log_type=PERSONAL`：不绑定项目，默认仅本人可见，提交即生效；
     - 日期必须落在补填窗口内（默认最近 5 天，参数 `worklog.backfill.maxDays`）。
     """
@@ -160,6 +164,7 @@ async def save_draft(
         # 个人/学习/外出/会议日志不绑定项目、任务，不参与项目工时与风险
         project_id = 0
         task_id = 0
+        issue_id = 0
         progress_after = 0
         risk_flag = False
         items = None
@@ -171,22 +176,27 @@ async def save_draft(
             {
                 "projectId": project_id,
                 "taskId": task_id,
+                "issueId": issue_id,
                 "hours": total_hours,
                 "progressAfter": progress_after,
             }
         ]
-        seen: set[int] = set()
+        seen: set[tuple[int, int, int]] = set()
         for payload in payloads:
             pid = int(payload.get("projectId", 0) or 0)
             tid = int(payload.get("taskId", 0) or 0)
+            iid = int(payload.get("issueId", 0) or 0)
             item_hours = round_hours(float(payload.get("hours", 0) or 0), step)
             if pid <= 0:
                 raise BizRuleError("请选择项目")
             if item_hours <= 0:
-                raise BizRuleError("每个项目的工时需大于 0")
-            if pid in seen:
-                raise BizRuleError("同一项目只能填写一条工时")
-            seen.add(pid)
+                raise BizRuleError("每条明细的工时需大于 0")
+            if tid and iid:
+                raise BizRuleError("任务与 Bug/生产问题只能关联一个")
+            # 同一项目可以按任务/问题拆多条明细，只拦完全重复的同一对象
+            if (pid, tid, iid) in seen:
+                raise BizRuleError("同一项目下的同一任务/问题只能填写一条工时")
+            seen.add((pid, tid, iid))
             # 多项目时前端按「@项目名」拆好每段内容：
             # 传了 content 就按传的来（空串表示该项目不写内容）；
             # 没传（老客户端）才整段带过去。
@@ -196,6 +206,7 @@ async def save_draft(
                 {
                     "projectId": pid,
                     "taskId": tid,
+                    "issueId": iid,
                     "hours": item_hours,
                     "content": item_content,
                     "progressAfter": float(payload.get("progressAfter", 0) or 0),
@@ -207,13 +218,16 @@ async def save_draft(
                 context,
                 int(payload["projectId"]),
                 int(payload["taskId"]),
+                int(payload["issueId"]),
             )
         project_id = int(normalized[0]["projectId"])
         task_id = int(normalized[0]["taskId"])
+        issue_id = int(normalized[0]["issueId"])
         hours = sum(float(payload["hours"]) for payload in normalized)
     else:
         project_id = 0
         task_id = 0
+        issue_id = 0
         hours = float(total_hours)
 
     items = normalized
@@ -236,6 +250,7 @@ async def save_draft(
     worklog.log_type = log_type
     worklog.project_id = project_id
     worklog.task_id = task_id
+    worklog.issue_id = issue_id
     worklog.total_hours = round_hours(hours, step)
     worklog.content = content
     worklog.problem = problem
@@ -507,13 +522,46 @@ async def _recalc_task_hours(session: AsyncSession, task_ids: set[int]) -> None:
     await session.flush()
 
 
+async def _recalc_issue_hours(session: AsyncSession, issue_ids: set[int]) -> None:
+    """按已生效日志明细重算问题单累计工时（覆盖写，幂等）。
+
+    与任务口径一致：问题单上的工时只是日志的下钻视图，
+    确认 / 撤销确认 / 驳回都重算，避免日志反复修改导致工时漂移。
+    """
+    ids = {int(issue_id) for issue_id in issue_ids if issue_id}
+    if not ids:
+        return
+    await session.flush()
+    result = await session.execute(
+        select(WlItem.issue_id, func.sum(WlItem.hours))
+        .join(WlWorklog, WlWorklog.id == WlItem.worklog_id)
+        .where(
+            WlItem.issue_id.in_(ids),
+            WlItem.deleted == 0,
+            WlWorklog.deleted == 0,
+            WlWorklog.status == WorklogStatus.CONFIRMED,
+        )
+        .group_by(WlItem.issue_id)
+    )
+    totals = {int(issue_id): float(hours or 0) for issue_id, hours in result.all()}
+    for issue_id in ids:
+        issue = await session.get(IssIssue, issue_id)
+        if issue is not None:
+            issue.actual_hours = totals.get(issue_id, 0.0)
+    await session.flush()
+
+
 async def _apply_confirm_effects(
     session: AsyncSession, worklog: WlWorklog, operator_id: int
 ) -> None:
-    """确认生效：重算任务实际工时、回填任务进度、生成风险项、重算项目进度。"""
+    """确认生效：重算任务/问题工时、回填任务进度、生成风险项、重算项目进度。"""
     items = await list_items(session, worklog.id)
     await _recalc_task_hours(
         session, {int(item.task_id) for item in items if item.task_id}
+    )
+    # Bug / 生产问题只统计工时，不参与任务进度推算，也不影响项目进度
+    await _recalc_issue_hours(
+        session, {int(item.issue_id) for item in items if item.issue_id}
     )
     for item in items:
         if item.task_id:
@@ -1428,6 +1476,110 @@ async def task_names(session: AsyncSession, task_ids: set[int]) -> dict[int, str
     return {int(task_id): str(name) for task_id, name in result.all()}
 
 
+async def issue_meta(
+    session: AsyncSession, issue_ids: set[int]
+) -> dict[int, dict[str, str]]:
+    """批量取问题单编号/标题/类型（日志详情展示用）。"""
+    ids = {int(issue_id) for issue_id in issue_ids if issue_id}
+    if not ids:
+        return {}
+    result = await session.execute(
+        select(IssIssue.id, IssIssue.issue_no, IssIssue.title, IssIssue.issue_type).where(
+            IssIssue.id.in_(ids)
+        )
+    )
+    return {
+        int(issue_id): {
+            "issueNo": str(issue_no or ""),
+            "issueTitle": str(title or ""),
+            "issueType": str(issue_type or ""),
+        }
+        for issue_id, issue_no, title, issue_type in result.all()
+    }
+
+
+async def list_target_issues(
+    session: AsyncSession, project_id: int, user_id: int
+) -> list[dict[str, object]]:
+    """项目下可被日志关联的问题单（Bug / 生产问题），填报下拉用。"""
+    if project_id <= 0:
+        return []
+    project = await session.get(PrjProject, project_id)
+    if project is None or project.deleted:
+        raise NotFoundError("项目不存在")
+    is_member = await project_service.is_member(session, project_id, user_id)
+    if project.pm_id != user_id and not is_member:
+        raise BizRuleError("不是该项目成员，不能查看该项目问题")
+    result = await session.execute(
+        select(
+            IssIssue.id,
+            IssIssue.issue_no,
+            IssIssue.title,
+            IssIssue.issue_type,
+            IssIssue.status,
+        )
+        .where(IssIssue.deleted == 0, IssIssue.project_id == project_id)
+        .order_by(IssIssue.issue_type, IssIssue.id.desc())
+        .limit(200)
+    )
+    return [
+        {
+            "id": int(issue_id),
+            "issueNo": str(issue_no or ""),
+            "title": str(title or ""),
+            "issueType": str(issue_type or ""),
+            "status": str(status or ""),
+        }
+        for issue_id, issue_no, title, issue_type, status in result.all()
+    ]
+
+
+async def my_issues(
+    session: AsyncSession, user_id: int, issue_type: str = ""
+) -> list[dict[str, object]]:
+    """我负责或我提报的问题（左栏「我的 Bug / 我的生产问题」快捷入口）。
+
+    只返回已关联项目且未关闭的问题：日志明细必须先落到项目，
+    只挂产品的生产问题暂时无法在这里报工时。
+    """
+    conditions = [
+        IssIssue.deleted == 0,
+        IssIssue.project_id > 0,
+        or_(IssIssue.owner_id == user_id, IssIssue.reporter_id == user_id),
+        IssIssue.status != IssueStatus.CLOSED,
+    ]
+    kind = (issue_type or "").upper()
+    if kind in (IssueType.BUG, IssueType.PROD):
+        conditions.append(IssIssue.issue_type == kind)
+    result = await session.execute(
+        select(
+            IssIssue.id,
+            IssIssue.issue_no,
+            IssIssue.title,
+            IssIssue.issue_type,
+            IssIssue.status,
+            IssIssue.project_id,
+        )
+        .where(*conditions)
+        .order_by(IssIssue.issue_type, IssIssue.id.desc())
+        .limit(100)
+    )
+    rows = result.all()
+    names = await project_names(session, {int(row.project_id) for row in rows})
+    return [
+        {
+            "id": int(issue_id),
+            "issueNo": str(issue_no or ""),
+            "title": str(title or ""),
+            "issueType": str(issue_type),
+            "status": str(status or ""),
+            "projectId": int(project_id),
+            "projectName": names.get(int(project_id), ""),
+        }
+        for issue_id, issue_no, title, issue_type, status, project_id in rows
+    ]
+
+
 async def get_worklog(session: AsyncSession, worklog_id: int) -> WlWorklog:
     """取日志（对外）。"""
     return await _get(session, worklog_id)
@@ -1464,9 +1616,13 @@ async def _day_hours(
 
 
 async def _ensure_project_target(
-    session: AsyncSession, context: AuthContext, project_id: int, task_id: int
+    session: AsyncSession,
+    context: AuthContext,
+    project_id: int,
+    task_id: int,
+    issue_id: int = 0,
 ) -> None:
-    """校验填报对象：项目存在且本人参与（R-LOG-07），任务归属一致。"""
+    """校验填报对象：项目存在且本人参与（R-LOG-07），任务/问题归属一致。"""
     if project_id:
         project = await session.get(PrjProject, project_id)
         if project is None or project.deleted:
@@ -1480,6 +1636,12 @@ async def _ensure_project_target(
             raise NotFoundError("任务不存在")
         if project_id and task.project_id != project_id:
             raise BizRuleError("所选任务不属于该项目")
+    if issue_id:
+        issue = await session.get(IssIssue, issue_id)
+        if issue is None or issue.deleted:
+            raise NotFoundError("Bug/生产问题不存在")
+        if project_id and issue.project_id and issue.project_id != project_id:
+            raise BizRuleError("所选 Bug/生产问题不属于该项目")
 
 
 async def _replace_items(
@@ -1494,6 +1656,7 @@ async def _replace_items(
                 worklog_id=worklog_id,
                 project_id=int(payload.get("projectId", 0) or 0),
                 task_id=int(payload.get("taskId", 0) or 0),
+                issue_id=int(payload.get("issueId", 0) or 0),
                 hours=round_hours(float(payload.get("hours", 0) or 0), step),
                 content=str(payload.get("content", "")),
                 progress_after=float(payload.get("progressAfter", 0) or 0),
@@ -1503,7 +1666,7 @@ async def _replace_items(
 
 
 async def _rollback_effort(session: AsyncSession, worklog: WlWorklog) -> None:
-    """撤销/驳回后按新状态重算任务实际工时（该日志不再计入即自然归零）。
+    """撤销/驳回后按新状态重算任务与问题的工时（该日志不再计入即自然归零）。
 
     工时归零会带着任务进度一起回落，所以这里必须同步重算项目进度，
     否则阶段/项目进度会停在撤销前的数值。
@@ -1511,6 +1674,9 @@ async def _rollback_effort(session: AsyncSession, worklog: WlWorklog) -> None:
     items = await list_items(session, worklog.id)
     await _recalc_task_hours(
         session, {int(item.task_id) for item in items if item.task_id}
+    )
+    await _recalc_issue_hours(
+        session, {int(item.issue_id) for item in items if item.issue_id}
     )
     project_ids = {
         int(item.project_id or worklog.project_id)

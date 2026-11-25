@@ -370,6 +370,9 @@ onUnmounted(() => {
         <el-table-column label="提报人" width="110" show-overflow-tooltip>
           <template #default="{ row }">{{ row.reporterName || '—' }}</template>
         </el-table-column>
+        <el-table-column label="工时" width="80" align="right">
+          <template #default="{ row }">{{ row.actualHours ? `${row.actualHours}h` : '—' }}</template>
+        </el-table-column>
         <el-table-column label="发现日期" width="112">
           <template #default="{ row }">{{ row.foundDate || '—' }}</template>
         </el-table-column>

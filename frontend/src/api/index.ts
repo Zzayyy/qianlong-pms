@@ -346,6 +346,27 @@ export const worklogSummary = (params: Record<string, unknown>) =>
 /** 填报选项：补填天数上限、工时阈值与我参与的项目。 */
 export const worklogOptions = () => get<Record<string, unknown>>('/worklogs/options')
 
+/** 某项目下可关联的问题单（Bug / 生产问题），日志明细下拉用。 */
+export const worklogIssues = (projectId: string) =>
+  get<WorklogIssue[]>('/worklogs/issues', { projectId })
+
+/** 我负责/我提报的未关闭问题（左栏快捷填报）。 */
+export const myWorklogIssues = (issueType = '') =>
+  get<WorklogMyIssue[]>('/worklogs/my-issues', { issueType })
+
+export interface WorklogIssue {
+  id: string
+  issueNo: string
+  title: string
+  issueType: string
+  status: string
+}
+
+export interface WorklogMyIssue extends WorklogIssue {
+  projectId: string
+  projectName: string
+}
+
 /** 某人某天的累计工时与预警提示（不禁止提交）。 */
 export const worklogDaySummary = (date: string, userId?: number) =>
   get<Record<string, unknown>>('/worklogs/day-summary', { date, userId })
@@ -1037,6 +1058,8 @@ export interface IssueItem {
   foundDate: string
   closeDate: string
   remark: string
+  /** 累计工时：工作日志确认后按关联问题汇总回写 */
+  actualHours?: number
   createTime: string
 }
 

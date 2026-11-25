@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Date, String, Text
+from sqlalchemy import BigInteger, Date, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pms.core.database import Base, CommonMixin
@@ -33,6 +33,8 @@ class IssIssue(Base, CommonMixin):
     found_date: Mapped[str | None] = mapped_column(Date, default=None)
     close_date: Mapped[str | None] = mapped_column(Date, default=None)
     remark: Mapped[str] = mapped_column(String(500), default="")
+    #: 累计工时：由工作日志明细（`t_wl_item.issue_id`）在日志确认后汇总回写，只读
+    actual_hours: Mapped[float] = mapped_column(Numeric(5, 2), default=0)
 
 
 class IssLog(Base, CommonMixin):

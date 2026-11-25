@@ -37,6 +37,8 @@ class WorklogIn(BaseModel):
     logType: str = "PROJECT"
     projectId: int = 0
     taskId: int = 0
+    #: 关联问题单（Bug / 生产问题），与 taskId 二选一
+    issueId: int = 0
     totalHours: float = 0
     content: str = ""
     problem: str = ""
@@ -74,6 +76,9 @@ def _out(
     user_name: str = "",
     real_name: str = "",
     task_name: str = "",
+    issue_no: str = "",
+    issue_title: str = "",
+    issue_type: str = "",
     projects: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """日志出参。"""
@@ -94,6 +99,10 @@ def _out(
         "projects": projects or [],
         "taskId": worklog.task_id,
         "taskName": task_name,
+        "issueId": worklog.issue_id,
+        "issueNo": issue_no,
+        "issueTitle": issue_title,
+        "issueType": issue_type,
         "logDate": worklog.log_date,
         "totalHours": float(worklog.total_hours),
         "content": worklog.content,
@@ -137,6 +146,34 @@ async def options(
     return ok(await service.fill_options(session, user_id=context.user_id))
 
 
+@router.get("/issues", summary="可关联的 Bug / 生产问题")
+async def project_issues(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:create"))],
+    projectId: Annotated[int, Query()] = 0,
+) -> object:
+    """日志明细的「关联问题」下拉：本项目下的 Bug 与生产问题。
+
+    注：必须定义在 `/{worklog_id}` 之前，否则会被路径参数路由抢先匹配。
+    """
+    return ok(
+        await service.list_target_issues(session, projectId, context.user_id)
+    )
+
+
+@router.get("/my-issues", summary="我负责/我提报的 Bug 与生产问题")
+async def my_issues(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:create"))],
+    issueType: Annotated[str, Query()] = "",
+) -> object:
+    """左栏「我的 Bug / 我的生产问题」列表（未关闭、已关联项目）。
+
+    注：必须定义在 `/{worklog_id}` 之前，否则会被路径参数路由抢先匹配。
+    """
+    return ok(await service.my_issues(session, context.user_id, issueType))
+
+
 @router.get("/day-summary", summary="某天累计工时")
 async def day_summary(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -165,6 +202,7 @@ async def _save_worklog(
         log_type=body.logType,
         project_id=body.projectId,
         task_id=body.taskId,
+        issue_id=body.issueId,
         total_hours=body.totalHours,
         content=body.content,
         problem=body.problem,
@@ -761,8 +799,12 @@ async def detail(
     tasks = await service.task_names(
         session, {worklog.task_id, *(item.task_id for item in items)}
     )
+    issues = await service.issue_meta(
+        session, {worklog.issue_id, *(item.issue_id for item in items)}
+    )
     users = await service.user_names(session, {worklog.user_id})
     user_name, real_name = users.get(worklog.user_id, ("", ""))
+    main_issue = issues.get(worklog.issue_id, {})
     return ok(
         {
             "worklog": _out(
@@ -771,6 +813,9 @@ async def detail(
                 user_name=user_name,
                 real_name=real_name,
                 task_name=tasks.get(worklog.task_id, ""),
+                issue_no=main_issue.get("issueNo", ""),
+                issue_title=main_issue.get("issueTitle", ""),
+                issue_type=main_issue.get("issueType", ""),
             ),
             "items": [
                 {
@@ -778,6 +823,10 @@ async def detail(
                     "projectName": names.get(item.project_id, ""),
                     "taskId": item.task_id,
                     "taskName": tasks.get(item.task_id, ""),
+                    "issueId": item.issue_id,
+                    "issueNo": issues.get(item.issue_id, {}).get("issueNo", ""),
+                    "issueTitle": issues.get(item.issue_id, {}).get("issueTitle", ""),
+                    "issueType": issues.get(item.issue_id, {}).get("issueType", ""),
                     "hours": float(item.hours),
                     "content": item.content,
                     "progressAfter": float(item.progress_after),

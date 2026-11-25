@@ -22,6 +22,8 @@ class WlWorklog(Base, CommonMixin):
     log_type: Mapped[str] = mapped_column(String(16), default="PROJECT")
     project_id: Mapped[int] = mapped_column(BigInteger, default=0)
     task_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    #: 关联问题单（`t_iss_issue.id`，Bug / 生产问题），与 `task_id` 同为选填且二选一
+    issue_id: Mapped[int] = mapped_column(BigInteger, default=0)
     log_date: Mapped[str | None] = mapped_column(Date, default=None)
     total_hours: Mapped[float] = mapped_column(Numeric(5, 2), default=0)
     content: Mapped[str] = mapped_column(Text, default="")
@@ -39,13 +41,15 @@ class WlWorklog(Base, CommonMixin):
 
 
 class WlItem(Base, CommonMixin):
-    """日志明细 `t_wl_item`（任务级拆分；每条日志至少一条明细）。"""
+    """日志明细 `t_wl_item`（任务/问题级拆分；每条日志至少一条明细）。"""
 
     __tablename__ = "t_wl_item"
 
     worklog_id: Mapped[int] = mapped_column(BigInteger, default=0)
     project_id: Mapped[int] = mapped_column(BigInteger, default=0)
     task_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    #: 关联问题单（`t_iss_issue.id`）：修 Bug / 处理生产问题的工时靠它归集，与 `task_id` 二选一
+    issue_id: Mapped[int] = mapped_column(BigInteger, default=0)
     hours: Mapped[float] = mapped_column(Numeric(5, 2), default=0)
     content: Mapped[str] = mapped_column(String(1000), default="")
     progress_after: Mapped[float] = mapped_column(Numeric(5, 2), default=0)

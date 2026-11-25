@@ -498,6 +498,10 @@ onBeforeUnmount(revokeImageUrls)
               <dd>{{ detail?.closeDate || '—' }}</dd>
             </div>
             <div>
+              <dt>累计工时</dt>
+              <dd>{{ detail?.actualHours ? `${detail.actualHours} h` : '—' }}</dd>
+            </div>
+            <div>
               <dt>图片 / 附件</dt>
               <dd>{{ imageAttachments.length }} / {{ docAttachments.length }}</dd>
             </div>

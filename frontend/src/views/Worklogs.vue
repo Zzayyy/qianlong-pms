@@ -21,6 +21,7 @@ import {
   exportWorklogs,
   listTasks,
   listWorklogs,
+  myWorklogIssues,
   readAllWorklogReminders,
   readWorklogReminder,
   saveWorklog,
@@ -29,11 +30,14 @@ import {
   worklogComments,
   worklogDaySummary,
   worklogDetail,
+  worklogIssues,
   worklogOptions,
   worklogRemind,
   worklogReminderTargets,
   worklogReminders,
-  worklogSummary
+  worklogSummary,
+  type WorklogIssue,
+  type WorklogMyIssue
 } from '@/api'
 import { useUserStore } from '@/stores/user'
 import { useKeepAliveRefresh } from '@/utils/keepAlive'
@@ -74,6 +78,10 @@ interface WorklogRow {
   projectName: string
   taskId: string
   taskName: string
+  issueId: string
+  issueNo: string
+  issueTitle: string
+  issueType: string
   logDate: string
   totalHours: number
   content: string
@@ -93,6 +101,10 @@ interface WorklogItem {
   projectName: string
   taskId: string
   taskName: string
+  issueId: string
+  issueNo: string
+  issueTitle: string
+  issueType: string
   hours: number
   content: string
   progressAfter: number
@@ -728,14 +740,79 @@ const filteredProjects = computed(() => {
 const projectOf = (projectId: string) =>
   options.value.projects.find((item) => String(item.id) === projectId) || null
 
+/* 左栏三个视图：我的项目 / 我的 Bug / 我的生产问题（问题点击即挂到日志明细） */
+type RailTab = 'PROJECT' | 'BUG' | 'PROD'
+const railTab = ref<RailTab>('PROJECT')
+const myIssues = ref<Record<'BUG' | 'PROD', WorklogMyIssue[]>>({ BUG: [], PROD: [] })
+const myIssuesLoaded = ref<Record<'BUG' | 'PROD', boolean>>({ BUG: false, PROD: false })
+const myIssuesLoading = ref<Record<'BUG' | 'PROD', boolean>>({ BUG: false, PROD: false })
+const issueKeyword = ref('')
+
+const loadMyIssues = async (type: 'BUG' | 'PROD') => {
+  if (myIssuesLoaded.value[type] || myIssuesLoading.value[type]) return
+  myIssuesLoading.value = { ...myIssuesLoading.value, [type]: true }
+  try {
+    const rows = await myWorklogIssues(type)
+    myIssues.value = { ...myIssues.value, [type]: Array.isArray(rows) ? rows : [] }
+  } catch {
+    myIssues.value = { ...myIssues.value, [type]: [] }
+  } finally {
+    myIssuesLoaded.value = { ...myIssuesLoaded.value, [type]: true }
+    myIssuesLoading.value = { ...myIssuesLoading.value, [type]: false }
+  }
+}
+
+const RAIL_TABS: { value: RailTab; label: string }[] = [
+  { value: 'PROJECT', label: '项目' },
+  { value: 'BUG', label: 'Bug' },
+  { value: 'PROD', label: '生产问题' }
+]
+
+const switchRail = (tab: RailTab) => {
+  railTab.value = tab
+  projectKeyword.value = ''
+  issueKeyword.value = ''
+  if (tab !== 'PROJECT') void loadMyIssues(tab)
+}
+
+const railLoading = computed(() =>
+  railTab.value === 'PROJECT' ? false : myIssuesLoading.value[railTab.value]
+)
+
+const railTitle = computed(
+  () =>
+    ({ PROJECT: '我的项目', BUG: '我的 Bug', PROD: '我的生产问题' })[railTab.value]
+)
+
+const railIssues = computed<WorklogMyIssue[]>(() =>
+  railTab.value === 'PROJECT' ? [] : myIssues.value[railTab.value]
+)
+
+const filteredIssues = computed(() => {
+  const key = issueKeyword.value.trim().toLowerCase()
+  if (!key) return railIssues.value
+  return railIssues.value.filter((item) =>
+    `${item.issueNo} ${item.title} ${item.projectName}`.toLowerCase().includes(key)
+  )
+})
+
+const railCount = computed(() =>
+  railTab.value === 'PROJECT' ? options.value.projects.length : railIssues.value.length
+)
+
 const isPicked = (projectId: string | number) =>
   form.items.some((item) => item.projectId === String(projectId))
 
-const pickedCount = computed(() => form.items.length)
+const isIssuePicked = (issueId: string | number) =>
+  form.items.some((item) => item.issueId === String(issueId))
 
-const pickedProjectNames = computed(() =>
-  form.items.map((item) => projectOf(item.projectId)?.projectName || '未知项目')
-)
+/** 明细按项目去重计数：同一项目可以有多条任务/问题明细。 */
+const pickedCount = computed(() => new Set(form.items.map((item) => item.projectId)).size)
+
+const pickedProjectNames = computed(() => {
+  const names = form.items.map((item) => projectOf(item.projectId)?.projectName || '未知项目')
+  return names.filter((name, index) => names.indexOf(name) === index)
+})
 
 /** 合计工时 = 各项目工时之和（后端按明细合计校验）。 */
 const totalHours = computed(() => {
@@ -768,13 +845,57 @@ const loadProjectTasks = async (projectId: string) => {
 
 const tasksOf = (projectId: string) => taskMap.value[String(projectId)] || []
 
+/* 问题下钻：Bug / 生产问题也能作为日志关联对象（与任务二选一） */
+const issueMap = ref<Record<string, WorklogIssue[]>>({})
+const issueLoading = ref<Record<string, boolean>>({})
+
+const loadProjectIssues = async (projectId: string) => {
+  const key = String(projectId || '')
+  if (!key || issueMap.value[key] !== undefined || issueLoading.value[key]) return
+  issueLoading.value = { ...issueLoading.value, [key]: true }
+  try {
+    const rows = await worklogIssues(key)
+    issueMap.value = { ...issueMap.value, [key]: Array.isArray(rows) ? rows : [] }
+  } catch {
+    issueMap.value = { ...issueMap.value, [key]: [] }
+  } finally {
+    issueLoading.value = { ...issueLoading.value, [key]: false }
+  }
+}
+
+/** 按类型取问题（下拉里 Bug / 生产问题分组展示）。 */
+const issuesOf = (projectId: string, type: 'BUG' | 'PROD') =>
+  (issueMap.value[String(projectId)] || []).filter((item) => item.issueType === type)
+
+/** 明细「关联对象」：任务与问题互斥，用前缀区分同一个下拉的值。 */
+const targetValue = (item: LogFormItem) =>
+  item.issueId ? `issue:${item.issueId}` : item.taskId ? `task:${item.taskId}` : ''
+
+const setTarget = (item: LogFormItem, value: string) => {
+  const [kind, id] = String(value || '').split(':')
+  item.taskId = kind === 'task' ? id || '' : ''
+  item.issueId = kind === 'issue' ? id || '' : ''
+}
+
+/** 问题展示名：「Bug BUG-001 标题」/「生产问题 PROD-002 标题」。 */
+const issueLabel = (issue: {
+  issueNo?: string
+  title?: string
+  issueTitle?: string
+  issueType?: string
+}) =>
+  `${issue.issueType === 'PROD' ? '生产问题' : 'Bug'} ${issue.issueNo || ''} ${
+    issue.title || issue.issueTitle || ''
+  }`.trim()
+
 /** 点击左侧项目：多选，一次日志可覆盖多个项目；多选后自动平分工时。 */
 const toggleProject = (project: WorklogProject) => {
   form.logType = 'PROJECT'
   const key = String(project.id)
-  const index = form.items.findIndex((item) => item.projectId === key)
-  if (index >= 0) {
-    form.items.splice(index, 1)
+  if (isPicked(key)) {
+    // 取消项目 = 移除该项目下的全部明细（含已挂的任务/问题）
+    const rest = form.items.filter((item) => item.projectId !== key)
+    form.items.splice(0, form.items.length, ...rest)
     if (form.items.length > 1) distributeHours()
     // 回到单项目时恢复整天工时，避免留下均分后的半天数字
     else if (form.items.length === 1 && formMode.value === 'create') {
@@ -785,16 +906,56 @@ const toggleProject = (project: WorklogProject) => {
   form.items.push({
     projectId: key,
     taskId: '',
+    issueId: '',
     hours: form.items.length === 0 ? defaultHours() : undefined,
     progressAfter: 0
   })
   void loadProjectTasks(key)
+  void loadProjectIssues(key)
   if (form.items.length > 1) distributeHours()
   if (form.items.length === 1) focusEditor()
 }
 
-const removeItem = (projectId: string) => {
-  const index = form.items.findIndex((item) => item.projectId === projectId)
+/**
+ * 左侧点 Bug / 生产问题：自动带上所属项目并挂到明细。
+ * 该项目下已有未关联对象的明细时直接复用它，避免多出一行空工时。
+ */
+const pickIssue = (issue: WorklogMyIssue) => {
+  const iid = String(issue.id)
+  const pid = String(issue.projectId || '')
+  if (isIssuePicked(iid)) {
+    const rest = form.items.filter((item) => item.issueId !== iid)
+    form.items.splice(0, form.items.length, ...rest)
+    if (form.items.length === 1 && formMode.value === 'create') {
+      form.items[0].hours = DEFAULT_DAY_HOURS
+    }
+    return
+  }
+  if (!pid || !projectOf(pid)) {
+    ElMessage.warning('该问题所属项目不在你的填报范围内')
+    return
+  }
+  form.logType = 'PROJECT'
+  const plain = form.items.find(
+    (item) => item.projectId === pid && !item.taskId && !item.issueId
+  )
+  if (plain) {
+    plain.issueId = iid
+  } else {
+    form.items.push({
+      projectId: pid,
+      taskId: '',
+      issueId: iid,
+      hours: form.items.length === 0 ? defaultHours() : undefined,
+      progressAfter: 0
+    })
+  }
+  void loadProjectTasks(pid)
+  void loadProjectIssues(pid)
+  focusEditor()
+}
+
+const removeItem = (index: number) => {
   if (index >= 0) form.items.splice(index, 1)
 }
 
@@ -810,14 +971,8 @@ const mentionOptions = computed(() => {
 
 const mentionRef = ref<any>()
 
-/** 左侧项目的 @ 按钮：先选中项目，再把 `@项目名` 插到光标处（首次选中则追加到末尾）。 */
-const insertProjectMention = async (project: WorklogProject) => {
-  const hadEditor = Boolean(mentionRef.value)
-  if (!isPicked(project.id)) {
-    toggleProject(project)
-    await nextTick()
-  }
-  const token = `@${project.projectName} `
+/** 把一段 @ 文本插到光标处（还没渲染编辑器时追加到末尾）。 */
+const insertMentionToken = async (token: string, hadEditor: boolean) => {
   const textarea = mentionRef.value?.input?.textarea as HTMLTextAreaElement | undefined
   if (!textarea || !hadEditor) {
     const glue = form.content && !form.content.endsWith(' ') ? ' ' : ''
@@ -831,6 +986,34 @@ const insertProjectMention = async (project: WorklogProject) => {
   textarea.focus()
   const pos = start + token.length
   textarea.setSelectionRange(pos, pos)
+}
+
+/** 左侧项目的 @ 按钮：先选中项目，再把 `@项目名` 插到光标处。 */
+const insertProjectMention = async (project: WorklogProject) => {
+  const hadEditor = Boolean(mentionRef.value)
+  if (!isPicked(project.id)) {
+    toggleProject(project)
+    await nextTick()
+  }
+  await insertMentionToken(`@${project.projectName} `, hadEditor)
+}
+
+/**
+ * 左侧 Bug / 生产问题的 @ 按钮：先挂上该问题，再插入 `@项目名 问题编号`。
+ * 保留 `@项目名` 前缀，工作内容仍能按项目拆分给周报。
+ */
+const insertIssueMention = async (issue: WorklogMyIssue) => {
+  const projectName = projectOf(String(issue.projectId || ''))?.projectName || ''
+  if (!projectName) {
+    ElMessage.warning('该问题所属项目不在你的填报范围内')
+    return
+  }
+  const hadEditor = Boolean(mentionRef.value)
+  if (!isIssuePicked(issue.id)) {
+    pickIssue(issue)
+    await nextTick()
+  }
+  await insertMentionToken(`@${projectName} ${issue.issueNo} `, hadEditor)
 }
 
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -874,7 +1057,7 @@ const splitContentByProject = (text: string): Map<string, string> => {
 const distributeHours = () => {
   const count = form.items.length
   if (count < 2) {
-    ElMessage.info('选择一个以上项目后可以平均分配')
+    ElMessage.info('两条以上明细后可以平均分配')
     return
   }
   const total = totalHours.value > 0 ? totalHours.value : DEFAULT_DAY_HOURS
@@ -926,6 +1109,7 @@ const formSubmitting = ref(false)
 interface LogFormItem {
   projectId: string
   taskId: string
+  issueId: string
   hours: number | undefined
   progressAfter: number
 }
@@ -993,6 +1177,7 @@ const openEdit = async (row: any) => {
             {
               projectId: worklog.projectId,
               taskId: worklog.taskId,
+              issueId: worklog.issueId,
               hours: worklog.totalHours,
               progressAfter: 0
             }
@@ -1006,6 +1191,7 @@ const openEdit = async (row: any) => {
         .map((item: any) => ({
           projectId: String(item.projectId || ''),
           taskId: String(item.taskId || ''),
+          issueId: String(item.issueId || ''),
           hours: Number(item.hours) || undefined,
           progressAfter: Number(item.progressAfter || 0)
         }))
@@ -1015,8 +1201,11 @@ const openEdit = async (row: any) => {
       problem: worklog.problem || '',
       plan: worklog.plan || ''
     })
-    // 回显任务下拉：编辑历史日志时按项目把任务列表补回来
-    form.items.forEach((item) => void loadProjectTasks(item.projectId))
+    // 回显关联下拉：编辑历史日志时按项目把任务/问题列表补回来
+    form.items.forEach((item) => {
+      void loadProjectTasks(item.projectId)
+      void loadProjectIssues(item.projectId)
+    })
     await loadDaySummary()
     detailVisible.value = false
     focusEditor()
@@ -1059,7 +1248,7 @@ const validateForm = () => {
       return false
     }
     if (form.items.some((item) => !item.hours || Number(item.hours) <= 0)) {
-      ElMessage.warning('请为每个项目填写大于 0 的工时')
+      ElMessage.warning('请为每条明细填写大于 0 的工时')
       return false
     }
   }
@@ -1087,6 +1276,7 @@ const persistForm = async (submitAfter: boolean) => {
       ? form.items.map((item) => ({
           projectId: String(item.projectId),
           taskId: String(item.taskId || 0),
+          issueId: String(item.issueId || 0),
           hours: Number(item.hours || 0),
           content: contentByProject.get(item.projectId) || '',
           progressAfter: Number(item.progressAfter || 0)
@@ -1098,6 +1288,7 @@ const persistForm = async (submitAfter: boolean) => {
       // 主表字段取第一条项目：老列表/团队视角仍能按单项目显示
       projectId: items[0]?.projectId || 0,
       taskId: items[0]?.taskId || 0,
+      issueId: items[0]?.issueId || 0,
       totalHours: items.reduce((sum, item) => sum + item.hours, 0),
       content: form.content.trim(),
       problem: form.problem,
@@ -1512,15 +1703,28 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     </transition>
 
     <div v-if="canCreate" class="log-layout">
-      <!-- 左侧：我的项目（可多选，一次写完日志） -->
+      <!-- 左侧：我的项目 / 我的 Bug / 我的生产问题（点问题直接挂到明细） -->
       <aside class="pms-card project-rail">
         <div class="rail-head">
-          <h3>我的项目</h3>
+          <h3>{{ railTitle }}</h3>
           <span class="rail-count">
-            {{ options.projects.length }} 个<template v-if="pickedCount"> · 已选 {{ pickedCount }}</template>
+            {{ railCount }} 个<template v-if="pickedCount"> · 已选 {{ pickedCount }}</template>
           </span>
         </div>
+        <div class="rail-tabs">
+          <button
+            v-for="tab in RAIL_TABS"
+            :key="tab.value"
+            type="button"
+            class="rail-tab"
+            :class="{ 'is-active': railTab === tab.value }"
+            @click="switchRail(tab.value)"
+          >
+            {{ tab.label }}
+          </button>
+        </div>
         <el-input
+          v-if="railTab === 'PROJECT'"
           v-model="projectKeyword"
           class="rail-search"
           size="small"
@@ -1528,41 +1732,91 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           clearable
           :prefix-icon="Search"
         />
-        <p class="rail-hint">可多选项目，一次写完；多选后自动平分工时</p>
+        <el-input
+          v-else
+          v-model="issueKeyword"
+          class="rail-search"
+          size="small"
+          :placeholder="railTab === 'BUG' ? '搜索 Bug 编号 / 标题' : '搜索生产问题编号 / 标题'"
+          clearable
+          :prefix-icon="Search"
+        />
+        <p v-if="railTab === 'PROJECT'" class="rail-hint">
+          可多选项目，一次写完；多选后自动平分工时
+        </p>
+        <p v-else class="rail-hint">
+          点击直接加入并关联该问题；只显示未关闭且已关联项目的问题
+        </p>
         <div class="rail-list">
-          <div
-            v-for="item in filteredProjects"
-            :key="String(item.id)"
-            class="rail-item"
-            :class="{ 'is-active': isPicked(item.id) }"
-            :title="`${item.projectName}（${item.projectCode}）`"
-            role="button"
-            tabindex="0"
-            @click="toggleProject(item)"
-            @keydown.enter="toggleProject(item)"
-            @keydown.space.prevent="toggleProject(item)"
-          >
-            <span class="rail-check" :class="{ 'is-on': isPicked(item.id) }">
-              <Check v-if="isPicked(item.id)" :size="12" :stroke-width="3" />
-            </span>
-            <span class="rail-item-main">
-              <span class="rail-item-name">{{ item.projectName }}</span>
-              <span class="rail-item-code">{{ item.projectCode }}</span>
-            </span>
-            <button
-              type="button"
-              class="rail-at"
-              title="在工作内容中插入 @项目名"
-              @click.stop="insertProjectMention(item)"
+          <template v-if="railTab === 'PROJECT'">
+            <div
+              v-for="item in filteredProjects"
+              :key="String(item.id)"
+              class="rail-item"
+              :class="{ 'is-active': isPicked(item.id) }"
+              :title="`${item.projectName}（${item.projectCode}）`"
+              role="button"
+              tabindex="0"
+              @click="toggleProject(item)"
+              @keydown.enter="toggleProject(item)"
+              @keydown.space.prevent="toggleProject(item)"
             >
-              @
-            </button>
-          </div>
-          <div v-if="!filteredProjects.length" class="rail-empty">
-            {{ options.projects.length ? '没有匹配的项目' : '暂无可填报项目' }}
-          </div>
+              <span class="rail-check" :class="{ 'is-on': isPicked(item.id) }">
+                <Check v-if="isPicked(item.id)" :size="12" :stroke-width="3" />
+              </span>
+              <span class="rail-item-main">
+                <span class="rail-item-name">{{ item.projectName }}</span>
+                <span class="rail-item-code">{{ item.projectCode }}</span>
+              </span>
+              <button
+                type="button"
+                class="rail-at"
+                title="在工作内容中插入 @项目名"
+                @click.stop="insertProjectMention(item)"
+              >
+                @
+              </button>
+            </div>
+            <div v-if="!filteredProjects.length" class="rail-empty">
+              {{ options.projects.length ? '没有匹配的项目' : '暂无可填报项目' }}
+            </div>
+          </template>
+          <template v-else>
+            <div
+              v-for="item in filteredIssues"
+              :key="String(item.id)"
+              class="rail-item"
+              :class="{ 'is-active': isIssuePicked(item.id) }"
+              :title="`${item.issueNo} ${item.title}`"
+              role="button"
+              tabindex="0"
+              @click="pickIssue(item)"
+              @keydown.enter="pickIssue(item)"
+              @keydown.space.prevent="pickIssue(item)"
+            >
+              <span class="rail-check" :class="{ 'is-on': isIssuePicked(item.id) }">
+                <Check v-if="isIssuePicked(item.id)" :size="12" :stroke-width="3" />
+              </span>
+              <span class="rail-item-main">
+                <span class="rail-item-name">{{ item.issueNo }} {{ item.title }}</span>
+                <span class="rail-item-code">{{ item.projectName || '未关联项目' }}</span>
+              </span>
+              <button
+                type="button"
+                class="rail-at"
+                title="在工作内容中插入 @项目名 问题编号"
+                @click.stop="insertIssueMention(item)"
+              >
+                @
+              </button>
+            </div>
+            <div v-if="railLoading" class="rail-empty">加载中…</div>
+            <div v-else-if="!filteredIssues.length" class="rail-empty">
+              {{ issueKeyword ? '没有匹配的问题' : '暂无待处理的问题' }}
+            </div>
+          </template>
         </div>
-        <p v-if="!options.projects.length" class="rail-tip">
+        <p v-if="railTab === 'PROJECT' && !options.projects.length" class="rail-tip">
           请联系项目经理把你加入项目成员后再填写
         </p>
       </aside>
@@ -1575,7 +1829,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <span v-if="pickedCount" class="editor-project">
               {{ pickedProjectNames.join('、') }}
             </span>
-            <span v-else>从左侧选择项目（可多选）</span>
+            <span v-else>从左侧选择项目或 Bug / 生产问题</span>
           </div>
           <el-tag v-if="!pickedCount" type="info" size="small" effect="plain">
             未选项目
@@ -1620,33 +1874,65 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               </el-button>
             </div>
             <div class="ph-list">
-              <div v-for="item in form.items" :key="item.projectId" class="ph-row">
+              <div
+                v-for="(item, index) in form.items"
+                :key="`${item.projectId}-${item.taskId}-${item.issueId}-${index}`"
+                class="ph-row"
+              >
                 <span class="ph-name" :title="projectOf(item.projectId)?.projectName">
                   {{ projectOf(item.projectId)?.projectName || '未知项目' }}
                 </span>
                 <span class="ph-task">
                   <el-select
-                    v-model="item.taskId"
+                    :model-value="targetValue(item)"
                     size="small"
                     clearable
                     filterable
-                    placeholder="任务（选填）"
-                    :loading="taskLoading[item.projectId]"
-                    @visible-change="(open: boolean) => open && loadProjectTasks(item.projectId)"
+                    placeholder="任务 / Bug / 生产问题（选填）"
+                    :loading="taskLoading[item.projectId] || issueLoading[item.projectId]"
+                    @update:model-value="(value: string) => setTarget(item, String(value || ''))"
+                    @visible-change="
+                      (open: boolean) => {
+                        if (!open) return
+                        loadProjectTasks(item.projectId)
+                        loadProjectIssues(item.projectId)
+                      }
+                    "
                   >
-                    <el-option
-                      v-for="task in tasksOf(item.projectId)"
-                      :key="String(task.id)"
-                      :label="task.taskName"
-                      :value="String(task.id)"
-                    >
-                      <span class="task-opt">
-                        <span class="task-opt-name">{{ task.taskName }}</span>
-                        <span class="task-opt-meta">
-                          {{ Math.round(Number(task.progress || 0)) }}%
+                    <el-option-group v-if="tasksOf(item.projectId).length" label="任务">
+                      <el-option
+                        v-for="task in tasksOf(item.projectId)"
+                        :key="`task-${task.id}`"
+                        :label="task.taskName"
+                        :value="`task:${task.id}`"
+                      >
+                        <span class="task-opt">
+                          <span class="task-opt-name">{{ task.taskName }}</span>
+                          <span class="task-opt-meta">
+                            {{ Math.round(Number(task.progress || 0)) }}%
+                          </span>
                         </span>
-                      </span>
-                    </el-option>
+                      </el-option>
+                    </el-option-group>
+                    <el-option-group v-if="issuesOf(item.projectId, 'BUG').length" label="Bug">
+                      <el-option
+                        v-for="issue in issuesOf(item.projectId, 'BUG')"
+                        :key="`bug-${issue.id}`"
+                        :label="issueLabel(issue)"
+                        :value="`issue:${issue.id}`"
+                      />
+                    </el-option-group>
+                    <el-option-group
+                      v-if="issuesOf(item.projectId, 'PROD').length"
+                      label="生产问题"
+                    >
+                      <el-option
+                        v-for="issue in issuesOf(item.projectId, 'PROD')"
+                        :key="`prod-${issue.id}`"
+                        :label="issueLabel(issue)"
+                        :value="`issue:${issue.id}`"
+                      />
+                    </el-option-group>
                   </el-select>
                 </span>
                 <span class="ph-hours">
@@ -1664,13 +1950,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                   link
                   type="danger"
                   size="small"
-                  @click="removeItem(item.projectId)"
+                  @click="removeItem(index)"
                 >
                   移除
                 </el-button>
               </div>
               <div v-if="!form.items.length" class="ph-empty">
-                从左侧点击项目加入（可多选），再为每个项目填工时
+                从左侧点击项目或 Bug / 生产问题加入，再为每条明细填工时
               </div>
             </div>
           </div>
@@ -1700,23 +1986,23 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               多个项目建议用 @ 标注每段内容：项目周报只取该项目的段落，避免互相串项。
             </p>
           </div>
-          <div class="field span-full">
+          <div class="field span-3">
             <label>明日计划 <em>*</em></label>
             <el-input
               v-model="form.plan"
               type="textarea"
-              :rows="3"
+              :rows="5"
               maxlength="500"
               show-word-limit
               placeholder="明天要做什么？没有计划可写「暂无」"
             />
           </div>
-          <div class="field span-full">
+          <div class="field span-3">
             <label>问题与阻塞</label>
             <el-input
               v-model="form.problem"
               type="textarea"
-              :rows="2"
+              :rows="5"
               maxlength="500"
               placeholder="遇到的技术/协作/资源问题（可选）"
             />
@@ -2078,8 +2364,17 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <b>{{ detail.worklog.totalHours }}h</b>
             </div>
             <div class="metric">
-              <span>任务</span>
-              <b>{{ detail.worklog.taskName || '未关联' }}</b>
+              <span>关联</span>
+              <b>{{
+                detail.worklog.taskName ||
+                (detail.worklog.issueNo
+                  ? issueLabel({
+                      issueNo: detail.worklog.issueNo,
+                      issueTitle: detail.worklog.issueTitle,
+                      issueType: detail.worklog.issueType
+                    })
+                  : '未关联')
+              }}</b>
             </div>
             <div class="metric">
               <span>{{ detail.worklog.lateDays > 0 ? '补填' : '提交时间' }}</span>
@@ -2116,13 +2411,24 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </section>
 
           <section class="detail-section">
-            <h4>任务明细</h4>
+            <h4>任务 / 问题明细</h4>
             <el-table v-if="detail.items.length" :data="detail.items" size="small">
               <el-table-column prop="projectName" label="项目" min-width="150">
                 <template #default="{ row }">{{ row.projectName || '非项目' }}</template>
               </el-table-column>
-              <el-table-column prop="taskName" label="任务" min-width="150">
-                <template #default="{ row }">{{ row.taskName || '未关联' }}</template>
+              <el-table-column prop="taskName" label="任务 / 问题" min-width="150">
+                <template #default="{ row }">
+                  {{
+                    row.taskName ||
+                    (row.issueNo
+                      ? issueLabel({
+                          issueNo: row.issueNo,
+                          issueTitle: row.issueTitle,
+                          issueType: row.issueType
+                        })
+                      : '未关联')
+                  }}
+                </template>
               </el-table-column>
               <el-table-column label="工时" width="84" align="right">
                 <template #default="{ row }">{{ row.hours }}h</template>
@@ -2694,6 +3000,42 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--pms-text-3);
 }
 
+/* 左栏三视图切换：项目 / Bug / 生产问题 */
+.rail-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--pms-line-soft);
+  border-radius: 8px;
+  background: #f5f7fb;
+}
+
+.rail-tab {
+  flex: 1 1 0;
+  padding: 5px 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--pms-text-3);
+  font-size: 12.5px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    color 0.16s ease;
+}
+
+.rail-tab:hover {
+  color: var(--pms-primary);
+}
+
+.rail-tab.is-active {
+  background: #fff;
+  color: var(--pms-primary-deep);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(20, 60, 120, 0.08);
+}
+
 /* 项目很多时单独滚动，不把右侧表单顶长；弹性填充让底边与右栏对齐 */
 .rail-list {
   display: flex;
@@ -2911,8 +3253,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   gap: 10px;
 }
 
+/* 项目名固定较窄一列：避免把关联下拉顶到行尾，中间留一大片空白 */
 .ph-name {
-  flex: 1 1 160px;
+  flex: 0 0 168px;
   overflow: hidden;
   min-width: 0;
   font-size: 13px;
@@ -2921,9 +3264,11 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   white-space: nowrap;
 }
 
-/* 任务下拉（选填）：不选任务时工时只记到项目 */
+/* 关联下拉（选填）：任务 / Bug / 生产问题，不选时工时只记到项目 */
 .ph-task {
-  flex: 0 0 200px;
+  flex: 1 1 240px;
+  min-width: 200px;
+  max-width: 420px;
 }
 
 .ph-task :deep(.el-select) {
