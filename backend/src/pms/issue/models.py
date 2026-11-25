@@ -21,6 +21,8 @@ class IssIssue(Base, CommonMixin):
     issue_no: Mapped[str] = mapped_column(String(32), default="")
     issue_type: Mapped[str] = mapped_column(String(8), default=IssueType.BUG)
     project_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    #: 关联产品（`t_crm_product.id`）：项目交付后的问题靠产品归集，0 表示未关联
+    product_id: Mapped[int] = mapped_column(BigInteger, default=0)
     title: Mapped[str] = mapped_column(String(200), default="")
     description: Mapped[str] = mapped_column(Text, default="")
     severity: Mapped[str] = mapped_column(String(16), default=Severity.MEDIUM)

@@ -38,12 +38,16 @@ async def create_attachment(
     if kind not in BIZ_TYPES:
         raise BizRuleError(f"不支持的文档归属类型：{kind}")
     label = await _ensure_biz_owner(session, project_id, kind, biz_id)
-    project = await project_service.get_project(session, project_id)
+    # 产品级问题（只挂产品、没有项目）也允许传附件/截图：
+    # 磁盘目录用「无项目」占位，附件归属仍靠 biz_type + biz_id 精确锁定
+    project_code = ""
+    if project_id > 0:
+        project_code = (await project_service.get_project(session, project_id)).project_code
 
     stored: StoredFile = await save_upload(
         upload,
         project_id,
-        project_code=project.project_code,
+        project_code=project_code or "无项目",
         biz_type=kind,
         biz_label=label,
     )

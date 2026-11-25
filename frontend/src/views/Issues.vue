@@ -49,6 +49,7 @@ const statusMeta = (value: string) => STATUS[value] || { label: value || '—', 
 
 const options = ref<IssueFormOptions>({
   projects: [],
+  products: [],
   users: [],
   types: [],
   statuses: [],
@@ -63,6 +64,8 @@ const page = ref({ pageNum: 1, pageSize: 20 })
 const loading = ref(false)
 const keyword = ref('')
 const filterProject = ref('')
+/** 产品筛选：仅生产问题有产品归属 */
+const filterProduct = ref('')
 const filterStatus = ref('')
 const filterSeverity = ref('')
 /** 列表视角：全部 / 指派给我 / 我提的 / 由我解决（后端按 ownerId / reporterId / 状态过滤）。 */
@@ -95,6 +98,7 @@ const load = async () => {
       pageSize: page.value.pageSize,
       keyword: keyword.value.trim() || undefined,
       projectId: filterProject.value || undefined,
+      productId: filterProduct.value || undefined,
       status: statusLocked.value ? 'CLOSED' : filterStatus.value || undefined,
       severity: filterSeverity.value || undefined,
       ownerId:
@@ -127,6 +131,7 @@ const onScopeChange = () => {
 const resetFilters = () => {
   keyword.value = ''
   filterProject.value = ''
+  filterProduct.value = ''
   filterStatus.value = ''
   filterSeverity.value = ''
   scope.value = 'ALL'
@@ -272,6 +277,22 @@ onUnmounted(() => {
           />
         </el-select>
         <el-select
+          v-if="isProd"
+          v-model="filterProduct"
+          class="filter-product"
+          placeholder="全部产品"
+          clearable
+          filterable
+          @change="onSearch"
+        >
+          <el-option
+            v-for="item in options.products"
+            :key="String(item.id)"
+            :label="item.productName"
+            :value="String(item.id)"
+          />
+        </el-select>
+        <el-select
           v-model="filterStatus"
           class="filter-status"
           placeholder="全部状态"
@@ -321,6 +342,10 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column label="项目" min-width="160" show-overflow-tooltip>
           <template #default="{ row }">{{ row.projectName || '—' }}</template>
+        </el-table-column>
+        <!-- 生产问题在项目结项后靠产品归集，Bug 不涉及产品 -->
+        <el-table-column v-if="isProd" label="产品" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.productName || '—' }}</template>
         </el-table-column>
         <el-table-column label="严重程度" width="96">
           <template #default="{ row }">
@@ -425,7 +450,8 @@ onUnmounted(() => {
   width: 240px;
 }
 
-.filter-project {
+.filter-project,
+.filter-product {
   width: 200px;
 }
 
@@ -477,6 +503,7 @@ onUnmounted(() => {
 @media (max-width: 768px) {
   .filter-keyword,
   .filter-project,
+  .filter-product,
   .filter-status,
   .filter-severity {
     width: 100%;

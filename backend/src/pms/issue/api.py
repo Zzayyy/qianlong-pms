@@ -26,10 +26,15 @@ router = APIRouter(prefix="/api/v1/issues", tags=["问题跟踪"])
 
 
 class IssueIn(BaseModel):
-    """新建问题入参。"""
+    """新建问题入参。
+
+    `projectId` / `productId` 至少一个：项目未结束时挂项目（产品可选），
+    项目已结束或没有项目时挂产品。
+    """
 
     issueType: str = "BUG"
-    projectId: int
+    projectId: int = 0
+    productId: int = 0
     title: str = Field(min_length=1, max_length=200)
     description: str = ""
     severity: str = "MEDIUM"
@@ -50,6 +55,7 @@ class IssueUpdateIn(BaseModel):
     foundDate: str | None = None
     remark: str | None = None
     projectId: int | None = None
+    productId: int | None = None
 
 
 class StatusIn(BaseModel):
@@ -69,6 +75,21 @@ async def _project_names(
         select(PrjProject.id, PrjProject.project_name).where(PrjProject.id.in_(ids))
     )
     return {int(project_id): str(name) for project_id, name in result.all()}
+
+
+async def _product_names(
+    session: AsyncSession, product_ids: set[int]
+) -> dict[int, str]:
+    """批量取产品名称（生产问题按产品归集时展示）。"""
+    from pms.crm.models import CrmProduct
+
+    ids = {int(item) for item in product_ids if item}
+    if not ids:
+        return {}
+    result = await session.execute(
+        select(CrmProduct.id, CrmProduct.product_name).where(CrmProduct.id.in_(ids))
+    )
+    return {int(product_id): str(name) for product_id, name in result.all()}
 
 
 async def _user_names(session: AsyncSession, user_ids: set[int]) -> dict[int, str]:
@@ -92,6 +113,7 @@ def _out(
     project_name: str,
     owner_name: str,
     reporter_name: str,
+    product_name: str = "",
 ) -> dict[str, object]:
     """问题出参。"""
     return {
@@ -100,6 +122,8 @@ def _out(
         "issueType": issue.issue_type,
         "projectId": issue.project_id,
         "projectName": project_name,
+        "productId": issue.product_id,
+        "productName": product_name,
         "title": issue.title,
         "description": issue.description,
         "severity": issue.severity,
@@ -123,6 +147,7 @@ async def list_issues(
     pagination: Annotated[Pagination, Depends(get_pagination)],
     issueType: Annotated[str, Query()] = "",
     projectId: Annotated[int, Query()] = 0,
+    productId: Annotated[int, Query()] = 0,
     status: Annotated[str, Query()] = "",
     severity: Annotated[str, Query()] = "",
     keyword: Annotated[str, Query()] = "",
@@ -133,6 +158,7 @@ async def list_issues(
     filters = {
         "issue_type": issueType,
         "project_id": projectId,
+        "product_id": productId,
         "status": status,
         "severity": severity,
         "keyword": keyword,
@@ -147,6 +173,7 @@ async def list_issues(
     )
     total = await service.count_issues(session, **filters)
     projects = await _project_names(session, {row.project_id for row in rows})
+    products = await _product_names(session, {row.product_id for row in rows})
     names = await _user_names(
         session, {row.owner_id for row in rows} | {row.reporter_id for row in rows}
     )
@@ -157,6 +184,7 @@ async def list_issues(
                 projects.get(int(row.project_id), ""),
                 names.get(int(row.owner_id), ""),
                 names.get(int(row.reporter_id), ""),
+                products.get(int(row.product_id), ""),
             )
             for row in rows
         ],
@@ -174,7 +202,12 @@ async def issue_options(
     """新建/筛选用的项目、人员与枚举选项。"""
     rows = (
         await session.execute(
-            select(PrjProject.id, PrjProject.project_code, PrjProject.project_name)
+            select(
+                PrjProject.id,
+                PrjProject.project_code,
+                PrjProject.project_name,
+                PrjProject.status,
+            )
             .where(PrjProject.deleted == 0)
             .order_by(PrjProject.id.desc())
             .limit(500)
@@ -188,6 +221,17 @@ async def issue_options(
             .limit(500)
         )
     ).all()
+    from pms.crm.models import CrmProduct
+
+    # 产品在这里直接下发，生产问题页无需 CRM 的产品权限也能选（只读名称）
+    products = (
+        await session.execute(
+            select(CrmProduct.id, CrmProduct.product_code, CrmProduct.product_name)
+            .where(CrmProduct.deleted == 0)
+            .order_by(CrmProduct.status, CrmProduct.product_name)
+            .limit(500)
+        )
+    ).all()
     return ok(
         {
             "projects": [
@@ -195,8 +239,18 @@ async def issue_options(
                     "id": int(project_id),
                     "projectCode": str(code or ""),
                     "projectName": str(name or ""),
+                    # 前端据此提示「项目已结束，请关联产品」
+                    "status": str(status or ""),
                 }
-                for project_id, code, name in rows
+                for project_id, code, name, status in rows
+            ],
+            "products": [
+                {
+                    "id": int(product_id),
+                    "productCode": str(code or ""),
+                    "productName": str(name or ""),
+                }
+                for product_id, code, name in products
             ],
             "users": [
                 {
@@ -226,6 +280,7 @@ async def create_issue(
         context,
         issue_type=body.issueType,
         project_id=body.projectId,
+        product_id=body.productId,
         title=body.title,
         description=body.description,
         severity=body.severity,
@@ -247,6 +302,7 @@ async def issue_detail(
     """问题详情：基础信息 + 历史记录 + 附件。"""
     issue = await service.get_issue(session, issue_id)
     projects = await _project_names(session, {issue.project_id})
+    products = await _product_names(session, {issue.product_id})
     names = await _user_names(session, {issue.owner_id, issue.reporter_id})
     logs = await service.list_logs(session, issue_id)
     log_names = await _user_names(session, {log.operator_id for log in logs})
@@ -258,6 +314,7 @@ async def issue_detail(
         projects.get(int(issue.project_id), ""),
         names.get(int(issue.owner_id), ""),
         names.get(int(issue.reporter_id), ""),
+        products.get(int(issue.product_id), ""),
     )
     data["logs"] = [
         {
@@ -412,6 +469,7 @@ async def update_issue(
         found_date=data["foundDate"],
         remark=data["remark"],
         project_id=data["projectId"],
+        product_id=data["productId"],
     )
     await session.commit()
     return ok({"id": issue.id})

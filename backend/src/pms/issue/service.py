@@ -17,6 +17,9 @@ from pms.project.models import PrjProject
 #: 编号前缀：Bug 用 BUG，生产问题用 PRD
 _NO_PREFIX: Final[dict[str, str]] = {"BUG": "BUG", "PROD": "PRD"}
 
+#: 项目终态：已关闭 / 已终止。此时问题归属应转到产品
+_CLOSED_PROJECT_STATUSES: Final[frozenset[str]] = frozenset({"CLOSED", "TERMINATED"})
+
 
 def _normalize_type(value: str | None) -> str:
     """归一化问题类型，未知类型按 Bug 兜底。"""
@@ -41,6 +44,37 @@ async def _ensure_project(session: AsyncSession, project_id: int) -> None:
     project = await session.get(PrjProject, project_id)
     if project is None or project.deleted:
         raise NotFoundError("项目不存在")
+
+
+async def _ensure_product(session: AsyncSession, product_id: int) -> None:
+    """校验问题关联的产品存在（产品档案来自 CRM，停用的历史产品仍可关联）。"""
+    from pms.crm.models import CrmProduct
+
+    product = await session.get(CrmProduct, product_id)
+    if product is None or product.deleted:
+        raise NotFoundError("产品不存在")
+
+
+async def _ensure_owner_ref(
+    session: AsyncSession, project_id: int, product_id: int
+) -> None:
+    """校验「项目 / 产品」归属：至少一个，项目未结束则项目必填。
+
+    - 两者都没选：报错，避免问题无处归集；
+    - 选了项目：校验存在，且项目已结束（已关闭/已终止）时必须同时关联产品，
+      因为项目结项后项目维度不再有跟踪意义；
+    - 只选产品（项目 0）：项目交付后的问题走这条路径。
+    """
+    if project_id <= 0 and product_id <= 0:
+        raise BizRuleError("请选择关联项目或产品")
+    if project_id > 0:
+        project = await session.get(PrjProject, project_id)
+        if project is None or project.deleted:
+            raise NotFoundError("项目不存在")
+        if str(project.status) in _CLOSED_PROJECT_STATUSES and product_id <= 0:
+            raise BizRuleError("项目已结束，请同时关联产品")
+    if product_id > 0:
+        await _ensure_product(session, product_id)
 
 
 def _date_text(value: object) -> str:
@@ -90,7 +124,8 @@ async def create_issue(
     context: AuthContext,
     *,
     issue_type: str,
-    project_id: int,
+    project_id: int = 0,
+    product_id: int = 0,
     title: str,
     description: str = "",
     severity: str = "MEDIUM",
@@ -99,18 +134,20 @@ async def create_issue(
     found_date: str | None = None,
     remark: str = "",
 ) -> IssIssue:
-    """登记一条问题（所有人可提，类型决定进 Bug 列表还是生产问题列表）。"""
+    """登记一条问题（所有人可提，类型决定进 Bug 列表还是生产问题列表）。
+
+    归属：项目未结束时挂项目（产品可选），项目已结束或没有项目时挂产品。
+    """
     text = (title or "").strip()
     if not text:
         raise BizRuleError("请填写问题标题")
-    if project_id <= 0:
-        raise BizRuleError("请选择项目")
-    await _ensure_project(session, project_id)
+    await _ensure_owner_ref(session, project_id, product_id)
     kind = _normalize_type(issue_type)
     issue = IssIssue(
         issue_no=await _next_no(session, kind),
         issue_type=kind,
-        project_id=project_id,
+        project_id=max(project_id, 0),
+        product_id=max(product_id, 0),
         title=text,
         description=description or "",
         severity=(severity or "MEDIUM").upper(),
@@ -168,8 +205,9 @@ async def update_issue(
     found_date: str | None = None,
     remark: str | None = None,
     project_id: int | None = None,
+    product_id: int | None = None,
 ) -> IssIssue:
-    """编辑问题内容与指派（项目可改，类型不可改）。"""
+    """编辑问题内容与指派（项目 / 产品归属可改，类型不可改）。"""
     issue = await get_issue(session, issue_id)
     _ensure_can_edit(issue, context, can_manage)
     changes: list[tuple[str, object, object]] = []
@@ -180,12 +218,19 @@ async def update_issue(
         if text != issue.title:
             changes.append(("title", issue.title, text))
             issue.title = text
-    if project_id is not None and project_id != int(issue.project_id or 0):
-        if project_id <= 0:
-            raise BizRuleError("请选择项目")
-        await _ensure_project(session, project_id)
-        changes.append(("projectId", issue.project_id, project_id))
-        issue.project_id = project_id
+    # 归属两字段一起改：改完后仍要满足「至少一个，项目未结束则项目必填」
+    old_project = int(issue.project_id or 0)
+    old_product = int(issue.product_id or 0)
+    next_project = old_project if project_id is None else max(int(project_id), 0)
+    next_product = old_product if product_id is None else max(int(product_id), 0)
+    if (next_project, next_product) != (old_project, old_product):
+        await _ensure_owner_ref(session, next_project, next_product)
+        if next_project != old_project:
+            changes.append(("projectId", old_project, next_project))
+            issue.project_id = next_project
+        if next_product != old_product:
+            changes.append(("productId", old_product, next_product))
+            issue.product_id = next_product
     if description is not None and description != issue.description:
         changes.append(("description", issue.description, description))
         issue.description = description
@@ -270,6 +315,7 @@ def _filters(
     *,
     issue_type: str = "",
     project_id: int = 0,
+    product_id: int = 0,
     status: str = "",
     severity: str = "",
     keyword: str = "",
@@ -282,6 +328,8 @@ def _filters(
         conditions.append(IssIssue.issue_type == issue_type.upper())
     if project_id:
         conditions.append(IssIssue.project_id == project_id)
+    if product_id:
+        conditions.append(IssIssue.product_id == product_id)
     if status:
         conditions.append(IssIssue.status == status.upper())
     if severity:
@@ -308,6 +356,7 @@ async def list_issues(
     *,
     issue_type: str = "",
     project_id: int = 0,
+    product_id: int = 0,
     status: str = "",
     severity: str = "",
     keyword: str = "",
@@ -323,6 +372,7 @@ async def list_issues(
             *_filters(
                 issue_type=issue_type,
                 project_id=project_id,
+                product_id=product_id,
                 status=status,
                 severity=severity,
                 keyword=keyword,
@@ -343,6 +393,7 @@ async def count_issues(
     *,
     issue_type: str = "",
     project_id: int = 0,
+    product_id: int = 0,
     status: str = "",
     severity: str = "",
     keyword: str = "",
@@ -355,6 +406,7 @@ async def count_issues(
             *_filters(
                 issue_type=issue_type,
                 project_id=project_id,
+                product_id=product_id,
                 status=status,
                 severity=severity,
                 keyword=keyword,

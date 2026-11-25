@@ -1022,6 +1022,9 @@ export interface IssueItem {
   issueType: string
   projectId: string
   projectName: string
+  /** 关联产品：项目交付后的问题靠产品归集 */
+  productId?: string
+  productName?: string
   title: string
   description: string
   severity: string
@@ -1038,7 +1041,8 @@ export interface IssueItem {
 }
 
 export interface IssueFormOptions {
-  projects: { id: string; projectCode: string; projectName: string }[]
+  projects: { id: string; projectCode: string; projectName: string; status?: string }[]
+  products: { id: string; productCode: string; productName: string }[]
   users: { id: string; name: string }[]
   types: string[]
   statuses: string[]

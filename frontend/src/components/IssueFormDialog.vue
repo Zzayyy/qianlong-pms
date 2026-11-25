@@ -37,6 +37,7 @@ const PRIORITY: Record<string, string> = { LOW: '低', MEDIUM: '中', HIGH: '高
 
 const options = ref<IssueFormOptions>({
   projects: [],
+  products: [],
   users: [],
   types: [],
   statuses: [],
@@ -48,6 +49,7 @@ const options = ref<IssueFormOptions>({
 const form = reactive({
   id: '',
   projectId: '',
+  productId: '',
   title: '',
   description: '',
   severity: 'MEDIUM',
@@ -61,6 +63,18 @@ const saving = ref(false)
 const uploading = ref(false)
 
 const isEdit = computed(() => Boolean(form.id))
+const isProd = computed(() => props.issueType === 'PROD')
+/** 项目终态：此时问题归属应转到产品 */
+const CLOSED_STATUSES = new Set(['CLOSED', 'TERMINATED'])
+const selectedProject = computed(
+  () => options.value.projects.find((item) => String(item.id) === String(form.projectId)) || null
+)
+const projectClosed = computed(
+  () => Boolean(selectedProject.value) && CLOSED_STATUSES.has(String(selectedProject.value?.status || ''))
+)
+/** 项目下拉文案：带上「已结束」标记，避免选到结项项目却不知道 */
+const projectLabel = (item: { projectName: string; projectCode: string; status?: string }) =>
+  `${item.projectName}（${item.projectCode}）${CLOSED_STATUSES.has(String(item.status || '')) ? ' · 已结束' : ''}`
 /** 编辑时按详情下发的 canUpload 判断；新建时提报人就是自己，默认可传。 */
 const canUpload = computed(() => props.issue?.canUpload !== false)
 const title = computed(() => {
@@ -264,6 +278,7 @@ const fill = async () => {
   Object.assign(form, {
     id: row ? String(row.id || '') : '',
     projectId: row ? String(row.projectId || '') : '',
+    productId: row?.productId ? String(row.productId) : '',
     title: row ? String(row.title || '') : '',
     description: row ? String(row.description || '') : DESCRIPTION_TEMPLATE,
     severity: String(row?.severity || 'MEDIUM'),
@@ -289,7 +304,17 @@ watch(
 )
 
 const save = async () => {
-  if (!form.projectId) {
+  if (props.issueType === 'PROD') {
+    // 生产问题：项目 / 产品至少挂一个，项目已结束则必须补产品
+    if (!form.projectId && !form.productId) {
+      ElMessage.warning('请选择关联项目或产品')
+      return
+    }
+    if (projectClosed && !form.productId) {
+      ElMessage.warning('该项目已结束，请同时关联产品')
+      return
+    }
+  } else if (!form.projectId) {
     ElMessage.warning('请选择项目')
     return
   }
@@ -301,7 +326,8 @@ const save = async () => {
   try {
     // 雪花 ID 必须按字符串传，Number() 会丢精度
     const payload: Record<string, unknown> = {
-      projectId: String(form.projectId),
+      projectId: form.projectId ? String(form.projectId) : 0,
+      productId: form.productId ? String(form.productId) : 0,
       title: form.title.trim(),
       description: normalizeDescription(form.description),
       severity: form.severity,
@@ -349,17 +375,42 @@ const close = () => emit('update:modelValue', false)
     @update:model-value="(value: boolean) => emit('update:modelValue', value)"
   >
     <el-form :model="form" label-width="88px">
-      <el-form-item label="项目" required>
+      <el-form-item label="项目" :required="isProd ? !form.productId : true">
         <el-select
           v-model="form.projectId"
+          clearable
           filterable
           style="width: 100%"
+          :placeholder="isProd ? '项目未结束时必选；已结束可留空' : '请选择项目'"
           @change="(value: any) => loadProjectMembers(String(value || ''))"
         >
           <el-option
             v-for="item in options.projects"
             :key="String(item.id)"
-            :label="`${item.projectName}（${item.projectCode}）`"
+            :label="projectLabel(item)"
+            :value="String(item.id)"
+          />
+        </el-select>
+        <div v-if="isProd && projectClosed" class="field-tip">
+          该项目已结束，请同时关联产品（问题会按产品继续跟踪）
+        </div>
+      </el-form-item>
+      <el-form-item
+        v-if="isProd"
+        label="关联产品"
+        :required="!form.projectId || projectClosed"
+      >
+        <el-select
+          v-model="form.productId"
+          clearable
+          filterable
+          placeholder="项目交付后的问题请挂到产品上"
+          style="width: 100%"
+        >
+          <el-option
+            v-for="item in options.products"
+            :key="String(item.id)"
+            :label="`${item.productName}（${item.productCode}）`"
             :value="String(item.id)"
           />
         </el-select>
@@ -532,6 +583,15 @@ const close = () => emit('update:modelValue', false)
 
 .form-row :deep(.el-form-item) {
   flex: 1;
+}
+
+/* 表单内提示：项目已结束时提示补产品 */
+.field-tip {
+  width: 100%;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-color-warning);
 }
 
 .upload-block {

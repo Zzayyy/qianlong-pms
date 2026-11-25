@@ -457,6 +457,10 @@ onBeforeUnmount(revokeImageUrls)
               <dt>项目</dt>
               <dd>{{ detail?.projectName || '—' }}</dd>
             </div>
+            <div v-if="detail?.issueType === 'PROD'">
+              <dt>产品</dt>
+              <dd>{{ detail?.productName || '—' }}</dd>
+            </div>
             <div>
               <dt>严重程度</dt>
               <dd>
