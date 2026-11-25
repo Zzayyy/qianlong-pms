@@ -1089,6 +1089,47 @@ def normalize_task_type(value: str | None) -> str:
     return text
 
 
+def apply_task_progress(task: PrjTask, progress: float) -> None:
+    """写任务进度并联动状态：100 完成、0 未开始、其余进行中。
+
+    任务状态不再单独维护，始终由进度推导，避免「进度 100% 但状态未开始」这类脏数据。
+    """
+    task.progress = progress
+    if progress >= 100:
+        task.status = TaskStatus.DONE
+    elif progress <= 0:
+        task.status = TaskStatus.NOT_STARTED
+    else:
+        task.status = TaskStatus.IN_PROGRESS
+
+
+def derive_task_progress(plan_hours: float, actual_hours: float) -> float | None:
+    """按工时推算任务进度：实际 / 计划（上限 100）。
+
+    没有计划工时（0）时无法折算，返回 `None` 表示保持原值。
+    """
+    plan = float(plan_hours or 0)
+    if plan <= 0:
+        return None
+    return round(min(100.0, float(actual_hours or 0) / plan * 100), 1)
+
+
+def sync_task_progress_from_hours(task: PrjTask) -> None:
+    """按已确认日志累计的实际工时刷新任务进度。
+
+    进度不再由人工填写：工时涨了进度就涨。已完成（DONE）的任务保持 100%，
+    因为「完成」是明确动作，不会因为日志被撤销而回退；已取消的任务不再改动。
+    """
+    if task.status == TaskStatus.CANCELLED:
+        return
+    if task.status == TaskStatus.DONE:
+        task.progress = 100
+        return
+    derived = derive_task_progress(task.plan_hours, task.actual_hours)
+    if derived is not None:
+        apply_task_progress(task, derived)
+
+
 async def create_task(
     session: AsyncSession,
     project_id: int,
@@ -1163,14 +1204,7 @@ async def update_task_progress(
         raise ForbiddenError("仅任务负责人可更新该任务的进度")
     if not 0 <= progress <= 100:
         raise ConflictError("进度取值应在 0~100 之间")
-    task.progress = progress
-    # 进度驱动状态，避免任务状态长期停在 NOT_STARTED 与实际进度不符
-    if progress >= 100:
-        task.status = TaskStatus.DONE
-    elif progress <= 0:
-        task.status = TaskStatus.NOT_STARTED
-    else:
-        task.status = TaskStatus.IN_PROGRESS
+    apply_task_progress(task, progress)
     task.update_by = operator_id
     await session.flush()
     await recalc_progress(session, task.project_id)
@@ -1216,7 +1250,10 @@ async def update_task(
     if priority is not None:
         task.priority = priority
     task.update_by = operator_id
+    # 计划工时可能被改（任务进度 = 实际 / 计划），改完重新折算并回写项目进度
+    sync_task_progress_from_hours(task)
     await session.flush()
+    await recalc_progress(session, project_id)
     return task
 
 

@@ -479,6 +479,8 @@ async def _recalc_task_hours(session: AsyncSession, task_ids: set[int]) -> None:
 
     任务工时只是日志工时的下钻视图：确认、撤销确认、驳回都走同一套重算，
     不再做 ± 累加，避免日志反复修改导致工时漂移。
+    工时变化后同步刷新任务进度（进度 = 实际工时 / 计划工时），
+    因此写日志就等于报进度，不用再单独填。
     """
     ids = {int(task_id) for task_id in task_ids if task_id}
     if not ids:
@@ -501,6 +503,7 @@ async def _recalc_task_hours(session: AsyncSession, task_ids: set[int]) -> None:
         task = await session.get(PrjTask, task_id)
         if task is not None:
             task.actual_hours = totals.get(task_id, 0.0)
+            project_service.sync_task_progress_from_hours(task)
     await session.flush()
 
 
@@ -515,8 +518,9 @@ async def _apply_confirm_effects(
     for item in items:
         if item.task_id:
             task = await session.get(PrjTask, item.task_id)
-            if task is not None and float(item.progress_after) > float(task.progress):
-                task.progress = float(item.progress_after)
+            # 进度默认由工时推算；日志里手工填了更高进度时以其为准（老入口，前端已不再展示）
+            if task is not None and float(item.progress_after or 0) > float(task.progress):
+                project_service.apply_task_progress(task, float(item.progress_after))
     # 日志风险：一条日志只落一条风险（按日志编号幂等，避免多明细重复建/重复确认再建），
     # 标题取「问题与阻塞」摘要，等级按关键词初判，来源标 WORKLOG 便于与人工登记区分
     if worklog.risk_flag:
@@ -1499,11 +1503,22 @@ async def _replace_items(
 
 
 async def _rollback_effort(session: AsyncSession, worklog: WlWorklog) -> None:
-    """撤销/驳回后按新状态重算任务实际工时（该日志不再计入即自然归零）。"""
+    """撤销/驳回后按新状态重算任务实际工时（该日志不再计入即自然归零）。
+
+    工时归零会带着任务进度一起回落，所以这里必须同步重算项目进度，
+    否则阶段/项目进度会停在撤销前的数值。
+    """
     items = await list_items(session, worklog.id)
     await _recalc_task_hours(
         session, {int(item.task_id) for item in items if item.task_id}
     )
+    project_ids = {
+        int(item.project_id or worklog.project_id)
+        for item in items
+        if item.project_id or worklog.project_id
+    }
+    for project_id in project_ids:
+        await project_service.recalc_progress(session, project_id)
 
 
 async def _is_subordinate(session: AsyncSession, context: AuthContext, author_id: int) -> bool:

@@ -768,15 +768,6 @@ const loadProjectTasks = async (projectId: string) => {
 
 const tasksOf = (projectId: string) => taskMap.value[String(projectId)] || []
 
-const taskOf = (projectId: string, taskId: string) =>
-  tasksOf(projectId).find((task) => String(task.id) === String(taskId)) || null
-
-/** 进度输入占位：提示任务当前进度，留空/0 表示不调整进度。 */
-const taskProgressPlaceholder = (projectId: string, taskId: string) => {
-  const task = taskOf(projectId, taskId)
-  return task ? `当前 ${Math.round(Number(task.progress || 0))}%` : '进度%（选填）'
-}
-
 /** 点击左侧项目：多选，一次日志可覆盖多个项目；多选后自动平分工时。 */
 const toggleProject = (project: WorklogProject) => {
   form.logType = 'PROJECT'
@@ -1669,17 +1660,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                     controls-position="right"
                   />
                 </span>
-                <span v-if="item.taskId" class="ph-progress">
-                  <el-input-number
-                    v-model="item.progressAfter"
-                    size="small"
-                    :min="0"
-                    :max="100"
-                    :step="5"
-                    :placeholder="taskProgressPlaceholder(item.projectId, item.taskId)"
-                    controls-position="right"
-                  />
-                </span>
                 <el-button
                   link
                   type="danger"
@@ -2146,11 +2126,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               </el-table-column>
               <el-table-column label="工时" width="84" align="right">
                 <template #default="{ row }">{{ row.hours }}h</template>
-              </el-table-column>
-              <el-table-column label="进度" width="84" align="right">
-                <template #default="{ row }">
-                  {{ row.taskId ? `${row.progressAfter}%` : '—' }}
-                </template>
               </el-table-column>
             </el-table>
             <el-empty v-else description="暂无任务明细" :image-size="60" />
@@ -2952,15 +2927,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 .ph-task :deep(.el-select) {
-  width: 100%;
-}
-
-.ph-progress {
-  display: block;
-  flex: 0 0 118px;
-}
-
-.ph-progress :deep(.el-input-number) {
   width: 100%;
 }
 

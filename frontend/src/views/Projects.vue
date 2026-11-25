@@ -318,8 +318,8 @@ const retroDuePassed = computed(() => {
   if (!due) return false
   return overdueDays({ planDate: due, status: 'PENDING' }) > 0
 })
-/** 详情页签（打开时重置为「成员」，便于新建项目后连续补人、补节点）。 */
-const activeTab = ref('team')
+/** 详情页签：默认落在「计划」，项目详情主要就是看阶段和任务。 */
+const activeTab = ref('plan')
 const stages = ref<any[]>([])
 const tasks = ref<any[]>([])
 const milestones = ref<any[]>([])
@@ -1294,7 +1294,7 @@ const doCreate = async (startNow = false) => {
 
 /**
  * 打开项目详情页。`tab` 指定落地页签（列表「直达」下拉用）；
- * 表格 `row-click` 会把 column 对象透传进来，非字符串时落到默认「团队」。
+ * 表格 `row-click` 会把 column 对象透传进来，非字符串时落到默认「计划」。
  */
 const openDetail = async (row: any, tab?: unknown) => {
   const target = typeof tab === 'string' ? tab : ''
@@ -1313,7 +1313,7 @@ const pageEl = ref<HTMLElement | null>(null)
 
 /**
  * 详情页取数：只依赖路由里的项目 ID，支持直接打开 / 刷新 / 分享链接。
- * 落地页签由 `?tab=` 决定，变更记录 / 周报按权限决定是否可用，不可用时回落到「团队」。
+ * 落地页签由 `?tab=` 决定（缺省「计划」），变更记录 / 周报按权限决定是否可用，不可用时回落到「计划」。
  */
 const loadDetail = async (id: string, tab?: unknown) => {
   detailLoading.value = true
@@ -1338,11 +1338,11 @@ const loadDetail = async (id: string, tab?: unknown) => {
     await loadWeeklies()
     // 标签栏与面包屑改用项目名，同时打开多个项目时不再是一排「项目详情」
     setPageTitle(pagePath, String(detail.value.projectName || ''))
-    const target = typeof tab === 'string' ? tab : 'team'
-    const allowed = new Set(['team', 'plan', 'risks', 'issues', 'docs'])
+    const target = typeof tab === 'string' ? tab : 'plan'
+    const allowed = new Set(['team', 'plan', 'milestones', 'risks', 'issues', 'docs'])
     if (store.has('change:view')) allowed.add('changes')
     if (canViewWeekly.value) allowed.add('weekly')
-    activeTab.value = allowed.has(target) ? target : 'team'
+    activeTab.value = allowed.has(target) ? target : 'plan'
     await nextTick()
     pageEl.value?.scrollIntoView({ block: 'start' })
   } catch {
@@ -1999,20 +1999,15 @@ const doTerminate = async () => {
 }
 
 /* 任务：新增 / 编辑 / 删除 / 进度 */
-/** 任务类型：只作分类标签，不参与进度与工时计算。 */
-const TASK_TYPE: Record<
-  string,
-  { label: string; type: 'primary' | 'success' | 'warning' | 'info' | 'danger' }
-> = {
-  REQ: { label: '需求', type: 'primary' },
-  DEV: { label: '开发', type: 'success' },
-  TEST: { label: '测试', type: 'warning' },
-  DOC: { label: '文档', type: 'info' },
-  OPS: { label: '运维', type: 'danger' }
-}
-const taskTypeMeta = (value: string) => TASK_TYPE[String(value || '')] || null
+/** 阶段 ID → 名称：编辑弹窗里只读展示「所属阶段」。 */
+const stageNameById = (stageId: unknown) =>
+  stages.value.find((item) => String(item.id) === String(stageId))?.stageName || '未分阶段'
 
 const taskVisible = ref(false)
+/**
+ * `weight` 不再让用户填（任务一律等权），但表单里保留该字段：
+ * 编辑时回填原值、新建给 1，保存时照旧提交，避免把后端算进度用的权重清零。
+ */
 const taskForm = ref<any>({
   id: '',
   taskName: '',
@@ -2022,8 +2017,7 @@ const taskForm = ref<any>({
   planHours: 8,
   planStart: '',
   planEnd: '',
-  priority: 'MEDIUM',
-  taskType: 'DEV'
+  priority: 'MEDIUM'
 })
 
 /** 人员候选分组：给定「优先人员」后拆成两组，供下拉分组展示。 */
@@ -2052,7 +2046,7 @@ const tasksOfStage = (stageId: string | number) =>
     ? tasks.value.filter((item) => !item.stageId || String(item.stageId) === '0')
     : tasks.value.filter((item) => String(item.stageId) === String(stageId))
 
-/** 「计划」页签的行：阶段 + 可选的「未分阶段」聚合行。 */
+/** 「计划」页签的阶段：全部阶段 + 可选的「未分阶段」聚合项（有裸任务时才出现）。 */
 const stageRows = computed(() => {
   const rows: any[] = stages.value.map((item) => ({ ...item }))
   if (tasksOfStage('unassigned').length) {
@@ -2061,18 +2055,27 @@ const stageRows = computed(() => {
   return rows
 })
 
-/** 阶段 + 任务拍平成树形行（el-table tree-props），避免「表格里再套一张表」。 */
-const planTree = computed(() =>
-  stageRows.value.map((stage) => ({
-    ...stage,
-    __key: stage.__pseudo ? 'unassigned' : `s${stage.id}`,
-    __kind: stage.__pseudo ? 'pseudo' : 'stage',
-    children: tasksOfStage(stage.id).map((task: any) => ({
-      ...task,
-      __key: `t${task.id}`,
-      __kind: 'task'
-    }))
-  }))
+/** 当前选中的阶段：默认落在第一个阶段（看得最多的就是它），阶段被删后自动回落到第一个。 */
+const activeStageId = ref('')
+const activeStage = computed(
+  () => stageRows.value.find((row) => String(row.id) === activeStageId.value) || null
+)
+const selectStage = (row: any) => {
+  activeStageId.value = String(row.id)
+}
+watch(
+  () => stageRows.value.map((row) => String(row.id)).join('|'),
+  () => {
+    if (!stageRows.value.some((row) => String(row.id) === activeStageId.value)) {
+      activeStageId.value = stageRows.value[0] ? String(stageRows.value[0].id) : ''
+    }
+  },
+  { immediate: true }
+)
+
+/** 选中阶段下的任务，表格只显示这一个阶段。 */
+const activeStageTasks = computed(() =>
+  activeStage.value ? tasksOfStage(activeStage.value.id) : []
 )
 
 /** 阶段行显示其下任务的工时合计（计划 / 实际）。 */
@@ -2098,35 +2101,6 @@ const unassignedHours = computed(() => {
   return Math.max(0, Math.round((actual - assigned) * 10) / 10)
 })
 
-/** 树形行斑马区分：阶段行深一档，任务行浅一档。 */
-const planRowClass = ({ row }: any) => (row.__kind === 'task' ? 'plan-row-task' : 'plan-row-stage')
-
-/* 展开/收起全部：受控 expand-row-keys，只有「有任务」的阶段参与 */
-const expandKeys = ref<string[]>([])
-const expandableKeys = computed(() =>
-  planTree.value.filter((row) => (row.children?.length ?? 0) > 0).map((row) => row.__key)
-)
-const allExpanded = computed(
-  () => expandableKeys.value.length > 0 && expandKeys.value.length === expandableKeys.value.length
-)
-const toggleExpandAll = () => {
-  expandKeys.value = allExpanded.value ? [] : [...expandableKeys.value]
-}
-/** 树形表的 expand-change 回传当前展开行数组；单行展开事件回传 boolean，忽略即可。 */
-const onExpandChange = (_row: any, expanded: any) => {
-  if (!Array.isArray(expanded)) return
-  expandKeys.value = expanded.map((item: any) => item.__key)
-}
-// 数据变化（新增任务、调整进度等）后保持「全展开」，避免刷新后行被折叠
-watch(
-  () => planTree.value,
-  () => {
-    expandKeys.value = [...expandableKeys.value]
-  },
-  { immediate: true }
-)
-
-
 const openTask = (row?: any, presetStageId?: string) => {
   taskForm.value = row
     ? {
@@ -2138,25 +2112,26 @@ const openTask = (row?: any, presetStageId?: string) => {
         planHours: Number(row.planHours || 0),
         planStart: row.planStart || '',
         planEnd: row.planEnd || '',
-        priority: row.priority || 'MEDIUM',
-        taskType: row.taskType || ''
+        priority: row.priority || 'MEDIUM'
       }
     : {
         id: '',
         taskName: '',
         stageId: presetStageId && presetStageId !== 'unassigned'
           ? presetStageId
-          : stages.value[0]
-            ? String(stages.value[0].id)
-            : '',
+          : // 新建任务默认挂到当前选中的阶段上，少一次下拉选择
+            activeStage.value && !activeStage.value.__pseudo
+            ? String(activeStage.value.id)
+            : stages.value[0]
+              ? String(stages.value[0].id)
+              : '',
         ownerId: String(store.profile?.id || ''),
         weight: 1,
         planHours: 8,
         // 任务不再要求排期：工期由阶段承载，任务只填名称/负责人/工时
         planStart: '',
         planEnd: '',
-        priority: 'MEDIUM',
-        taskType: 'DEV'
+        priority: 'MEDIUM'
       }
   taskVisible.value = true
 }
@@ -2175,8 +2150,7 @@ const saveTask = async () => {
     // 未排期一律传 null：MySQL DATE 列不接受空串
     planStart: taskForm.value.planStart || null,
     planEnd: taskForm.value.planEnd || null,
-    priority: taskForm.value.priority,
-    taskType: taskForm.value.taskType || ''
+    priority: taskForm.value.priority
   }
   if (taskForm.value.id) {
     await updateTask(detail.value.id, taskForm.value.id, payload)
@@ -2206,6 +2180,12 @@ const setTaskProgress = async (row: any, value: number) => {
   if (Number(row.progress || 0) === value) return
   await updateTaskProgress(detail.value.id, String(row.id), value)
   await refreshTaskTree()
+}
+
+/** 一键完成：进度由工时自动推算，提前干完时靠这个把任务置为 100%。 */
+const finishTask = async (row: any) => {
+  await setTaskProgress(row, 100)
+  ElMessage.success(`任务「${row.taskName}」已标记完成`)
 }
 
 /* 里程碑：新增 / 编辑 / 达成 / 删除 */
@@ -2466,7 +2446,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item command="team">团队</el-dropdown-item>
-                    <el-dropdown-item command="plan">计划</el-dropdown-item>
+                    <el-dropdown-item command="plan">阶段</el-dropdown-item>
+                    <el-dropdown-item command="milestones">里程碑</el-dropdown-item>
                     <el-dropdown-item command="risks">风险</el-dropdown-item>
                     <el-dropdown-item v-if="store.has('change:view')" command="changes">
                       变更记录
@@ -3018,6 +2999,272 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         />
 
         <el-tabs v-model="activeTab" style="margin-top: 14px">
+          <el-tab-pane label="阶段" name="plan">
+            <!-- 有阶段：阶段条 + 选中阶段概要 + 该阶段的任务表；没阶段则给空态 -->
+            <template v-if="stageRows.length">
+              <!-- 阶段条：所有阶段横向平铺，默认停在第一个阶段 -->
+              <div class="stage-bar">
+                <button
+                  v-for="row in stageRows"
+                  :key="String(row.id)"
+                  type="button"
+                  class="stage-chip"
+                  :class="{ 'is-active': String(row.id) === String(activeStage?.id) }"
+                  @click="selectStage(row)"
+                >
+                  <span class="stage-chip-name">{{ row.stageName }}</span>
+                  <span class="stage-chip-count">{{ tasksOfStage(row.id).length }}</span>
+                </button>
+                <el-button
+                  class="stage-bar-add"
+                  size="small"
+                  text
+                  :disabled="!canManageNode"
+                  @click="openStage()"
+                >
+                  + 新增阶段
+                </el-button>
+              </div>
+
+              <!-- 选中阶段：阶段自身的指标与操作都收在这一条里，下面的表只放该阶段的任务 -->
+              <div v-if="activeStage" class="stage-summary">
+                <div class="stage-summary-main">
+                  <div class="cell-main">
+                    {{ activeStage.stageName }}
+                    <el-tag
+                      v-if="!activeStage.__pseudo"
+                      size="small"
+                      effect="plain"
+                      :type="dictOf(NODE_STATUS, activeStage.status).type"
+                    >
+                      {{ dictOf(NODE_STATUS, activeStage.status).label }}
+                    </el-tag>
+                  </div>
+                  <div class="stage-summary-meta">
+                    <template v-if="activeStage.__pseudo">未绑定阶段的任务，编辑任务即可挂到阶段上</template>
+                    <template v-else>
+                      <template v-if="activeStage.ownerId">
+                        负责人 {{ activeStage.ownerName || userName(activeStage.ownerId) }} ·
+                      </template>
+                      权重 {{ activeStage.weight }} ·
+                      <span
+                        :class="{
+                          'doc-missing': createOptions.stageDocRequired && !docCount(activeStage.id)
+                        }"
+                      >
+                        文档 {{ docCount(activeStage.id) }}
+                      </span>
+                      · {{ activeStageTasks.length }} 个任务 ·
+                      工时 {{ hoursText(stageHours(activeStage).plan, stageHours(activeStage).actual) }} ·
+                      <template v-if="activeStage.planStart || activeStage.planEnd">
+                        {{ activeStage.planStart || '—' }} ~ {{ activeStage.planEnd || '—' }}
+                        <span v-if="daySpan(activeStage.planStart, activeStage.planEnd)" class="date-span">
+                          {{ daySpan(activeStage.planStart, activeStage.planEnd) }}
+                        </span>
+                      </template>
+                      <span v-else class="muted">未排期</span>
+                    </template>
+                  </div>
+                </div>
+                <div v-if="!activeStage.__pseudo" class="stage-summary-progress">
+                  <span class="progress-track">
+                    <span class="progress-fill" :style="{ width: progressWidth(activeStage) }"></span>
+                  </span>
+                  <b>{{ Math.round(Number(activeStage.progress || 0)) }}%</b>
+                </div>
+                <div v-if="!activeStage.__pseudo" class="plan-ops">
+                  <el-button
+                    size="small"
+                    type="primary"
+                    plain
+                    :disabled="!canEditStageTasks(activeStage)"
+                    @click="openTask(undefined, String(activeStage.id))"
+                  >
+                    新建任务
+                  </el-button>
+                  <el-button
+                    size="small"
+                    text
+                    :disabled="!canManageNode || activeStage.status === 'DONE'"
+                    @click="finishStage(activeStage)"
+                  >
+                    完成
+                  </el-button>
+                  <el-button size="small" text :disabled="!canManageNode" @click="openStage(activeStage)">
+                    编辑
+                  </el-button>
+                  <el-button
+                    size="small"
+                    text
+                    type="danger"
+                    :disabled="!canManageNode"
+                    @click="removeStage(activeStage)"
+                  >
+                    删除
+                  </el-button>
+                </div>
+              </div>
+
+              <el-table :data="activeStageTasks" size="small" row-key="id" class="plan-table">
+                <template #empty>
+                  <el-empty description="这个阶段还没有任务" :image-size="64">
+                    <el-button
+                      v-if="activeStage && !activeStage.__pseudo && canEditStageTasks(activeStage)"
+                      size="small"
+                      type="primary"
+                      @click="openTask(undefined, String(activeStage.id))"
+                    >
+                      新建任务
+                    </el-button>
+                  </el-empty>
+                </template>
+                <el-table-column label="任务" min-width="220">
+                  <template #default="{ row }">
+                    <div class="plan-name">
+                      <div class="plan-name-text">
+                        <div class="cell-main">{{ row.taskName }}</div>
+                        <div v-if="row.taskCode" class="cell-sub">{{ row.taskCode }}</div>
+                      </div>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="负责人" width="110">
+                  <template #default="{ row }">{{ row.ownerName || userName(row.ownerId) }}</template>
+                </el-table-column>
+                <el-table-column width="104" align="center">
+                  <template #header>
+                    <el-tooltip
+                      content="计划 = 任务计划工时合计；实际来自工作日志（日志里选中该任务后自动累计），未填报时只显示计划"
+                      placement="top"
+                    >
+                      <span class="col-help">工时</span>
+                    </el-tooltip>
+                  </template>
+                  <template #default="{ row }">
+                    <span class="num-cell">{{ hoursText(row.planHours, row.actualHours) }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="进度" width="130">
+                  <template #header>
+                    <el-tooltip
+                      content="进度 = 工作日志实际工时 / 计划工时，写日志就自动推进；点「完成」可直接置 100%"
+                      placement="top"
+                    >
+                      <span class="col-help">进度</span>
+                    </el-tooltip>
+                  </template>
+                  <template #default="{ row }">
+                    <div class="progress-cell">
+                      <span class="progress-track">
+                        <span class="progress-fill" :style="{ width: progressWidth(row) }"></span>
+                      </span>
+                      <b>{{ Math.round(Number(row.progress || 0)) }}%</b>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="状态" width="88">
+                  <template #default="{ row }">
+                    <el-tag size="small" effect="plain" :type="dictOf(NODE_STATUS, row.status).type">
+                      {{ dictOf(NODE_STATUS, row.status).label }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="操作" width="150">
+                  <template #default="{ row }">
+                    <div class="ops-cell">
+                      <el-button
+                        link
+                        type="primary"
+                        :disabled="!canProgressTask(row) || row.status === 'DONE'"
+                        @click="finishTask(row)"
+                      >
+                        完成
+                      </el-button>
+                      <el-button link type="primary" :disabled="!canEditTask(row)" @click="openTask(row)">
+                        编辑
+                      </el-button>
+                      <el-button link type="danger" :disabled="!canEditTask(row)" @click="removeTask(row)">
+                        删除
+                      </el-button>
+                    </div>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </template>
+            <el-empty v-else description="还没有阶段，建议按「需求 / 开发 / 测试 / 上线」拆分" :image-size="64">
+              <el-button v-if="canManageNode" size="small" type="primary" @click="openStage()">
+                新增阶段
+              </el-button>
+            </el-empty>
+          </el-tab-pane>
+
+          <el-tab-pane label="里程碑" name="milestones">
+            <div class="plan-head">
+              <div class="plan-title">
+                <h4>里程碑</h4>
+                <span class="count-chip">{{ milestones.length }}</span>
+                <span class="plan-tip">关键交付节点，达成后记录实际日期</span>
+              </div>
+              <div class="plan-ops">
+                <el-button size="small" type="primary" :disabled="!canManageNode" @click="openMilestone()">
+                  新增里程碑
+                </el-button>
+              </div>
+            </div>
+            <el-table :data="milestones" size="small" class="plan-table">
+              <template #empty>
+                <el-empty description="还没有里程碑，用来标注关键交付节点" :image-size="64">
+                  <el-button v-if="canManageNode" size="small" type="primary" @click="openMilestone()">
+                    新增里程碑
+                  </el-button>
+                </el-empty>
+              </template>
+              <el-table-column label="里程碑" min-width="220">
+                <template #default="{ row }">
+                  <div class="plan-name-text">
+                    <div class="cell-main">{{ row.milestoneName }}</div>
+                    <div class="cell-sub ms-sub">
+                      计划 {{ row.planDate || '—' }}
+                      <span v-if="overdueDays(row)" class="overdue">逾期 {{ overdueDays(row) }} 天</span>
+                    </div>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="负责人" width="100">
+                <template #default="{ row }">{{ row.ownerName || userName(row.ownerId) }}</template>
+              </el-table-column>
+              <el-table-column label="达成情况" width="180">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="plain" :type="dictOf(MILESTONE_STATUS, row.status).type">
+                    {{ dictOf(MILESTONE_STATUS, row.status).label }}
+                  </el-tag>
+                  <span v-if="row.actualDate" class="date-span">{{ row.actualDate }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="150">
+                <template #default="{ row }">
+                  <div class="ops-cell">
+                    <el-button
+                      v-if="row.status !== 'REACHED'"
+                      link
+                      type="primary"
+                      :disabled="!canManageNode"
+                      @click="achieveMilestone(row)"
+                    >
+                      达成
+                    </el-button>
+                    <el-button link type="primary" :disabled="!canManageNode" @click="openMilestone(row)">
+                      编辑
+                    </el-button>
+                    <el-button link type="danger" :disabled="!canManageNode" @click="removeMilestone(row)">
+                      删除
+                    </el-button>
+                  </div>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-tab-pane>
+
           <el-tab-pane label="团队" name="team">
             <div class="block-head">
               <h4>项目经理</h4>
@@ -3145,250 +3392,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                   >
                     移出
                   </el-button>
-                </template>
-              </el-table-column>
-            </el-table>
-          </el-tab-pane>
-
-          <el-tab-pane label="计划" name="plan">
-            <div class="plan-head">
-              <div class="plan-title">
-                <h4>阶段</h4>
-                <span class="count-chip">{{ stages.length }}</span>
-                <span class="plan-tip">展开阶段维护任务，进度行内调整会级联重算项目进度</span>
-              </div>
-              <div class="plan-ops">
-                <el-button
-                  size="small"
-                  text
-                  :disabled="!expandableKeys.length"
-                  @click="toggleExpandAll"
-                >
-                  {{ allExpanded ? '收起全部' : '展开全部' }}
-                </el-button>
-                <el-button size="small" type="primary" :disabled="!canManageNode" @click="openStage()">
-                  新增阶段
-                </el-button>
-              </div>
-            </div>
-            <el-table
-              :data="planTree"
-              size="small"
-              row-key="__key"
-              class="plan-table"
-              :row-class-name="planRowClass"
-              :expand-row-keys="expandKeys"
-              :tree-props="{ children: 'children' }"
-              @expand-change="onExpandChange"
-            >
-              <template #empty>
-                <el-empty description="还没有阶段，建议按「需求 / 开发 / 测试 / 上线」拆分" :image-size="64">
-                  <el-button v-if="canManageNode" size="small" type="primary" @click="openStage()">新增阶段</el-button>
-                </el-empty>
-              </template>
-              <el-table-column label="阶段 / 任务" min-width="300">
-                <template #default="{ row }">
-                  <div class="plan-name">
-                    <span v-if="row.__kind === 'task'" class="plan-bullet"></span>
-                    <div class="plan-name-text">
-                      <div class="cell-main">
-                        <el-tag
-                          v-if="row.__kind === 'task' && taskTypeMeta(row.taskType)"
-                          size="small"
-                          effect="plain"
-                          :type="taskTypeMeta(row.taskType)!.type"
-                          class="task-type-tag"
-                        >
-                          {{ taskTypeMeta(row.taskType)!.label }}
-                        </el-tag>
-                        {{ row.__kind === 'task' ? row.taskName : row.stageName }}
-                      </div>
-                      <div class="cell-sub">
-                        <template v-if="row.__kind === 'stage'">
-                          <template v-if="row.ownerId">
-                            负责人 {{ row.ownerName || userName(row.ownerId) }} ·
-                          </template>
-                          权重 {{ row.weight }} ·
-                          <span :class="{ 'doc-missing': createOptions.stageDocRequired && !docCount(row.id) }">
-                            文档 {{ docCount(row.id) }}
-                          </span>
-                          · {{ tasksOfStage(row.id).length }} 个任务
-                        </template>
-                        <template v-else-if="row.__kind === 'pseudo'">未绑定阶段的任务</template>
-                        <template v-else>
-                          负责人 {{ row.ownerName || userName(row.ownerId) }} ·
-                          {{ row.taskCode || '—' }}
-                        </template>
-                      </div>
-                    </div>
-                  </div>
-                </template>
-              </el-table-column>
-              <el-table-column label="计划起止" width="214">
-                <template #default="{ row }">
-                  <div v-if="row.planStart || row.planEnd" class="cell-main num-cell date-range">
-                    {{ row.planStart || '—' }} ~ {{ row.planEnd || '—' }}
-                    <span v-if="daySpan(row.planStart, row.planEnd)" class="date-span">
-                      {{ daySpan(row.planStart, row.planEnd) }}
-                    </span>
-                  </div>
-                  <span v-else class="muted">{{ row.__pseudo ? '—' : '未排期' }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column width="104" align="center">
-                <template #header>
-                  <el-tooltip
-                    content="计划 = 任务计划工时合计；实际来自工作日志（日志里选中该任务后自动累计），未填报时只显示计划"
-                    placement="top"
-                  >
-                    <span class="col-help">工时</span>
-                  </el-tooltip>
-                </template>
-                <template #default="{ row }">
-                  <span v-if="row.__kind === 'task'" class="num-cell">
-                    {{ hoursText(row.planHours, row.actualHours) }}
-                  </span>
-                  <span v-else-if="row.__kind === 'stage'" class="num-cell">
-                    {{ hoursText(stageHours(row).plan, stageHours(row).actual) }}
-                  </span>
-                  <span v-else class="muted">—</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="进度" width="140">
-                <template #default="{ row }">
-                  <el-input-number
-                    v-if="row.__kind === 'task'"
-                    size="small"
-                    :min="0"
-                    :max="100"
-                    :step="5"
-                    controls-position="right"
-                    :disabled="!canProgressTask(row)"
-                    :model-value="Number(row.progress || 0)"
-                    @change="(value: any) => setTaskProgress(row, Number(value || 0))"
-                  />
-                  <div v-else-if="row.__kind === 'stage'" class="progress-cell">
-                    <span class="progress-track">
-                      <span class="progress-fill" :style="{ width: progressWidth(row) }"></span>
-                    </span>
-                    <b>{{ Math.round(Number(row.progress || 0)) }}%</b>
-                  </div>
-                  <span v-else class="muted">—</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="状态" width="88">
-                <template #default="{ row }">
-                  <el-tag
-                    v-if="row.__kind !== 'pseudo'"
-                    size="small"
-                    effect="plain"
-                    :type="dictOf(NODE_STATUS, row.status).type"
-                  >
-                    {{ dictOf(NODE_STATUS, row.status).label }}
-                  </el-tag>
-                  <span v-else class="muted">—</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="操作" width="190">
-                <template #default="{ row }">
-                  <span v-if="row.__kind === 'pseudo'" class="muted">—</span>
-                  <div v-else-if="row.__kind === 'stage'" class="ops-cell">
-                    <el-button
-                      link
-                      type="primary"
-                      :disabled="!canEditStageTasks(row)"
-                      @click="openTask(undefined, String(row.id))"
-                    >
-                      新建任务
-                    </el-button>
-                    <el-button
-                      link
-                      type="primary"
-                      :disabled="!canManageNode || row.status === 'DONE'"
-                      @click="finishStage(row)"
-                    >
-                      完成
-                    </el-button>
-                    <el-button link type="primary" :disabled="!canManageNode" @click="openStage(row)">
-                      编辑
-                    </el-button>
-                    <el-button link type="danger" :disabled="!canManageNode" @click="removeStage(row)">
-                      删除
-                    </el-button>
-                  </div>
-                  <div v-else class="ops-cell">
-                    <el-button link type="primary" :disabled="!canEditTask(row)" @click="openTask(row)">
-                      编辑
-                    </el-button>
-                    <el-button link type="danger" :disabled="!canEditTask(row)" @click="removeTask(row)">
-                      删除
-                    </el-button>
-                  </div>
-                </template>
-              </el-table-column>
-            </el-table>
-
-            <div class="plan-head plan-head-gap">
-              <div class="plan-title">
-                <h4>里程碑</h4>
-                <span class="count-chip">{{ milestones.length }}</span>
-                <span class="plan-tip">关键交付节点，达成后记录实际日期</span>
-              </div>
-              <div class="plan-ops">
-                <el-button size="small" type="primary" :disabled="!canManageNode" @click="openMilestone()">
-                  新增里程碑
-                </el-button>
-              </div>
-            </div>
-            <el-table :data="milestones" size="small" class="plan-table">
-              <template #empty>
-                <el-empty description="还没有里程碑，用来标注关键交付节点" :image-size="64">
-                  <el-button v-if="canManageNode" size="small" type="primary" @click="openMilestone()">
-                    新增里程碑
-                  </el-button>
-                </el-empty>
-              </template>
-              <el-table-column label="里程碑" min-width="220">
-                <template #default="{ row }">
-                  <div class="plan-name-text">
-                    <div class="cell-main">{{ row.milestoneName }}</div>
-                    <div class="cell-sub ms-sub">
-                      计划 {{ row.planDate || '—' }}
-                      <span v-if="overdueDays(row)" class="overdue">逾期 {{ overdueDays(row) }} 天</span>
-                    </div>
-                  </div>
-                </template>
-              </el-table-column>
-              <el-table-column label="负责人" width="100">
-                <template #default="{ row }">{{ row.ownerName || userName(row.ownerId) }}</template>
-              </el-table-column>
-              <el-table-column label="达成情况" width="180">
-                <template #default="{ row }">
-                  <el-tag size="small" effect="plain" :type="dictOf(MILESTONE_STATUS, row.status).type">
-                    {{ dictOf(MILESTONE_STATUS, row.status).label }}
-                  </el-tag>
-                  <span v-if="row.actualDate" class="date-span">{{ row.actualDate }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="操作" width="150">
-                <template #default="{ row }">
-                  <div class="ops-cell">
-                    <el-button
-                      v-if="row.status !== 'REACHED'"
-                      link
-                      type="primary"
-                      :disabled="!canManageNode"
-                      @click="achieveMilestone(row)"
-                    >
-                      达成
-                    </el-button>
-                    <el-button link type="primary" :disabled="!canManageNode" @click="openMilestone(row)">
-                      编辑
-                    </el-button>
-                    <el-button link type="danger" :disabled="!canManageNode" @click="removeMilestone(row)">
-                      删除
-                    </el-button>
-                  </div>
                 </template>
               </el-table-column>
             </el-table>
@@ -4040,21 +4043,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           <el-input v-model="taskForm.taskName" maxlength="200" show-word-limit placeholder="如：接口联调 / 回归测试" />
         </div>
         <div class="field">
-          <label>任务类型</label>
-          <el-select v-model="taskForm.taskType" clearable placeholder="未分类">
-            <el-option
-              v-for="(meta, value) in TASK_TYPE"
-              :key="value"
-              :label="meta.label"
-              :value="value"
-            />
-          </el-select>
-        </div>
-        <div class="field">
           <label>所属阶段</label>
-          <el-select v-model="taskForm.stageId" clearable placeholder="未分阶段">
+          <!-- 新建必然发生在当前阶段里，不用再选一遍；编辑时才允许把任务挪到别的阶段 -->
+          <el-select v-if="taskForm.id" v-model="taskForm.stageId" clearable placeholder="未分阶段">
             <el-option v-for="item in stages" :key="item.id" :label="item.stageName" :value="String(item.id)" />
           </el-select>
+          <div v-else class="field-static">{{ stageNameById(taskForm.stageId) }}</div>
         </div>
         <div class="field">
           <label>负责人</label>
@@ -4080,10 +4074,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="field">
           <label>计划工时（h）</label>
           <el-input-number v-model="taskForm.planHours" :min="0" :step="0.5" />
-        </div>
-        <div class="field">
-          <label>权重</label>
-          <el-input-number v-model="taskForm.weight" :min="0" :step="0.1" />
         </div>
         <div class="field">
           <label>优先级</label>
@@ -4384,12 +4374,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .cell-main {
   font-weight: 500;
   color: var(--pms-text);
-}
-
-/* 任务类型标签：跟在任务名前面，不影响阶段行 */
-.task-type-tag {
-  margin-right: 6px;
-  vertical-align: 1px;
 }
 
 .cell-sub {
@@ -4714,6 +4698,19 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
 .field.span-2 {
   grid-column: span 2;
+}
+
+/* 只读字段（如新建任务时的「所属阶段」）：和输入框同高，视觉上不塌 */
+.field-static {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--pms-line-soft);
+  border-radius: 4px;
+  background: #f7f9fc;
+  font-size: 13px;
+  color: var(--pms-text-2);
 }
 
 .field :deep(.el-date-editor),
@@ -5247,10 +5244,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   border-bottom: 1px solid var(--pms-line-soft);
 }
 
-.plan-head-gap {
-  margin-top: 20px;
-}
-
 .plan-title {
   display: flex;
   align-items: center;
@@ -5316,10 +5309,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   font-weight: 600;
 }
 
-.date-range {
-  font-size: 12.5px;
-}
-
 .date-span {
   margin-left: 6px;
   font-size: 11.5px;
@@ -5363,7 +5352,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--pms-text-3);
 }
 
-/* ---------------- 计划：树形行（阶段 → 任务） ---------------- */
+/* ---------------- 计划：阶段条 + 任务表（阶段与任务平铺，不再嵌套） ---------------- */
 .plan-name {
   display: flex;
   align-items: flex-start;
@@ -5371,80 +5360,157 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   min-width: 0;
 }
 
-.plan-bullet {
-  flex: none;
-  margin-top: 7px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--pms-primary);
-  opacity: 0.6;
-}
-
 .plan-name-text {
   min-width: 0;
 }
 
-.plan-table :deep(.el-table__row--level-0) .cell-main {
-  font-weight: 600;
-}
-
-.plan-table :deep(.el-table__row--level-1) .cell-main {
-  font-weight: 400;
-  color: var(--pms-text-2);
-}
-
-/* 阶段行浅底 + 左侧细色条，任务行纯白，层级清楚但不压视觉 */
-.plan-table :deep(.plan-row-stage > td.el-table__cell) {
-  background: #f5f8fd;
-}
-
-.plan-table :deep(.plan-row-stage > td.el-table__cell:first-child) {
-  box-shadow: inset 2px 0 0 #cfe0f7;
-}
-
-.plan-table :deep(.plan-row-stage:hover > td.el-table__cell) {
-  background: #eef4fc;
-}
-
-.plan-table :deep(.plan-row-task > td.el-table__cell) {
-  background: #fff;
-}
-
-.plan-table :deep(.plan-row-task:hover > td.el-table__cell) {
-  background: #fafcff;
-}
-
-/* 展开箭头：垂直居中、圆形点击区、缩小缩进 */
-.plan-table :deep(td.el-table__cell:first-child .cell) {
+/* 阶段条：放不下就横向滚动，阶段再多也不会挤爆主页签 */
+.stage-bar {
   display: flex;
   align-items: center;
-  min-width: 0;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 
-.plan-table :deep(.el-table__expand-icon) {
-  flex: none;
+.stage-chip {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  margin-right: 6px;
-  border-radius: 50%;
-  color: var(--pms-text-3);
-  font-size: 11px;
+  gap: 6px;
+  flex: none;
+  max-width: 220px;
+  padding: 5px 10px;
+  border: 1px solid var(--pms-line-soft);
+  border-radius: 14px;
+  background: #fff;
+  color: var(--pms-text-2);
+  font-size: 12.5px;
+  line-height: 1.4;
+  cursor: pointer;
   transition:
+    border-color 0.16s ease,
     background-color 0.16s ease,
     color 0.16s ease;
 }
 
-.plan-table :deep(.el-table__expand-icon:hover) {
-  background: #e7eefb;
+.stage-chip:hover {
+  border-color: var(--pms-primary);
   color: var(--pms-primary-deep);
 }
 
-.plan-table :deep(.el-table__indent) {
-  padding-left: 12px !important;
+.stage-chip.is-active {
+  border-color: var(--pms-primary);
+  background: var(--pms-primary-weak);
+  color: var(--pms-primary-deep);
+  font-weight: 600;
+}
+
+.stage-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* 中文按行高垂直居中，避免和后面的数字胶囊基线错位 */
+  line-height: 18px;
+}
+
+/* 数字胶囊：用 flex 居中而不是行高，中英文混排时数字才和文字齐平 */
+.stage-chip-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #eef2f8;
+  color: var(--pms-text-3);
+  font-size: 11px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.stage-chip.is-active .stage-chip-count {
+  background: #fff;
+  color: var(--pms-primary-deep);
+}
+
+/* 新增阶段收在阶段条末尾，不再单独占一行标题 */
+.stage-bar-add {
+  flex: none;
+  margin-left: 2px;
+  padding: 0 4px;
+  color: var(--pms-primary-deep);
+}
+
+/* 选中阶段概要：阶段指标 + 进度 + 阶段操作集中在一条，下面的表格只放任务 */
+.stage-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--pms-line-soft);
+  border-left: 2px solid #cfe0f7;
+  border-radius: 6px;
+  background: #f5f8fd;
+}
+
+.stage-summary-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  flex: 1 1 auto;
+  gap: 8px 14px;
+  min-width: 0;
+}
+
+/* 概要条内不再靠 auto margin 顶开，靠 main 占满剩余宽度，进度与操作固定靠右 */
+.stage-summary .plan-ops {
+  margin-left: 0;
+}
+
+.stage-summary .cell-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 阶段指标压缩成一行，长文案自动折到第二行，不再占三行高度 */
+.stage-summary-meta {
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--pms-text-3);
+}
+
+.stage-summary-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  width: 160px;
+}
+
+.stage-summary-progress .progress-track {
+  flex: 1;
+}
+
+.stage-summary-progress b {
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 任务行第一列：正常垂直居中，不再需要展开箭头的定位 */
+.plan-table :deep(td.el-table__cell:first-child .cell) {
+  display: flex;
+  align-items: center;
+  min-width: 0;
 }
 
 /* 操作列：等距排列，去掉 el-button 默认 margin 造成的前后不齐 */
