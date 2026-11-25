@@ -380,6 +380,11 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
         "PROJECT",
         (
             "org:user:view",
+            # 产品经理要能录客户 / 原始需求 / 商机（可见范围仍按 PROJECT 收敛到本部门）
+            "crm:customer:view",
+            "crm:customer:manage",
+            "crm:opp:view",
+            "crm:opp:manage",
             "project:create",
             "project:view",
             "project:edit",
