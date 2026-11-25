@@ -13,12 +13,10 @@ import {
   changeRiskStatus,
   confirmWeekly,
   convertProjectAlert,
-  createMilestone,
   createProject,
   createRisk,
   createStage,
   createTask,
-  deleteMilestone,
   deleteProjectFile,
   deleteRisk,
   deleteStage,
@@ -29,14 +27,12 @@ import {
   ignoreProjectAlert,
   listBaselines,
   listMembers,
-  listMilestones,
   listProjectAlerts,
   listProjects,
   listRisks,
   listStages,
   listTasks,
   listWeeklies,
-  milestoneStatus,
   projectAttachments,
   projectDetail,
   projectDirectors,
@@ -48,7 +44,6 @@ import {
   setProjectDirectors,
   stageStatus,
   submitProject,
-  updateMilestone,
   updateProject,
   updateProjectMember,
   updateRisk,
@@ -77,7 +72,6 @@ import {
   HEALTH_KEY,
   HEALTH_STATUS,
   MEMBER_ROLE,
-  MILESTONE_STATUS,
   NODE_STATUS,
   PRIORITY,
   PROJECT_STATUS,
@@ -322,7 +316,6 @@ const retroDuePassed = computed(() => {
 const activeTab = ref('plan')
 const stages = ref<any[]>([])
 const tasks = ref<any[]>([])
-const milestones = ref<any[]>([])
 const members = ref<any[]>([])
 const newPmId = ref('')
 const addMemberIds = ref<string[]>([])
@@ -336,7 +329,7 @@ const memberCandidates = computed(() => {
 const canManageStage = computed(() => store.has('project:stage:edit'))
 /** 当前用户是否本项目的项目经理 / PMO（由详情接口下发，避免点了才报 40301）。 */
 const canManage = computed(() => Boolean(detail.value.canManage))
-/** 阶段 / 里程碑既要有功能权限，也要是本项目管理者。 */
+/** 阶段维护既要有功能权限，也要是本项目管理者。 */
 const canManageNode = computed(() => canManageStage.value && canManage.value)
 /** 成员维护（加人/改组内角色/移出）：`project:edit` + 本项目管理者，后端同样校验。 */
 const canManageMembers = computed(() => canEdit.value && canManage.value)
@@ -345,7 +338,7 @@ const directorIds = ref<string[]>([])
 const docs = ref<any[]>([])
 const docFilter = ref('')
 const docKeyword = ref('')
-const docUploadTarget = ref<'PROJECT' | 'STAGE' | 'MILESTONE' | 'OTHER'>('PROJECT')
+const docUploadTarget = ref<'PROJECT' | 'STAGE' | 'OTHER'>('PROJECT')
 const docUploadBizId = ref('')
 const uploading = ref(false)
 const stageVisible = ref(false)
@@ -454,7 +447,7 @@ const loadRisks = async () => {
 
 /* ------------------------------ 风险预警（只读建议） ------------------------------ */
 /**
- * 预警来自进度延期、里程碑逾期与日志问题，不直接进风险台账：
+ * 预警来自进度延期与日志问题，不直接进风险台账：
  * 由 PM/PMO 确认「转为风险」后才计入未关闭风险与健康度，或忽略 7 天。
  */
 const alerts = ref<any[]>([])
@@ -484,7 +477,8 @@ const loadAlerts = async () => {
   alertsLoading.value = true
   try {
     const data = await listProjectAlerts(detail.value.id)
-    alerts.value = data.list || []
+    // 里程碑已从界面下线：后端仍会按历史数据推导逾期预警，这里过滤掉无法处理的条目
+    alerts.value = (data.list || []).filter((item: any) => item.source !== 'MILESTONE')
   } catch {
     alerts.value = []
   } finally {
@@ -709,7 +703,6 @@ const DOC_TABS = [
   { key: '', label: '全部' },
   { key: 'PROJECT', label: '项目文档' },
   { key: 'STAGE', label: '阶段文档' },
-  { key: 'MILESTONE', label: '里程碑文档' },
   { key: 'OTHER', label: '其他' }
 ]
 const docTagType = (bizType: string): 'info' | 'success' | 'warning' | 'primary' => {
@@ -721,16 +714,13 @@ const docTagType = (bizType: string): 'info' | 'success' | 'warning' | 'primary'
 const docCountOf = (type: string) =>
   type ? docs.value.filter((item) => item.bizType === type).length : docs.value.length
 
-/** 归属节点名称：阶段 / 里程碑被删除时给出兜底文案。 */
+/** 归属节点名称：阶段被删除时给出兜底文案；里程碑已停用，仅保留历史文档展示。 */
 const docScopeName = (row: any) => {
   if (row.bizType === 'STAGE') {
     const hit = stages.value.find((item) => String(item.id) === String(row.bizId))
     return hit ? hit.stageName : '阶段已删除'
   }
-  if (row.bizType === 'MILESTONE') {
-    const hit = milestones.value.find((item) => String(item.id) === String(row.bizId))
-    return hit ? hit.milestoneName : '里程碑已删除'
-  }
+  if (row.bizType === 'MILESTONE') return '里程碑（已停用）'
   return ''
 }
 
@@ -834,7 +824,7 @@ const daySpan = (start?: string, end?: string) => {
   return `${Math.round(days) + 1} 天`
 }
 
-/** 里程碑逾期天数：未达成且计划日已过。 */
+/** 逾期天数：计划日已过且未完成。 */
 const overdueDays = (row: any) => {
   if (!row?.planDate || row.status === 'REACHED') return 0
   const plan = new Date(`${row.planDate}T00:00:00`).getTime()
@@ -978,25 +968,6 @@ const removeStage = async (row: any) => {
   stages.value = await listStages(detail.value.id)
 }
 
-const achieveMilestone = async (row: any) => {
-  const reason = await askChangeReason(`里程碑达成「${row.milestoneName}」`)
-  if (!reason) return
-  await milestoneStatus(detail.value.id, row.id, 'REACHED', reason)
-  milestones.value = await listMilestones(detail.value.id)
-}
-
-const removeMilestone = async (row: any) => {
-  try {
-    await ElMessageBox.confirm(`确认删除里程碑「${row.milestoneName}」？`, '提示', { type: 'warning' })
-  } catch {
-    return
-  }
-  const reason = await askChangeReason(`删除里程碑「${row.milestoneName}」`)
-  if (!reason) return
-  await deleteMilestone(detail.value.id, row.id, reason)
-  milestones.value = await listMilestones(detail.value.id)
-}
-
 /**
  * 项目总监：选中/移除即保存，不再需要「保存总监」按钮。
  *
@@ -1040,7 +1011,7 @@ const doUpload = async (options: any) => {
     return
   }
   if (!['PROJECT', 'OTHER'].includes(docUploadTarget.value) && !docUploadBizId.value) {
-    ElMessage.warning(`请先选择${docUploadTarget.value === 'STAGE' ? '所属阶段' : '所属里程碑'}`)
+    ElMessage.warning('请先选择所属阶段')
     return
   }
   uploading.value = true
@@ -1138,7 +1109,6 @@ const refreshAll = async () => {
     detail.value = await projectDetail(detail.value.id)
     stages.value = await listStages(detail.value.id)
     tasks.value = await listTasks(detail.value.id)
-    milestones.value = await listMilestones(detail.value.id)
     members.value = await listMembers(detail.value.id)
     await loadNodeData()
     await loadRisks()
@@ -1323,7 +1293,6 @@ const loadDetail = async (id: string, tab?: unknown) => {
     addMemberIds.value = []
     stages.value = await listStages(id)
     tasks.value = await listTasks(id)
-    milestones.value = await listMilestones(id)
     members.value = await listMembers(id)
     await loadNodeData()
     riskFilter.value = ''
@@ -1339,7 +1308,7 @@ const loadDetail = async (id: string, tab?: unknown) => {
     // 标签栏与面包屑改用项目名，同时打开多个项目时不再是一排「项目详情」
     setPageTitle(pagePath, String(detail.value.projectName || ''))
     const target = typeof tab === 'string' ? tab : 'plan'
-    const allowed = new Set(['team', 'plan', 'milestones', 'risks', 'issues', 'docs'])
+    const allowed = new Set(['team', 'plan', 'risks', 'issues', 'docs'])
     if (store.has('change:view')) allowed.add('changes')
     if (canViewWeekly.value) allowed.add('weekly')
     activeTab.value = allowed.has(target) ? target : 'plan'
@@ -2026,7 +1995,7 @@ const groupUsers = (preferred: Set<string>) => ({
   rest: users.value.filter((user) => !preferred.has(String(user.id)))
 })
 
-/** 项目内负责人候选（任务 / 里程碑 / 阶段通用）：项目组成员与项目经理排前面。 */
+/** 项目内负责人候选（任务 / 阶段通用）：项目组成员与项目经理排前面。 */
 const ownerOptions = computed(() => {
   const preferred = new Set<string>(members.value.map((item: any) => String(item.userId)))
   if (detail.value.pmId) preferred.add(String(detail.value.pmId))
@@ -2186,55 +2155,6 @@ const setTaskProgress = async (row: any, value: number) => {
 const finishTask = async (row: any) => {
   await setTaskProgress(row, 100)
   ElMessage.success(`任务「${row.taskName}」已标记完成`)
-}
-
-/* 里程碑：新增 / 编辑 / 达成 / 删除 */
-const milestoneVisible = ref(false)
-const milestoneForm = ref<any>({ id: '', milestoneName: '', planDate: '', ownerId: '' })
-
-const openMilestone = (row?: any) => {
-  milestoneForm.value = row
-    ? {
-        id: String(row.id),
-        milestoneName: row.milestoneName,
-        planDate: row.planDate || '',
-        ownerId: row.ownerId ? String(row.ownerId) : ''
-      }
-    : {
-        id: '',
-        milestoneName: '',
-        planDate: detail.value.planEnd || '',
-        ownerId: String(store.profile?.id || '')
-      }
-  milestoneVisible.value = true
-}
-
-const saveMilestone = async () => {
-  if (!milestoneForm.value.milestoneName.trim()) {
-    ElMessage.warning('请填写里程碑名称')
-    return
-  }
-  if (!milestoneForm.value.planDate) {
-    ElMessage.warning('请选择计划日期')
-    return
-  }
-  // 里程碑结论/日期变更会计入项目变更记录，原因必填（与阶段一致）
-  const reason = await askChangeReason(milestoneForm.value.id ? '编辑里程碑' : '新增里程碑')
-  if (!reason) return
-  const payload = {
-    milestoneName: milestoneForm.value.milestoneName.trim(),
-    planDate: milestoneForm.value.planDate,
-    ownerId: milestoneForm.value.ownerId || 0,
-    reason
-  }
-  if (milestoneForm.value.id) {
-    await updateMilestone(detail.value.id, milestoneForm.value.id, payload)
-  } else {
-    await createMilestone(detail.value.id, payload)
-  }
-  milestoneVisible.value = false
-  ElMessage.success(milestoneForm.value.id ? '里程碑已保存' : '里程碑已创建')
-  milestones.value = await listMilestones(detail.value.id)
 }
 
 /** 入口参数：`?scope=pm|member` 落到对应视角，`?create=1` 直接打开立项弹窗。 */
@@ -2447,7 +2367,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                   <el-dropdown-menu>
                     <el-dropdown-item command="team">团队</el-dropdown-item>
                     <el-dropdown-item command="plan">阶段</el-dropdown-item>
-                    <el-dropdown-item command="milestones">里程碑</el-dropdown-item>
                     <el-dropdown-item command="risks">风险</el-dropdown-item>
                     <el-dropdown-item v-if="store.has('change:view')" command="changes">
                       变更记录
@@ -3198,73 +3117,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             </el-empty>
           </el-tab-pane>
 
-          <el-tab-pane label="里程碑" name="milestones">
-            <div class="plan-head">
-              <div class="plan-title">
-                <h4>里程碑</h4>
-                <span class="count-chip">{{ milestones.length }}</span>
-                <span class="plan-tip">关键交付节点，达成后记录实际日期</span>
-              </div>
-              <div class="plan-ops">
-                <el-button size="small" type="primary" :disabled="!canManageNode" @click="openMilestone()">
-                  新增里程碑
-                </el-button>
-              </div>
-            </div>
-            <el-table :data="milestones" size="small" class="plan-table">
-              <template #empty>
-                <el-empty description="还没有里程碑，用来标注关键交付节点" :image-size="64">
-                  <el-button v-if="canManageNode" size="small" type="primary" @click="openMilestone()">
-                    新增里程碑
-                  </el-button>
-                </el-empty>
-              </template>
-              <el-table-column label="里程碑" min-width="220">
-                <template #default="{ row }">
-                  <div class="plan-name-text">
-                    <div class="cell-main">{{ row.milestoneName }}</div>
-                    <div class="cell-sub ms-sub">
-                      计划 {{ row.planDate || '—' }}
-                      <span v-if="overdueDays(row)" class="overdue">逾期 {{ overdueDays(row) }} 天</span>
-                    </div>
-                  </div>
-                </template>
-              </el-table-column>
-              <el-table-column label="负责人" width="100">
-                <template #default="{ row }">{{ row.ownerName || userName(row.ownerId) }}</template>
-              </el-table-column>
-              <el-table-column label="达成情况" width="180">
-                <template #default="{ row }">
-                  <el-tag size="small" effect="plain" :type="dictOf(MILESTONE_STATUS, row.status).type">
-                    {{ dictOf(MILESTONE_STATUS, row.status).label }}
-                  </el-tag>
-                  <span v-if="row.actualDate" class="date-span">{{ row.actualDate }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="操作" width="150">
-                <template #default="{ row }">
-                  <div class="ops-cell">
-                    <el-button
-                      v-if="row.status !== 'REACHED'"
-                      link
-                      type="primary"
-                      :disabled="!canManageNode"
-                      @click="achieveMilestone(row)"
-                    >
-                      达成
-                    </el-button>
-                    <el-button link type="primary" :disabled="!canManageNode" @click="openMilestone(row)">
-                      编辑
-                    </el-button>
-                    <el-button link type="danger" :disabled="!canManageNode" @click="removeMilestone(row)">
-                      删除
-                    </el-button>
-                  </div>
-                </template>
-              </el-table-column>
-            </el-table>
-          </el-tab-pane>
-
           <el-tab-pane label="团队" name="team">
             <div class="block-head">
               <h4>项目经理</h4>
@@ -3398,11 +3250,11 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </el-tab-pane>
 
           <el-tab-pane label="风险" name="risks">
-            <!-- 系统预警：进度/里程碑逾期、日志问题，确认后才进风险台账 -->
+            <!-- 系统预警：进度延期、日志问题，确认后才进风险台账 -->
             <div v-if="alerts.length || alertsLoading" v-loading="alertsLoading" class="alert-panel">
               <div class="alert-head">
                 <h4>待处理预警 <i>{{ alerts.length }}</i></h4>
-                <span class="block-tip">进度延期、里程碑逾期与日志问题自动推导，确认后才计入风险台账</span>
+                <span class="block-tip">进度延期与日志问题自动推导，确认后才计入风险台账</span>
                 <span class="pane-spacer"></span>
                 <el-button link type="primary" size="small" @click="loadAlerts">刷新</el-button>
               </div>
@@ -3669,7 +3521,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                   <el-select v-model="docUploadTarget" size="small" @change="docUploadBizId = ''">
                     <el-option label="项目文档" value="PROJECT" />
                     <el-option label="阶段文档" value="STAGE" />
-                    <el-option label="里程碑文档" value="MILESTONE" />
                     <el-option label="其他" value="OTHER" />
                   </el-select>
                 </div>
@@ -3684,18 +3535,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                     />
                   </el-select>
                   <span v-if="!stages.length" class="ops-hint">请先在「阶段」页签新增阶段</span>
-                </div>
-                <div v-if="docUploadTarget === 'MILESTONE'" class="field">
-                  <label>所属里程碑 <em>*</em></label>
-                  <el-select v-model="docUploadBizId" size="small" placeholder="选择里程碑">
-                    <el-option
-                      v-for="item in milestones"
-                      :key="item.id"
-                      :label="item.milestoneName"
-                      :value="String(item.id)"
-                    />
-                  </el-select>
-                  <span v-if="!milestones.length" class="ops-hint">请先在「里程碑」页签新增里程碑</span>
                 </div>
               </div>
               <el-upload
@@ -3724,7 +3563,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <template #empty>
                 <el-empty
                   :description="
-                    docKeyword || docFilter ? '没有匹配的文档' : '还没有文档，上传后按项目 / 阶段 / 里程碑归档'
+                    docKeyword || docFilter ? '没有匹配的文档' : '还没有文档，上传后按项目 / 阶段归档'
                   "
                   :image-size="64"
                 />
@@ -4088,56 +3927,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       <template #footer>
         <el-button @click="taskVisible = false">取消</el-button>
         <el-button type="primary" @click="saveTask">保存</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog
-      v-model="milestoneVisible"
-      :title="milestoneForm.id ? '编辑里程碑' : '新增里程碑'"
-      width="min(560px, 94vw)"
-      align-center
-      :close-on-click-modal="false"
-    >
-      <div class="form-grid">
-        <div class="field span-2">
-          <label>里程碑名称 <em>*</em></label>
-          <el-input v-model="milestoneForm.milestoneName" maxlength="128" placeholder="如：需求评审通过 / 提测 / 上线" />
-        </div>
-        <div class="field">
-          <label>计划日期 <em>*</em></label>
-          <el-date-picker
-            v-model="milestoneForm.planDate"
-            type="date"
-            value-format="YYYY-MM-DD"
-            placeholder="选择日期"
-            :default-value="toDate(milestoneForm.planDate) || toDate(detail.planEnd)"
-          />
-        </div>
-        <div class="field">
-          <label>负责人</label>
-          <el-select v-model="milestoneForm.ownerId" filterable clearable placeholder="选择负责人">
-            <el-option-group v-if="ownerOptions.picked.length" label="项目组成员">
-              <el-option
-                v-for="user in ownerOptions.picked"
-                :key="user.id"
-                :label="`${user.realName}（${user.username}）`"
-                :value="String(user.id)"
-              />
-            </el-option-group>
-            <el-option-group label="其他人员">
-              <el-option
-                v-for="user in ownerOptions.rest"
-                :key="user.id"
-                :label="`${user.realName}（${user.username}）`"
-                :value="String(user.id)"
-              />
-            </el-option-group>
-          </el-select>
-        </div>
-      </div>
-      <template #footer>
-        <el-button @click="milestoneVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveMilestone">保存</el-button>
       </template>
     </el-dialog>
 
@@ -5316,12 +5105,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--pms-text-3);
 }
 
-.overdue {
-  margin-left: 6px;
-  font-size: 11.5px;
-  color: var(--el-color-danger);
-}
-
 .row-more {
   margin-left: 2px;
   vertical-align: middle;
@@ -5525,12 +5308,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .plan-table :deep(.ops-cell .el-button) {
   margin-left: 0;
   padding: 0;
-}
-
-/* 里程碑：名称与计划日期之间的呼吸感 */
-.ms-sub {
-  margin-top: 6px;
-  line-height: 1.5;
 }
 
 .empty-tip {

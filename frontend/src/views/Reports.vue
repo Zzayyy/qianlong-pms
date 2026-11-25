@@ -70,19 +70,9 @@ interface StageItem {
   planEnd: string
 }
 
-interface MilestoneItem {
-  id: string
-  name: string
-  planDate: string
-  actualDate: string
-  status: string
-  delayDays: number
-}
-
 interface ProjectBoardData {
   metric: ProjectMetric
   stages: StageItem[]
-  milestones: MilestoneItem[]
 }
 
 interface TrendPoint {
@@ -296,15 +286,6 @@ const HEALTH_META: Record<string, { label: string; tone: TagType; dot: string }>
 const healthMeta = (health: string) =>
   HEALTH_META[health] || { label: health || '-', tone: 'info' as TagType, dot: 'ok' }
 
-const MILESTONE_META: Record<string, { label: string; tone: TagType }> = {
-  PENDING: { label: '待达成', tone: 'info' },
-  DELAYED: { label: '已延期', tone: 'warning' },
-  REACHED: { label: '已达成', tone: 'success' },
-  CANCELLED: { label: '已取消', tone: 'info' }
-}
-const milestoneMeta = (status: string) =>
-  MILESTONE_META[status] || { label: status || '-', tone: 'info' as TagType }
-
 const num = (value: unknown, digits = 0) => {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return '0'
@@ -513,7 +494,7 @@ onMounted(async () => {
           <Building2 :size="18" :stroke-width="1.9" />
           部门看板
         </h2>
-        <p>按部门查看项目健康度、进度、成本与日志填写情况，点击项目可下钻阶段与里程碑。</p>
+        <p>按部门查看项目健康度、进度、成本与日志填写情况，点击项目可下钻阶段进度。</p>
       </div>
       <div class="head-ops">
         <div class="ops-main">
@@ -854,32 +835,6 @@ onMounted(async () => {
               </div>
             </div>
             <el-empty v-else description="暂无阶段" :image-size="60" />
-          </section>
-
-          <section class="pd-section">
-            <h4>里程碑</h4>
-            <el-table v-if="projectData.milestones.length" :data="projectData.milestones" size="small">
-              <el-table-column prop="name" label="里程碑" min-width="160" />
-              <el-table-column label="计划日期" width="110">
-                <template #default="{ row }">{{ formatDate(row.planDate) }}</template>
-              </el-table-column>
-              <el-table-column label="实际日期" width="110">
-                <template #default="{ row }">{{ formatDate(row.actualDate) }}</template>
-              </el-table-column>
-              <el-table-column label="状态" width="100">
-                <template #default="{ row }">
-                  <el-tag :type="milestoneMeta(row.status).tone" size="small" effect="plain">
-                    {{ milestoneMeta(row.status).label }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="延期(天)" width="90">
-                <template #default="{ row }">
-                  <span :class="{ 'delay-bad': Number(row.delayDays) > 0 }">{{ row.delayDays }}</span>
-                </template>
-              </el-table-column>
-            </el-table>
-            <el-empty v-else description="暂无里程碑" :image-size="60" />
           </section>
         </template>
       </div>
