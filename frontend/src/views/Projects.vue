@@ -292,7 +292,6 @@ const retroDuePassed = computed(() => {
 const activeTab = ref('plan')
 const stages = ref<any[]>([])
 const members = ref<any[]>([])
-const newPmId = ref('')
 const addMemberIds = ref<string[]>([])
 /** 已在项目组的人不再进入「选择成员」候选，避免选完才提示添加失败。 */
 const memberCandidates = computed(() => {
@@ -1276,7 +1275,6 @@ const loadDetail = async (id: string, tab?: unknown) => {
   detailLoading.value = true
   try {
     detail.value = await projectDetail(id)
-    newPmId.value = String(detail.value.pmId || '')
     addMemberIds.value = []
     stages.value = await listStages(id)
     members.value = await listMembers(id)
@@ -1324,21 +1322,26 @@ watch(activeTab, (value) => {
 const refreshDetail = async () => {
   detail.value = await projectDetail(detail.value.id)
   members.value = await listMembers(detail.value.id)
-  newPmId.value = String(detail.value.pmId || '')
 }
 
-const doChangePm = async () => {
-  if (!newPmId.value) {
-    ElMessage.warning('请选择新的项目经理')
-    return
-  }
-  if (String(newPmId.value) === String(detail.value.pmId || '')) {
-    ElMessage.info('项目经理未变化')
-    return
-  }
-  const reason = await askChangeReason('变更项目经理')
-  if (!reason) return
-  await changeProjectPm(detail.value.id, newPmId.value, reason)
+/** 项目经理选择器回显：单选 PersonPicker 需要数组形态。 */
+const pmPickerIds = computed(() => (detail.value.pmId ? [String(detail.value.pmId)] : []))
+
+/**
+ * 项目经理改为「选完即生效」：不再需要确认按钮，留痕原因由系统按
+ * 「原负责人 → 新负责人」自动生成（后端 reason 允许为空时也会兜底）。
+ */
+const onPickPm = async (ids: string[]) => {
+  const target = String(ids?.[0] || '')
+  if (!target || target === String(detail.value.pmId || '')) return
+  await doChangePm(target)
+}
+
+const doChangePm = async (target: string) => {
+  if (!target || target === String(detail.value.pmId || '')) return
+  const before = detail.value.pmName || userName(detail.value.pmId)
+  const after = users.value.find((item) => String(item.id) === target)?.realName || '—'
+  await changeProjectPm(detail.value.id, target, `变更项目经理：${before} → ${after}`)
   ElMessage.success('项目经理已变更，原项目经理已转为普通成员')
   await refreshDetail()
   await load()
@@ -3319,72 +3322,60 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </el-tab-pane>
 
           <el-tab-pane label="项目成员" name="team">
-            <!-- 三个维护入口压成一行，把空间留给成员列表 -->
+            <!-- 三个维护入口压成一行，统一用人员选择弹窗；选完即生效，无需确认按钮 -->
             <div class="member-toolbar">
-              <template v-if="canEdit">
+              <div class="member-field">
                 <span class="member-label">项目经理</span>
-                <el-select
-                  v-model="newPmId"
-                  class="member-pm-select"
-                  filterable
+                <PersonPicker
+                  v-if="canEdit"
+                  :model-value="pmPickerIds"
+                  class="pm-picker"
                   size="small"
-                  placeholder="更换项目经理"
+                  single
+                  :users="users"
+                  :depts="depts"
+                  title="选择项目经理"
+                  placeholder="选择项目经理"
+                  @update:model-value="onPickPm"
+                />
+                <b v-else class="member-pm">{{ detail.pmName || userName(detail.pmId) }}</b>
+              </div>
+
+              <div class="member-field">
+                <el-tooltip
+                  v-if="!directorIds.length"
+                  content="未指派时无法提交变更评估"
+                  placement="top"
                 >
-                  <el-option
-                    v-for="user in users"
-                    :key="user.id"
-                    :label="`${user.realName}（${user.username}）`"
-                    :value="user.id"
-                  />
-                </el-select>
-                <el-button
+                  <span class="member-label is-warn">项目总监</span>
+                </el-tooltip>
+                <span v-else class="member-label">项目总监</span>
+                <PersonPicker
+                  v-model="directorIds"
+                  class="director-picker"
                   size="small"
-                  :disabled="String(newPmId) === String(detail.pmId)"
-                  @click="doChangePm"
-                >
-                  设为项目经理
-                </el-button>
-              </template>
-              <span v-else class="member-label">
-                项目经理
-                <b class="member-pm">{{ detail.pmName || userName(detail.pmId) }}</b>
-              </span>
+                  :users="directorPickerUsers"
+                  :depts="depts"
+                  title="选择项目总监"
+                  placeholder="选择总监"
+                  :disabled="!canEdit || !canManage"
+                />
+              </div>
 
-              <span class="member-divider" aria-hidden="true"></span>
-
-              <el-tooltip
-                v-if="!directorIds.length"
-                content="未指派时无法提交变更评估"
-                placement="top"
-              >
-                <span class="member-label is-warn">项目总监</span>
-              </el-tooltip>
-              <span v-else class="member-label">项目总监</span>
-              <PersonPicker
-                v-model="directorIds"
-                class="director-picker"
-                size="small"
-                :users="directorPickerUsers"
-                :depts="depts"
-                title="选择项目总监"
-                placeholder="未指派"
-                :disabled="!canEdit || !canManage"
-              />
-
-              <span class="member-divider" aria-hidden="true"></span>
-
-              <span class="member-label">添加成员</span>
-              <!-- 选完即入组：成员维护属项目管理动作，无权限时不可选 -->
-              <PersonPicker
-                v-model="addMemberIds"
-                class="member-picker"
-                size="small"
-                :users="memberCandidates"
-                :depts="depts"
-                title="选择要加入的成员"
-                placeholder="选择成员"
-                :disabled="!canManageMembers"
-              />
+              <div class="member-field">
+                <span class="member-label">添加成员</span>
+                <!-- 选完即入组：成员维护属项目管理动作，无权限时不可选 -->
+                <PersonPicker
+                  v-model="addMemberIds"
+                  class="member-picker"
+                  size="small"
+                  :users="memberCandidates"
+                  :depts="depts"
+                  title="选择要加入的成员"
+                  placeholder="选择成员"
+                  :disabled="!canManageMembers"
+                />
+              </div>
 
               <span class="pane-spacer"></span>
               <span class="member-count">共 {{ members.length }} 人</span>
@@ -4674,6 +4665,20 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   margin-bottom: 10px;
 }
 
+/* 每组「标签 + 选择器」自成一体，靠左侧留白与分隔线区分，避免张冠李戴 */
+.member-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.member-field + .member-field {
+  margin-left: 12px;
+  padding-left: 20px;
+  border-left: 1px solid var(--pms-line-soft, #e6ebf2);
+}
+
 .member-label {
   flex: none;
   font-size: 12.5px;
@@ -4685,27 +4690,16 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 .member-pm {
-  margin-left: 4px;
   font-weight: 600;
   color: var(--pms-text);
 }
 
-.member-divider {
-  flex: none;
-  width: 1px;
-  height: 16px;
-  background: var(--pms-line-soft, #e6ebf2);
-}
-
-.member-pm-select {
-  width: 180px;
-}
-
-.member-toolbar .member-picker,
-.member-toolbar .director-picker {
-  flex: 0 1 200px;
-  min-width: 150px;
-  max-width: 240px;
+.member-toolbar .pm-picker,
+.member-toolbar .director-picker,
+.member-toolbar .member-picker {
+  flex: 0 1 150px;
+  min-width: 120px;
+  max-width: 190px;
 }
 
 .member-count {
@@ -5040,18 +5034,29 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   }
 
   .ops-select,
-  .ops-select.narrow,
-  .member-pm-select,
-  .member-picker,
-  .director-picker {
+  .ops-select.narrow {
     flex: 1 1 100%;
     width: 100%;
     max-width: none;
   }
 
-  /* 窄屏一行放不下：隐藏分隔线，标签与控件各占一行更清爽 */
-  .member-divider {
-    display: none;
+  /* 窄屏：三个入口各占一行，选择器吃掉剩余宽度 */
+  .member-field {
+    flex: 1 1 100%;
+  }
+
+  .member-field + .member-field {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: none;
+  }
+
+  .member-toolbar .pm-picker,
+  .member-toolbar .director-picker,
+  .member-toolbar .member-picker {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: none;
   }
 
   .weekly-week {

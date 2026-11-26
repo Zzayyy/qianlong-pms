@@ -13,12 +13,15 @@ const props = withDefaults(
     /** small：与同排的 size="small" 下拉、按钮等高，用于表格上方的紧凑操作条 */
     size?: 'default' | 'small'
     disabled?: boolean
+    /** 单选：选中一人即替换原选择（如「项目经理」），默认多选 */
+    single?: boolean
   }>(),
   {
     title: '选择人员',
     placeholder: '点击选择人员',
     size: 'default',
     disabled: false,
+    single: false,
     // 兜底空数组：调用方漏初始化时也不至于整块渲染崩溃
     modelValue: () => []
   }
@@ -65,6 +68,13 @@ const open = () => {
 }
 
 const toggle = (id: string) => {
+  // 单选：点人即生效并关窗，不再进「已选」列表二次确认，避免来回闪烁
+  if (props.single) {
+    draft.value = [id]
+    emit('update:modelValue', [id])
+    visible.value = false
+    return
+  }
   const index = draft.value.indexOf(id)
   if (index >= 0) draft.value.splice(index, 1)
   else draft.value.push(id)
@@ -132,19 +142,29 @@ const confirm = () => {
     :close-on-click-modal="false"
   >
     <div class="picker-toolbar">
+      <el-select v-model="deptFilter" placeholder="全部部门" clearable filterable class="picker-dept">
+        <el-option v-for="dept in depts" :key="dept.id" :label="dept.deptName" :value="dept.id" />
+      </el-select>
       <el-input v-model="keyword" placeholder="搜索姓名 / 账号" clearable class="picker-search">
         <template #prefix>
           <el-icon><Search /></el-icon>
         </template>
       </el-input>
-      <el-select v-model="deptFilter" placeholder="全部部门" clearable filterable class="picker-dept">
-        <el-option v-for="dept in depts" :key="dept.id" :label="dept.deptName" :value="dept.id" />
-      </el-select>
-      <el-button :disabled="!filteredUnpicked.length" @click="selectFiltered">
-        选中结果<template v-if="filteredUnpicked.length">（{{ filteredUnpicked.length }}）</template>
-      </el-button>
+      <el-tooltip
+        v-if="!single"
+        content="选中当前部门 / 搜索条件下的全部人员"
+        placement="top"
+      >
+        <el-button
+          class="picker-select-all"
+          :disabled="!filteredUnpicked.length"
+          @click="selectFiltered"
+        >
+          全选<template v-if="filteredUnpicked.length">（{{ filteredUnpicked.length }}）</template>
+        </el-button>
+      </el-tooltip>
     </div>
-    <div class="picker-columns">
+    <div class="picker-columns" :class="{ 'is-single': single }">
       <div class="picker-list">
         <div class="picker-col-head">
           <span>人员</span>
@@ -172,7 +192,7 @@ const confirm = () => {
           <el-empty v-if="!filteredUsers.length" description="没有匹配的人员" :image-size="48" />
         </div>
       </div>
-      <div class="picker-selected">
+      <div v-if="!single" class="picker-selected">
         <div class="picker-col-head">
           <span>
             已选
@@ -202,8 +222,10 @@ const confirm = () => {
       </div>
     </div>
     <template #footer>
-      <el-button @click="visible = false">取消</el-button>
-      <el-button type="primary" @click="confirm">确定（{{ draft.length }}）</el-button>
+      <el-button @click="visible = false">{{ single ? '关闭' : '取消' }}</el-button>
+      <el-button v-if="!single" type="primary" @click="confirm">
+        确定（{{ draft.length }}）
+      </el-button>
     </template>
   </el-dialog>
 </template>
@@ -279,8 +301,14 @@ const confirm = () => {
   flex: 1 1 240px;
 }
 
+/* 部门筛选固定在搜索框前面，先缩范围再搜人 */
 .picker-dept {
-  flex: 0 1 180px;
+  flex: 0 1 170px;
+}
+
+.picker-select-all {
+  flex: none;
+  margin-left: auto;
 }
 
 .picker-columns {
@@ -288,6 +316,11 @@ const confirm = () => {
   grid-template-columns: minmax(0, 1fr) 260px;
   gap: 12px;
   height: min(420px, 58vh);
+}
+
+/* 单选：右侧「已选」区没有意义，点人即生效，列表拉满整宽 */
+.picker-columns.is-single {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .picker-list,
