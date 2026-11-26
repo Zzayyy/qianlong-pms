@@ -104,6 +104,8 @@ const navSections: NavSection[] = [
     items: [
       { path: '/worklogs', label: '工作日志', icon: NotebookPen, permission: 'worklog:view' },
       { path: '/weeklies', label: '周报总结', icon: FileText, permission: 'worklog:view' },
+      // 提示词配置：管理员/PMO 管全公司默认，部门领导管本部门
+      { path: '/weekly-prompts', label: '周报提示词', icon: Settings2, permission: 'weekly:prompt:manage' },
       { path: '/messages', label: '我的消息', icon: Bell }
     ]
   },

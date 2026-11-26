@@ -23,10 +23,11 @@ from pms.common.logging import get_logger
 from pms.core.config import get_settings
 from pms.core.context import AuthContext
 from pms.notice import service as notice_service
-from pms.org.models import SysUser
+from pms.org.models import SysDept, SysUser
 from pms.project.models import PrjMember, PrjProject
 from pms.project.visibility import is_project_manager
 from pms.system.config_service import ConfigService
+from pms.weekly import prompt_service
 from pms.weekly.models import WkWeekly
 from pms.weekly.rules import (
     WeeklyScope,
@@ -55,11 +56,6 @@ _ACTIVE_STATUSES: Final[tuple[str, ...]] = (
 
 #: 单条日志正文截断长度（控制提示词体积）
 _CONTENT_LIMIT: Final[int] = 400
-
-_SYSTEM_PROMPT: Final[str] = (
-    "你是资深项目管理助理，擅长把零散的工作日志整理成条理清晰、可直接汇报的中文周报。"
-    "只使用给定数据，禁止编造人名、数字和结论。"
-)
 
 
 def _date_text(value: object) -> str:
@@ -338,57 +334,16 @@ async def _build_snapshot(
 
 
 # ---------------------------------------------------------------- 提示词
+# 提示词已改为「可配置模板」：统一走 `pms.weekly.prompt_service`，
+# 按部门逐级匹配（部门 → 上级部门 → 全公司默认 → 代码内置）。
 
 
-def _project_messages(snapshot: dict[str, object]) -> list[dict[str, str]]:
-    """项目周报提示词。"""
-    data = {key: value for key, value in snapshot.items() if key != "entries"}
-    body = (
-        f"请基于以下项目工作日志生成 {snapshot['weekLabel']} 周的项目周报（Markdown）。\n\n"
-        "结构固定为：\n"
-        "## 一、本周进展\n## 二、工时投入\n## 三、问题与风险\n"
-        "## 四、下周计划\n## 五、需要协调支持\n\n"
-        "要求：\n"
-        "1. 只使用给定数据，禁止编造人名、数字、结论；缺失信息写「暂无」；\n"
-        "2. 进展按人员或任务归并，每条要点不超过 60 字，不要逐条罗列日志；\n"
-        "3. 问题与风险优先列出阻塞项、风险标记与延期情况；\n"
-        "4. 下周计划依据日志中「明日计划」归纳；\n"
-        "5. 语气客观简洁，可直接发给项目干系人；\n"
-        "6. 一条日志可能同时记录多个项目（条目里的 relatedProjects 字段）："
-        f"只提取与本项目「{snapshot.get('projectName', '')}」相关的内容，"
-        "relatedProjects 或其他项目的进展、问题、计划一律不得写入本报告；"
-        "无法区分归属时按本项目工时客观描述，禁止臆造。\n\n"
-        f"## 项目与统计\n```json\n{json.dumps(data, ensure_ascii=False, indent=1)}\n```\n\n"
-        f"## 本周工作日志\n```json\n"
-        f"{json.dumps(snapshot['entries'], ensure_ascii=False, indent=1)}\n```\n"
-    )
-    return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": body},
-    ]
-
-
-def _personal_messages(snapshot: dict[str, object]) -> list[dict[str, str]]:
-    """个人周总结提示词。"""
-    data = {key: value for key, value in snapshot.items() if key != "entries"}
-    body = (
-        f"请基于以下个人工作日志生成 {snapshot['weekLabel']} 周的个人周总结（Markdown）。\n\n"
-        "结构固定为：\n"
-        "## 一、本周工作概览\n## 二、主要产出\n## 三、问题与阻塞\n"
-        "## 四、下周计划\n## 五、复盘与改进\n\n"
-        "要求：\n"
-        "1. 只使用给定数据，禁止编造；数据缺失写「暂无」；\n"
-        "2. 按项目/事务归并要点，突出可量化产出（工时、条数、完成事项）；\n"
-        "3. 「复盘与改进」给出 2-3 条基于日志的具体建议，避免空话；\n"
-        "4. 全文控制在 600 字以内，语气平实。\n\n"
-        f"## 统计\n```json\n{json.dumps(data, ensure_ascii=False, indent=1)}\n```\n\n"
-        f"## 本周工作日志\n```json\n"
-        f"{json.dumps(snapshot['entries'], ensure_ascii=False, indent=1)}\n```\n"
-    )
-    return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": body},
-    ]
+async def _dept_name(session: AsyncSession, dept_id: int) -> str:
+    """取部门名称（模板变量 `{{deptName}}`）。"""
+    if dept_id <= 0:
+        return ""
+    dept = await session.get(SysDept, dept_id)
+    return dept.dept_name if dept is not None and not dept.deleted else ""
 
 
 def _fallback_content(snapshot: dict[str, object], scope: str) -> str:
@@ -615,17 +570,27 @@ async def generate(
         max_logs=max_logs,
     )
 
+    # 提示词按「部门 → 上级部门 → 全公司默认 → 内置」匹配，部门可各自定制
+    owner: SysUser | None = None
+    if project is None:
+        owner = await session.get(SysUser, owner_id) if owner_id else None
+        target_dept_id = int(owner.dept_id or 0) if owner else 0
+        title = f"{owner.real_name if owner else ''} 周总结（{label}）"
+    else:
+        target_dept_id = int(project.dept_id or 0)
+        title = f"{project.project_name} 项目周报（{label}）"
+    snapshot["deptName"] = await _dept_name(session, target_dept_id)
+    template = await prompt_service.resolve(
+        session, scope=scope, dept_id=target_dept_id
+    )
+
     content = _fallback_content(snapshot, scope)
     ai_used = 0
     ai_message = ""
     model = ""
     if ai_client.is_configured():
         model = get_settings().deepseek_model or ""
-        messages = (
-            _project_messages(snapshot)
-            if scope == WeeklyScope.PROJECT
-            else _personal_messages(snapshot)
-        )
+        messages = prompt_service.build_messages(template, snapshot)
         try:
             content = await ai_client.chat(messages)
             ai_used = 1
@@ -653,13 +618,7 @@ async def generate(
         report.revision = int(report.revision or 1) + 1
         report.update_by = operator_id or owner_id
 
-    if project is None:
-        owner = await session.get(SysUser, owner_id)
-        report.dept_id = owner.dept_id if owner else 0
-        title = f"{owner.real_name if owner else ''} 周总结（{label}）"
-    else:
-        report.dept_id = project.dept_id
-        title = f"{project.project_name} 项目周报（{label}）"
+    report.dept_id = target_dept_id
 
     report.week_start = start
     report.week_end = end
@@ -667,7 +626,12 @@ async def generate(
     report.title = title[:200]
     report.content = content
     report.stats_json = json.dumps(
-        {key: value for key, value in snapshot.items() if key != "entries"},
+        {
+            **{key: value for key, value in snapshot.items() if key != "entries"},
+            # 记录所用提示词，便于事后排查「部门模板是否生效」
+            "promptId": template.prompt_id,
+            "promptName": template.name,
+        },
         ensure_ascii=False,
     )
     report.status = WeeklyStatus.GENERATED
@@ -695,12 +659,13 @@ async def generate(
                 biz_id=report.id,
             )
     logger.info(
-        "周报生成：%s %s 状态=%s AI=%s 日志=%s",
+        "周报生成：%s %s 状态=%s AI=%s 日志=%s 提示词=%s",
         scope,
         label,
         report.status,
         "成功" if ai_used else "降级",
         snapshot["logCount"],
+        template.name,
     )
     return report
 

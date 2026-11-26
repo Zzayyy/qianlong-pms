@@ -46,6 +46,7 @@ const routes: RouteRecordRaw[] = [
       },
       { path: 'worklogs', name: 'worklogs', component: () => import('@/views/Worklogs.vue'), meta: { title: '工作日志', permission: 'worklog:view' } },
       { path: 'weeklies', name: 'weeklies', component: () => import('@/views/Weeklies.vue'), meta: { title: '周报总结', permission: 'worklog:view' } },
+      { path: 'weekly-prompts', name: 'weekly-prompts', component: () => import('@/views/WeeklyPrompts.vue'), meta: { title: '周报提示词', permission: 'weekly:prompt:manage' } },
       { path: 'dept-board', name: 'dept-board', component: () => import('@/views/Reports.vue'), meta: { title: '部门看板', permission: 'report:dept:view' } },
       { path: 'reports', redirect: '/dept-board' },
       { path: 'crm', name: 'crm', component: () => import('@/views/Crm.vue'), meta: { title: '客户与商机', permission: 'crm:customer:view' } },

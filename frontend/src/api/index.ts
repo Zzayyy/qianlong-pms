@@ -530,6 +530,59 @@ export const updateWeekly = (id: string, data: { title?: string; content: string
 /** 确认归档，之后不再随日志变化。 */
 export const confirmWeekly = (id: string) => post<WeeklyItem>(`/weeklies/${id}/confirm`)
 
+/* ---------------------------- 周报提示词模板 ---------------------------- */
+
+/** 周报提示词模板：按「范围 + 部门」存放，deptId 为 0 表示全公司默认。 */
+export interface WeeklyPromptItem {
+  id: string
+  scope: 'PROJECT' | 'PERSONAL'
+  scopeLabel: string
+  deptId: string
+  deptName: string
+  name: string
+  systemPrompt: string
+  userPrompt: string
+  /** 1=启用，0=停用 */
+  enabled: number
+  /** 1=系统内置默认模板（不可删除，可编辑/停用） */
+  builtin: number
+  remark: string
+  /** 是否为我所在部门当前实际使用的模板 */
+  effective: boolean
+  /** 当前账号能否编辑（部门领导不能改全公司默认模板） */
+  canEdit: boolean
+  updateBy: string
+  updateTime: string
+}
+
+export interface WeeklyPromptList {
+  items: WeeklyPromptItem[]
+  /** 是否可维护全公司默认模板（系统管理员 / PMO） */
+  canManageGlobal: boolean
+  deptId: string
+  deptPath: string
+}
+
+export const listWeeklyPrompts = (params?: Record<string, unknown>) =>
+  get<WeeklyPromptList>('/weekly-prompts', params)
+
+/** 模板可用的占位符说明。 */
+export const weeklyPromptVariables = () =>
+  get<{ key: string; remark: string }[]>('/weekly-prompts/variables')
+
+export const createWeeklyPrompt = (data: Record<string, unknown>) =>
+  post<{ id: string }>('/weekly-prompts', data)
+
+export const updateWeeklyPrompt = (id: string, data: Record<string, unknown>) =>
+  put<{ id: string; enabled: number }>(`/weekly-prompts/${id}`, data)
+
+export const deleteWeeklyPrompt = (id: string) =>
+  del<{ deleted: number }>(`/weekly-prompts/${id}`)
+
+/** 以现有模板为蓝本复制到指定部门（常用：从全公司默认复制出部门版）。 */
+export const copyWeeklyPrompt = (id: string, data: { deptId: string | number; name?: string }) =>
+  post<{ id: string }>(`/weekly-prompts/${id}/copy`, data)
+
 /* ------------------------------ 消息通知 ------------------------------ */
 
 export interface NoticeItem {

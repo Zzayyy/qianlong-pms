@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { RefreshCw, Sparkles } from 'lucide-vue-next'
 import {
@@ -29,8 +30,11 @@ interface WeeklyStats {
   dateTo?: string
   members?: { name: string; hours: number; logCount: number }[]
   byProject?: { name: string; hours: number; logCount: number }[]
+  /** 生成时使用的提示词模板名称（部门模板会带上部门） */
+  promptName?: string
 }
 
+const router = useRouter()
 const store = useUserStore()
 /** 项目周报只对领导层（weekly:project:view）与项目经理（project:edit）开放 */
 const canViewProjectWeekly = computed(
@@ -371,6 +375,15 @@ onMounted(async () => {
         <el-tag type="info" effect="plain" size="small">
           {{ options.autoEnabled ? '每周五 12:00 自动生成项目周报' : '自动生成已关闭' }}
         </el-tag>
+        <el-button
+          v-if="store.has('weekly:prompt:manage')"
+          link
+          type="primary"
+          size="small"
+          @click="router.push('/weekly-prompts')"
+        >
+          提示词配置
+        </el-button>
       </div>
     </div>
 
@@ -562,6 +575,10 @@ onMounted(async () => {
               {{ SOURCE_LABEL[current.source] || current.source }}
             </el-tag>
             <el-tag size="small" type="info" effect="plain">v{{ current.revision }}</el-tag>
+            <!-- 生成本条周报所用的提示词模板（含部门定制） -->
+            <el-tooltip v-if="stats.promptName" content="本次生成使用的提示词模板" placement="top">
+              <el-tag size="small" type="info" effect="plain">提示词：{{ stats.promptName }}</el-tag>
+            </el-tooltip>
             <span v-if="current.confirmTime" class="meta-text">
               {{ current.confirmName }} 于 {{ current.confirmTime }} 确认
             </span>

@@ -1,0 +1,39 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - generic [ref=e12]: 钱龙
+        - generic [ref=e14]: 项目管理系统
+      - generic [ref=e15]: 仅限授权人员使用
+  - main [ref=e16]:
+    - generic [ref=e17]:
+      - heading "项目全周期管理 与变更控制" [level=1] [ref=e18]:
+        - generic [ref=e19]: 项目全周期管理
+        - generic [ref=e20]: 与变更控制
+      - paragraph [ref=e21]: 从立项、计划、执行到验收，进度、成本、风险与变更在同一条链路上留痕，责任清晰可溯。
+    - generic [ref=e22]:
+      - generic [ref=e23]:
+        - heading "登录" [level=2] [ref=e24]
+        - paragraph [ref=e25]: 使用已开通的账号进入系统
+      - generic [ref=e26]:
+        - generic [ref=e27]:
+          - generic [ref=e28]: 账号
+          - textbox "账号" [ref=e32]:
+            - /placeholder: 请输入账号
+            - text: admin
+        - generic [ref=e33]:
+          - generic [ref=e34]: 密码
+          - generic [ref=e37]:
+            - textbox "密码" [ref=e38]:
+              - /placeholder: 请输入密码
+              - text: Pms@12345
+            - generic [ref=e40] [cursor=pointer]
+        - generic [ref=e45] [cursor=pointer]:
+          - generic [ref=e46]:
+            - checkbox "记住账号" [checked]
+          - generic [ref=e48]: 记住账号
+        - button "登录" [ref=e49] [cursor=pointer]
+  - contentinfo [ref=e51]:
+    - generic [ref=e52]:
+      - generic [ref=e53]: © 2026 钱龙软件
+      - generic [ref=e54]: 登录异常请联系系统管理员

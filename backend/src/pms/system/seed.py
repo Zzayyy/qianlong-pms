@@ -178,6 +178,7 @@ PERMISSIONS: Final[tuple[tuple[str, str, str], ...]] = (
     ("worklog:confirm", "日志确认", "API"),
     ("worklog:manage", "日志管理", "API"),
     ("weekly:project:view", "项目周报查看", "API"),
+    ("weekly:prompt:manage", "周报提示词维护", "API"),
     ("report:company:view", "公司看板查看", "API"),
     ("report:dept:view", "部门看板查看", "API"),
     ("report:view", "统计查看", "API"),
@@ -255,6 +256,7 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
             "worklog:confirm",
             "worklog:manage",
             "weekly:project:view",
+            "weekly:prompt:manage",
             "report:company:view",
             "report:dept:view",
             "report:view",
@@ -329,6 +331,7 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
             "worklog:create",
             "worklog:manage",
             "weekly:project:view",
+            "weekly:prompt:manage",
             "report:company:view",
             "report:dept:view",
             "report:export",
@@ -347,6 +350,8 @@ ROLES: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
             "project:task:manage",
             "project:approve",
             "weekly:project:view",
+            # 部门领导可维护本部门周总结提示词（全局默认仍由 ADMIN / PMO 维护）
+            "weekly:prompt:manage",
             # 部门领导只看本部门看板，公司看板不授权
             "report:dept:view",
             "report:export",
