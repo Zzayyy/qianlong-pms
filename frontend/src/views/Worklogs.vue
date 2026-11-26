@@ -626,7 +626,16 @@ const listLoading = ref(false)
 const exporting = ref(false)
 const page = reactive({ pageNum: 1, pageSize: 10 })
 
-/** 默认筛选最近两周（含今天）。 */
+/** 本周（周一至今天）。 */
+const thisWeekRange = () => {
+  const end = new Date()
+  const start = new Date()
+  // 周一为一周起点
+  start.setDate(end.getDate() - ((end.getDay() + 6) % 7))
+  return [isoOf(start), isoOf(end)]
+}
+
+/** 最近两周（含今天）。 */
 const defaultRange = () => {
   const end = new Date()
   const start = new Date()
@@ -635,14 +644,14 @@ const defaultRange = () => {
 }
 
 const filters = reactive({
-  dateRange: defaultRange(),
+  dateRange: thisWeekRange(),
   projectId: '',
   keyword: ''
 })
 
-/** 日期快捷筛选：当日 / 本周 / 最近两周（默认），手动改日期即视为自定义。 */
+/** 日期快捷筛选：当日 / 本周（默认） / 最近两周，手动改日期即视为自定义。 */
 type DatePreset = 'day' | 'week' | 'fortnight'
-const datePreset = ref<DatePreset | ''>('fortnight')
+const datePreset = ref<DatePreset | ''>('week')
 /** 「当日」模式下的单日期 */
 const dayDate = ref(localToday())
 
@@ -659,11 +668,7 @@ const applyPreset = (preset: DatePreset) => {
   if (preset === 'day') {
     dayDate.value = localToday()
   } else if (preset === 'week') {
-    const end = new Date()
-    const start = new Date()
-    // 周一为一周起点
-    start.setDate(end.getDate() - ((end.getDay() + 6) % 7))
-    filters.dateRange = [isoOf(start), isoOf(end)]
+    filters.dateRange = thisWeekRange()
   } else {
     filters.dateRange = defaultRange()
   }
@@ -711,8 +716,8 @@ const searchLogs = () => {
 }
 
 const resetFilters = () => {
-  datePreset.value = 'fortnight'
-  filters.dateRange = defaultRange()
+  datePreset.value = 'week'
+  filters.dateRange = thisWeekRange()
   filters.projectId = ''
   filters.keyword = ''
   dayDate.value = localToday()
@@ -733,6 +738,12 @@ const editable = (row: any) =>
 
 const authorLabel = (row: any) =>
   row.realName || row.userName || (String(row.userId) === currentUserId.value ? '我' : `用户 ${row.userId}`)
+
+/** 详情文本：去掉多余空行，避免内容里连续换行把版面撑得很长。 */
+const displayText = (value: unknown) => {
+  const text = String(value ?? '').trim()
+  return text ? text.replace(/\n{3,}/g, '\n\n') : ''
+}
 
 /** 一条日志可能覆盖多个项目：列表按明细拼名称，悬浮看各项目工时。 */
 const rowProjectList = (row: any) => (row.projects?.length ? row.projects : [])
@@ -767,7 +778,7 @@ const loadOptions = async () => {
   }
 }
 
-/* ------------------------------ 左栏：我的填报对象 ------------------------------ */
+/* ------------------------------ 左栏：我的工作 ------------------------------ */
 /* 项目 / Bug / 生产问题 / 会议混排成一条列表；一条日志只对应一个对象 */
 const railKeyword = ref('')
 
@@ -1087,18 +1098,6 @@ const selectRailRow = (row: RailRow) => {
   else if (row.project) selectProject(row.project)
 }
 
-/** 工作内容里可 @ 的候选：当前已选项目（去重，按选择顺序）。 */
-const mentionOptions = computed(() => {
-  const names = form.items
-    .map((item) => projectOf(item.projectId)?.projectName || '')
-    .filter(Boolean)
-  return names
-    .filter((name, index) => names.indexOf(name) === index)
-    .map((name) => ({ value: name, label: name }))
-})
-
-const mentionRef = ref<any>()
-
 const disabledDate = (time: Date) => {
   const maxDays = Number(options.value.backfillMaxDays ?? 5)
   const start = new Date()
@@ -1303,6 +1302,17 @@ const validateForm = () => {
 const persistForm = async (submitAfter: boolean) => {
   if (!canCreate.value || formSaving.value || formSubmitting.value) return
   if (!validateForm()) return
+  if (submitAfter) {
+    try {
+      await ElMessageBox.confirm(
+        '提交后日志进入确认流程，将不能再修改或删除，确认提交？',
+        '提交日志',
+        { type: 'warning', confirmButtonText: '提交' }
+      )
+    } catch {
+      return
+    }
+  }
   if (submitAfter) formSubmitting.value = true
   else formSaving.value = true
   try {
@@ -1603,9 +1613,43 @@ const exportLogs = async () => {
 
 const submitRow = async (row: any) => {
   try {
+    await ElMessageBox.confirm(
+      '提交后日志进入确认流程，将不能再修改或删除，确认提交？',
+      '提交日志',
+      { type: 'warning', confirmButtonText: '提交' }
+    )
+  } catch {
+    return
+  }
+  try {
     const result = await worklogAction(row.id, 'submit')
     if (result.warning) ElMessage.warning(String(result.warning))
     else ElMessage.success(result.status === 'PENDING_APPROVE' ? '已提交，等待补填审批' : '日志已提交')
+    await refreshAll()
+  } catch {
+    /* 错误提示由请求拦截器统一弹出 */
+  }
+}
+
+/** 列表直接删除草稿/被驳回日志（仅本人可删，后端同样校验）。 */
+const deleteRow = async (row: any) => {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除 ${row.logDate} 的这条日志？删除后不可恢复。`,
+      '删除日志',
+      { type: 'warning', confirmButtonText: '删除' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await deleteWorklog(String(row.id))
+    ElMessage.success('日志已删除')
+    // 正在编辑的就是这条时，清空填写区避免继续往已删除的日志里写
+    if (String(form.id) === String(row.id)) {
+      formMode.value = 'create'
+      resetForm()
+    }
     await refreshAll()
   } catch {
     /* 错误提示由请求拦截器统一弹出 */
@@ -1744,7 +1788,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       <!-- 左侧：项目 / Bug / 生产问题 / 会议混排，单选后右侧填这一条日志 -->
       <aside class="pms-card project-rail">
         <div class="rail-head">
-          <h3>我的填报对象</h3>
+          <h3>我的工作</h3>
           <span class="rail-count">
             {{ railRows.length }} 条<template v-if="writtenCount"> · 已写 {{ writtenCount }}</template>
           </span>
@@ -1833,9 +1877,19 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 @change="loadDaySummary"
               />
             </div>
-            <div v-if="!isProjectType(form.logType)" class="field meta-hours">
+            <!-- 工时与日期两个必填挨着放，其后才是选填的关联对象 -->
+            <div v-if="form.items.length || !isProjectType(form.logType)" class="field meta-hours">
               <label>工时 <em>*</em></label>
               <el-input-number
+                v-if="form.items.length"
+                v-model="form.items[0].hours"
+                :step="Number(options.step || 0.5)"
+                :min="0"
+                :max="Number(options.maxHours || 24)"
+                controls-position="right"
+              />
+              <el-input-number
+                v-else
                 v-model="form.totalHours"
                 :step="Number(options.step || 0.5)"
                 :min="0"
@@ -1896,16 +1950,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 </el-option-group>
               </el-select>
             </div>
-            <div v-if="form.items.length" class="field meta-hours">
-              <label>工时 <em>*</em></label>
-              <el-input-number
-                v-model="form.items[0].hours"
-                :step="Number(options.step || 0.5)"
-                :min="0"
-                :max="Number(options.maxHours || 24)"
-                controls-position="right"
-              />
-            </div>
             <div v-if="isProjectType(form.logType)" class="field meta-risk">
               <label>风险</label>
               <el-switch v-model="form.riskFlag" />
@@ -1916,25 +1960,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="form-grid">
           <div class="field span-3">
             <label>工作内容 <em>*</em></label>
-            <el-mention
-              v-if="form.items.length"
-              ref="mentionRef"
-              v-model="form.content"
-              type="textarea"
-              :rows="6"
-              maxlength="1000"
-              show-word-limit
-              :options="mentionOptions"
-              placeholder="今天完成了什么？建议写清产出与结果（输入 @ 可以 @项目）"
-            />
             <el-input
-              v-else
               v-model="form.content"
               type="textarea"
-              :rows="6"
+              :rows="12"
               maxlength="1000"
               show-word-limit
-              placeholder="今天完成了什么？建议写清产出与结果"
+              placeholder="今天完成了什么？写清产出与结果"
             />
           </div>
           <div class="field span-3">
@@ -1942,7 +1974,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <el-input
               v-model="form.plan"
               type="textarea"
-              :rows="6"
+              :rows="12"
               maxlength="500"
               show-word-limit
               placeholder="明天要做什么？没有计划可写「暂无」"
@@ -2191,12 +2223,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <el-table-column v-if="tab === 'team'" label="提交人" width="120">
           <template #default="{ row }">{{ authorLabel(row) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="160">
+        <el-table-column label="操作" width="190">
           <template #default="{ row }">
             <el-button link type="primary" @click="openDetail(row)">详情</el-button>
             <template v-if="editable(row)">
               <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
               <el-button link type="primary" @click="submitRow(row)">提交</el-button>
+              <el-button link type="danger" @click="deleteRow(row)">删除</el-button>
             </template>
           </template>
         </el-table-column>
@@ -2412,20 +2445,21 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
           <section class="detail-section">
             <h4>工作内容</h4>
-            <p class="detail-text">{{ detail.worklog.content || '—' }}</p>
-          </section>
-          <section class="detail-section">
-            <h4>问题与阻塞</h4>
-            <p class="detail-text">{{ detail.worklog.problem || '—' }}</p>
+            <p class="detail-text">{{ displayText(detail.worklog.content) || '—' }}</p>
           </section>
           <section class="detail-section">
             <h4>明日计划</h4>
-            <p class="detail-text">{{ detail.worklog.plan || '—' }}</p>
+            <p class="detail-text">{{ displayText(detail.worklog.plan) || '—' }}</p>
+          </section>
+          <!-- 问题与阻塞少填：没内容时整块不出现，有内容才排在明日计划下方 -->
+          <section v-if="displayText(detail.worklog.problem)" class="detail-section">
+            <h4>问题与阻塞</h4>
+            <p class="detail-text">{{ displayText(detail.worklog.problem) }}</p>
           </section>
 
-          <section class="detail-section">
+          <section v-if="detail.items.length" class="detail-section">
             <h4>任务 / 问题明细</h4>
-            <el-table v-if="detail.items.length" :data="detail.items" size="small">
+            <el-table :data="detail.items" size="small">
               <el-table-column prop="projectName" label="项目" min-width="150">
                 <template #default="{ row }">{{ row.projectName || '非项目' }}</template>
               </el-table-column>
@@ -2447,7 +2481,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 <template #default="{ row }">{{ row.hours }}h</template>
               </el-table-column>
             </el-table>
-            <el-empty v-else description="暂无任务明细" :image-size="60" />
           </section>
 
           <section class="detail-section">
@@ -4063,7 +4096,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 .detail-section {
-  margin-top: 18px;
+  margin-top: 14px;
 }
 
 .detail-section h4 {
@@ -4075,12 +4108,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
 .detail-text {
   margin: 0;
-  padding: 12px 14px;
+  max-height: 280px;
+  padding: 10px 12px;
+  overflow-y: auto;
   border: 1px solid var(--pms-line);
   border-radius: 8px;
   background: #fafbfe;
   font-size: 13px;
-  line-height: 1.75;
+  line-height: 1.7;
   color: var(--pms-text-2);
   white-space: pre-wrap;
   word-break: break-word;
