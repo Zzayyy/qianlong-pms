@@ -59,18 +59,27 @@ async def _current_stage_map(
     """批量取各项目「当前阶段」：按顺序第一个未完成且未取消的阶段。
 
     列表页需要「项目走到哪一步」，逐项目查会 N+1，这里按当前页一次性取回；
+    带上阶段的计划起止与负责人，前端不必再逐项目拉阶段；
     全部阶段都完成时返回「全部完成」，没有阶段的项目不下发该字段。
     """
     if not project_ids:
         return {}
     rows = await session.execute(
-        select(PrjStage.project_id, PrjStage.stage_name, PrjStage.status, PrjStage.progress)
+        select(
+            PrjStage.project_id,
+            PrjStage.stage_name,
+            PrjStage.status,
+            PrjStage.progress,
+            PrjStage.owner_id,
+            PrjStage.plan_start,
+            PrjStage.plan_end,
+        )
         .where(PrjStage.project_id.in_(project_ids), PrjStage.deleted == 0)
         .order_by(PrjStage.project_id, PrjStage.seq, PrjStage.id)
     )
     stages: dict[int, dict[str, object]] = {}
     totals: dict[int, int] = {}
-    for project_id, stage_name, status, progress in rows.all():
+    for project_id, stage_name, status, progress, owner_id, plan_start, plan_end in rows.all():
         code = str(status or "")
         if code == "CANCELLED":
             continue
@@ -83,6 +92,9 @@ async def _current_stage_map(
             "currentStage": str(stage_name or ""),
             "currentStageStatus": code,
             "currentStageProgress": round(float(progress or 0), 1),
+            "currentStageOwnerId": int(owner_id or 0),
+            "currentStageStart": str(plan_start or ""),
+            "currentStageEnd": str(plan_end or ""),
         }
     for key, total in totals.items():
         if key not in stages and total > 0:
@@ -90,6 +102,9 @@ async def _current_stage_map(
                 "currentStage": "全部完成",
                 "currentStageStatus": "DONE",
                 "currentStageProgress": 100.0,
+                "currentStageOwnerId": 0,
+                "currentStageStart": "",
+                "currentStageEnd": "",
             }
     return stages
 
@@ -397,6 +412,13 @@ async def list_projects(
     show_amount = _can_view_amount(context)
     # 「当前阶段」按当前页批量取，避免逐项目查询
     stage_map = await _current_stage_map(session, {item.id for item in visible_items})
+    # 当前阶段负责人的姓名与项目经理一起批量补齐，前端不依赖人员列表权限
+    owner_ids = {int(row.get("currentStageOwnerId") or 0) for row in stage_map.values()}
+    unnamed = owner_ids - set(names)
+    if unnamed:
+        names.update(await _user_names(session, unnamed))
+    for data in stage_map.values():
+        data["currentStageOwner"] = names.get(int(data.get("currentStageOwnerId") or 0), "")
     return paged(
         [
             {

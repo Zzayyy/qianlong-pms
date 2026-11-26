@@ -150,6 +150,27 @@ const healthMeta = (code: string) => ({
 
 const progressWidth = (row: any) => `${Math.min(Math.max(Number(row.progress || 0), 0), 100)}%`
 
+/** 列表「当前阶段」的计划周期：同年只写一次年份，两端都没排期时显示「未排期」。 */
+const currentStageRange = (row: any) => {
+  const start = String(row.currentStageStart || '')
+  const end = String(row.currentStageEnd || '')
+  if (!start && !end) return '未排期'
+  if (start && end && start.slice(0, 4) === end.slice(0, 4)) {
+    return `${start}~${end.slice(5)}`
+  }
+  return `${start || '—'}~${end || '—'}`
+}
+
+/** 列表「当前阶段」副标题：状态(+进度) · 周期 · 负责人，压成一行。 */
+const currentStageSummary = (row: any) => {
+  const status = dictOf(NODE_STATUS, row.currentStageStatus).label
+  const progress =
+    row.currentStageStatus === 'IN_PROGRESS'
+      ? ` ${Math.round(Number(row.currentStageProgress || 0))}%`
+      : ''
+  return `${status}${progress} · ${currentStageRange(row)} · ${row.currentStageOwner || '未指定'}`
+}
+
 /* 状态页签：分组值以逗号传给后端，避免一屏堆满筛选器 */
 const TABS = [
   { key: 'RUNNING', label: '进行中', status: 'APPROVED,IN_PROGRESS,SUSPENDED' },
@@ -2130,18 +2151,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </template>
         </el-table-column>
         <!-- 当前阶段：按顺序第一个未完成的阶段，全部完成时显示「全部完成」 -->
-        <el-table-column label="当前阶段" min-width="140">
+        <el-table-column label="当前阶段" min-width="240">
           <template #default="{ row }">
             <el-tag v-if="row.currentStageStatus === 'DONE'" size="small" type="success" effect="plain">
               {{ row.currentStage || '全部完成' }}
             </el-tag>
             <div v-else-if="row.currentStage">
               <div class="cell-main">{{ row.currentStage }}</div>
-              <div class="cell-sub">
-                {{ dictOf(NODE_STATUS, row.currentStageStatus).label }}
-                <template v-if="row.currentStageStatus === 'IN_PROGRESS'">
-                  · {{ Math.round(Number(row.currentStageProgress || 0)) }}%
-                </template>
+              <div class="cell-sub stage-summary" :title="currentStageSummary(row)">
+                {{ currentStageSummary(row) }}
               </div>
             </div>
             <span v-else class="cell-sub">未排阶段</span>
@@ -3826,6 +3844,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   font-size: 11.5px;
   color: var(--pms-text-3);
   font-variant-numeric: tabular-nums;
+}
+
+/* 当前阶段副标题固定一行，超出省略，hover 看全文 */
+.stage-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 操作列：详情 + 直达下拉 */
