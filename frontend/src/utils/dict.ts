@@ -95,14 +95,6 @@ export const RISK_STATUS: Record<string, DictItem> = {
   CLOSED: { label: '已关闭', type: 'success' }
 }
 
-/** 基线类型。 */
-export const BASELINE_TYPE: Record<string, string> = {
-  SCOPE: '范围基线',
-  SCHEDULE: '进度基线',
-  COST: '成本基线',
-  CHANGE: '变更基线'
-}
-
 /** 项目健康度。 */
 export const HEALTH_STATUS: Record<string, DictItem> = {
   GREEN: { label: '健康', type: 'success' },

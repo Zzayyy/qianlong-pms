@@ -694,14 +694,17 @@ watch(
   <div v-loading="loading">
     <div :class="embedded ? 'list-plain' : 'pms-card list-card'">
       <div class="list-head">
-        <div class="seg">
+        <div class="chip-tabs">
           <button
             v-for="item in TABS"
             :key="item.key"
             type="button"
-            :class="{ 'is-active': tab === item.key }"
+            class="chip"
+            :class="[`is-${item.key}`, { 'is-active': tab === item.key }]"
+            :aria-pressed="tab === item.key"
             @click="switchTab(item.key)"
           >
+            <i class="chip-dot"></i>
             {{ item.label }}
           </button>
         </div>
@@ -1404,39 +1407,63 @@ watch(
   margin-left: auto;
 }
 
-.seg {
-  display: inline-flex;
+/* 状态筛选：药丸胶囊 + 状态色点，刻意区别于顶部导航式页签 */
+.chip-tabs {
+  display: flex;
   flex-wrap: wrap;
-  gap: 2px;
-  padding: 3px;
-  border: 1px solid #e3e9f4;
-  border-radius: 10px;
-  background: #eef2f8;
+  align-items: center;
+  gap: 6px;
 }
 
-.seg button {
-  height: 30px;
-  padding: 0 14px;
-  border: 0;
-  border-radius: 6px;
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
   background: transparent;
   color: var(--pms-text-2);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
   transition:
     background-color 0.16s ease,
+    border-color 0.16s ease,
     color 0.16s ease;
 }
 
-.seg button:hover {
+.chip:hover {
+  background: #f3f6fb;
   color: var(--pms-text);
 }
 
-.seg button.is-active {
-  background: var(--pms-surface);
+.chip.is-active {
+  border-color: #d5e3ff;
+  background: var(--pms-primary-weak);
   color: var(--pms-primary-deep);
-  box-shadow: 0 1px 2px rgba(16, 35, 70, 0.08);
+}
+
+.chip-dot {
+  flex: none;
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #b9c4d6;
+}
+
+.chip.is-PENDING .chip-dot {
+  background: var(--pms-warn);
+}
+
+.chip.is-RUNNING .chip-dot {
+  background: var(--pms-primary);
+}
+
+.chip.is-DONE .chip-dot {
+  background: var(--pms-ok);
 }
 
 .list-total {

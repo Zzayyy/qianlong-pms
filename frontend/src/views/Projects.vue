@@ -7,7 +7,6 @@ import { ArrowDown, ArrowLeft, Check, ClipboardCheck, Plus, Timer, Zap } from 'l
 import {
   addMember,
   approveProject,
-  baselineDetail,
   changeProjectPm,
   changeProjectStatus,
   changeRiskStatus,
@@ -23,7 +22,6 @@ import {
   downloadProjectFile,
   generateWeekly,
   ignoreProjectAlert,
-  listBaselines,
   listMembers,
   listProjectAlerts,
   listProjects,
@@ -63,7 +61,6 @@ import { bumpProjectData, projectDataVersion } from '@/utils/projectData'
 import { confirmWeeklyOverwrite, mondayOf, toWeekStart, weekLabelOf } from '@/utils/weekly'
 import {
   ASSIGNABLE_MEMBER_ROLE,
-  BASELINE_TYPE,
   HEALTH_KEY,
   HEALTH_STATUS,
   MEMBER_ROLE,
@@ -602,42 +599,6 @@ const removeRisk = async (row: any) => {
   await load()
 }
 
-/* ------------------------------ 基线 ------------------------------ */
-const baselines = ref<any[]>([])
-const baselineListVisible = ref(false)
-const baselineVisible = ref(false)
-const baselineTitle = ref('')
-const baselineContent = ref('')
-const baselineLoading = ref(false)
-
-const loadBaselines = async () => {
-  baselines.value = await listBaselines(detail.value.id)
-}
-
-/** 基线在详情头部以按钮形式入口（不占页签），点开看版本列表。 */
-const openBaselineList = async () => {
-  baselineListVisible.value = true
-  await loadBaselines()
-}
-
-const openBaseline = async (row: any) => {
-  baselineLoading.value = true
-  baselineVisible.value = true
-  baselineTitle.value = `${row.version} · ${row.baselineName || '基线快照'}`
-  baselineContent.value = ''
-  try {
-    const data = await baselineDetail(detail.value.id, String(row.id))
-    const raw = String(data.content || '')
-    try {
-      baselineContent.value = JSON.stringify(JSON.parse(raw), null, 2)
-    } catch {
-      baselineContent.value = raw || '（无快照内容）'
-    }
-  } finally {
-    baselineLoading.value = false
-  }
-}
-
 /* 项目总监：与「项目成员」同用 PersonPicker，选中即进入待保存状态，点「保存总监」落库 */
 /** 选择器人员源：接口已下发 realName，没有人员列表权限时补一条，避免标签显示成 ID。 */
 const directorPickerUsers = computed(() => {
@@ -724,6 +685,41 @@ const docExt = (fileName: string) => {
   const parts = String(fileName || '').split('.')
   return parts.length > 1 ? parts[parts.length - 1].toUpperCase().slice(0, 4) : 'FILE'
 }
+
+/** 扩展名归档：用于左侧格式块的配色与文件类型文案。 */
+const DOC_KIND: Record<string, string> = {
+  pdf: 'pdf',
+  doc: 'word',
+  docx: 'word',
+  xls: 'excel',
+  xlsx: 'excel',
+  csv: 'excel',
+  ppt: 'ppt',
+  pptx: 'ppt',
+  png: 'image',
+  jpg: 'image',
+  jpeg: 'image',
+  gif: 'image',
+  webp: 'image',
+  svg: 'image',
+  bmp: 'image',
+  zip: 'archive',
+  rar: 'archive',
+  '7z': 'archive',
+  tar: 'archive',
+  gz: 'archive'
+}
+const DOC_KIND_LABEL: Record<string, string> = {
+  pdf: 'PDF 文档',
+  word: 'Word 文档',
+  excel: 'Excel 表格',
+  ppt: 'PPT 演示',
+  image: '图片',
+  archive: '压缩包',
+  other: '其他文件'
+}
+const docKind = (fileName: string) => DOC_KIND[docExt(fileName).toLowerCase()] || 'other'
+const docFormatLabel = (fileName: string) => DOC_KIND_LABEL[docKind(fileName)]
 
 /** `YYYY-MM-DD` → Date，供日期选择器的 default-value 定位到对应月份。 */
 const toDate = (iso?: string): Date | undefined => {
@@ -1099,7 +1095,6 @@ const refreshAll = async () => {
     await loadNodeData()
     await loadRisks()
     await loadAlerts()
-    await loadBaselines()
   }
 }
 
@@ -1282,7 +1277,6 @@ const loadDetail = async (id: string, tab?: unknown) => {
     riskFilter.value = ''
     await loadRisks()
     await loadAlerts()
-    await loadBaselines()
     // 页签标题要显示问题数量，详情加载时就取一次（切页签时再刷新）
     await loadIssueStats()
     weeklyFilter.value = { weekStart: '', status: '' }
@@ -2683,7 +2677,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               · 项目经理 {{ detail.pmName || userName(detail.pmId) }}
             </p>
           </div>
-          <div class="detail-tags">
+          <!-- 状态标签 + 全部操作同排靠右，只占标题一行的高度 -->
+          <div class="detail-head-ops">
             <el-tag :type="statusMeta(detail.status).type">{{ statusMeta(detail.status).label }}</el-tag>
             <el-tag v-if="detail.retroApproval === 1" :type="retroDuePassed ? 'danger' : 'warning'">
               待补审批{{ detail.retroDue ? ` · 截止 ${detail.retroDue}` : '' }}
@@ -2692,9 +2687,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <span class="health" :class="`is-${healthMeta(detail.health).key}`">
               <i></i>{{ healthMeta(detail.health).label }}
             </span>
-            <el-button link type="primary" @click="openBaselineList">
-              基线 {{ baselines.length }}
-            </el-button>
             <el-button v-if="canEdit && canManage" link type="primary" @click="openBasic">
               编辑信息
             </el-button>
@@ -2712,6 +2704,109 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 @change="toggleNotify"
               />
             </span>
+            <!-- 终止项目排在最前，竖线后是状态流转按钮 -->
+            <el-button
+              v-if="canTerminate && canEdit"
+              size="small"
+              type="danger"
+              plain
+              @click="doTerminate"
+            >
+              终止项目
+            </el-button>
+            <span v-if="canTerminate && canEdit" class="ops-divider"></span>
+            <el-button
+              v-if="detail.status === 'DRAFT' && canCreateProject"
+              size="small"
+              type="primary"
+              @click="doSubmit"
+            >
+              提交审批
+            </el-button>
+            <!-- 先开工后补审批：已开工项目在期限内提交补审批，逾期仅提示 -->
+            <el-button
+              v-if="detail.status === 'IN_PROGRESS' && detail.retroApproval && canCreateProject"
+              size="small"
+              :type="retroDuePassed ? 'warning' : 'primary'"
+              plain
+              @click="doSubmit"
+            >
+              {{ detail.retroApproval === 2 ? '重新提交补审批' : '提交补审批' }}
+            </el-button>
+            <el-button
+              v-if="detail.status === 'APPROVING' && canApproveProject"
+              size="small"
+              type="primary"
+              @click="doApprove"
+            >
+              审批通过
+            </el-button>
+            <el-button
+              v-if="detail.status === 'APPROVING' && canApproveProject"
+              size="small"
+              type="danger"
+              link
+              @click="doReject"
+            >
+              驳回
+            </el-button>
+            <el-button
+              v-if="detail.status === 'APPROVED' && canEdit"
+              size="small"
+              type="primary"
+              @click="doStatus('IN_PROGRESS')"
+            >
+              启动项目
+            </el-button>
+            <el-button
+              v-if="detail.status === 'IN_PROGRESS' && canEdit"
+              size="small"
+              type="warning"
+              plain
+              @click="doStatus('SUSPENDED')"
+            >
+              暂停项目
+            </el-button>
+            <el-button
+              v-if="detail.status === 'SUSPENDED' && canEdit"
+              size="small"
+              type="primary"
+              plain
+              @click="doStatus('IN_PROGRESS')"
+            >
+              恢复项目
+            </el-button>
+            <el-button
+              v-if="detail.status === 'IN_PROGRESS' && canEdit"
+              size="small"
+              type="primary"
+              @click="doStatus('COMPLETED')"
+            >
+              完成项目
+            </el-button>
+            <el-button
+              v-if="detail.status === 'COMPLETED' && canEdit"
+              size="small"
+              @click="doStatus('IN_PROGRESS')"
+            >
+              重新打开
+            </el-button>
+            <el-button
+              v-if="detail.status === 'COMPLETED' && canEdit"
+              size="small"
+              type="primary"
+              @click="doStatus('ACCEPTED')"
+            >
+              验收项目
+            </el-button>
+            <el-button
+              v-if="detail.status === 'ACCEPTED' && canEdit"
+              size="small"
+              type="primary"
+              @click="doStatus('CLOSED')"
+            >
+              关闭项目
+            </el-button>
           </div>
         </div>
 
@@ -2890,15 +2985,19 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             </div>
 
             <div class="list-head">
-              <div class="seg">
+              <div class="chip-tabs">
                 <button
                   v-for="item in RISK_TABS"
                   :key="item.key"
                   type="button"
-                  :class="{ 'is-active': riskFilter === item.key }"
+                  class="chip"
+                  :class="[`is-${item.key || 'ALL'}`, { 'is-active': riskFilter === item.key }]"
+                  :aria-pressed="riskFilter === item.key"
                   @click="riskFilter = item.key"
                 >
-                  {{ item.label }}<i>{{ item.count }}</i>
+                  <i class="chip-dot"></i>
+                  {{ item.label }}
+                  <em>{{ item.count }}</em>
                 </button>
               </div>
               <div class="list-side">
@@ -2908,14 +3007,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 </el-button>
               </div>
             </div>
-            <el-alert
-              v-if="!canManageRisk"
-              type="info"
-              :closable="false"
-              show-icon
-              title="仅项目经理 / PMO 可登记与关闭风险，其他成员可查看"
-              style="margin-bottom: 10px"
-            />
+            <p v-if="!canManageRisk" class="perm-hint">仅项目经理 / PMO 可登记与关闭风险，其他成员可查看</p>
             <el-table :data="filteredRisks" size="small">
               <template #empty>
                 <el-empty
@@ -3087,19 +3179,23 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
           </el-tab-pane>
 
           <el-tab-pane label="文档" name="docs">
-            <div class="list-head">
-              <div class="seg">
+            <div class="doc-toolbar">
+              <div class="chip-tabs">
                 <button
                   v-for="item in DOC_TABS"
                   :key="item.key"
                   type="button"
-                  :class="{ 'is-active': docFilter === item.key }"
+                  class="chip"
+                  :class="[`is-${item.key || 'ALL'}`, { 'is-active': docFilter === item.key }]"
+                  :aria-pressed="docFilter === item.key"
                   @click="docFilter = item.key"
                 >
-                  {{ item.label }}<i>{{ docCountOf(item.key) }}</i>
+                  <i class="chip-dot"></i>
+                  {{ item.label }}
+                  <em>{{ docCountOf(item.key) }}</em>
                 </button>
               </div>
-              <div class="doc-head-side">
+              <div class="doc-toolbar-side">
                 <el-input
                   v-model="docKeyword"
                   class="doc-search"
@@ -3113,28 +3209,26 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               </div>
             </div>
 
-            <div v-if="canUploadDoc" class="upload-panel">
-              <div class="upload-fields">
-                <div class="field">
-                  <label>归属类型</label>
-                  <el-select v-model="docUploadTarget" size="small" @change="docUploadBizId = ''">
-                    <el-option label="项目文档" value="PROJECT" />
-                    <el-option label="阶段文档" value="STAGE" />
-                    <el-option label="其他" value="OTHER" />
-                  </el-select>
-                </div>
-                <div v-if="docUploadTarget === 'STAGE'" class="field">
-                  <label>所属阶段 <em>*</em></label>
-                  <el-select v-model="docUploadBizId" size="small" placeholder="选择阶段">
-                    <el-option
-                      v-for="item in stages"
-                      :key="item.id"
-                      :label="item.stageName"
-                      :value="String(item.id)"
-                    />
-                  </el-select>
-                  <span v-if="!stages.length" class="ops-hint">请先在「阶段」页签新增阶段</span>
-                </div>
+            <div v-if="canUploadDoc" class="doc-upload">
+              <div class="doc-upload-field">
+                <label>归属类型</label>
+                <el-select v-model="docUploadTarget" size="small" @change="docUploadBizId = ''">
+                  <el-option label="项目文档" value="PROJECT" />
+                  <el-option label="阶段文档" value="STAGE" />
+                  <el-option label="其他" value="OTHER" />
+                </el-select>
+              </div>
+              <div v-if="docUploadTarget === 'STAGE'" class="doc-upload-field">
+                <label title="阶段文档是「完成阶段」的前置校验">所属阶段 <em>*</em></label>
+                <el-select v-model="docUploadBizId" size="small" placeholder="选择阶段">
+                  <el-option
+                    v-for="item in stages"
+                    :key="item.id"
+                    :label="item.stageName"
+                    :value="String(item.id)"
+                  />
+                </el-select>
+                <span v-if="!stages.length" class="ops-hint">请先在「阶段」页签新增阶段</span>
               </div>
               <el-upload
                 class="doc-drop"
@@ -3145,20 +3239,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 :http-request="doUpload"
               >
                 <div v-loading="uploading" class="doc-drop-text">
-                  <b>把文件拖到这里，或点击选择</b>
-                  <span>单文件 ≤ 20MB；阶段文档是「完成阶段」的前置校验</span>
+                  <b>拖拽文件到此处，或点击上传</b>
+                  <span>单文件 ≤ 20MB</span>
                 </div>
               </el-upload>
             </div>
-            <el-alert
-              v-else
-              type="info"
-              :closable="false"
-              show-icon
-              title="当前账号无文档上传权限，仅可查看与下载"
-            />
+            <p v-else class="doc-readonly">当前账号无文档上传权限，仅可查看与下载</p>
 
-            <el-table :data="filteredDocs" size="small" style="margin-top: 12px">
+            <el-table :data="filteredDocs" size="small" style="margin-top: 10px">
               <template #empty>
                 <el-empty
                   :description="
@@ -3170,10 +3258,18 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <el-table-column label="文件" min-width="260">
                 <template #default="{ row }">
                   <div class="doc-cell">
-                    <span class="doc-ext">{{ docExt(row.fileName) }}</span>
+                    <span
+                      class="doc-ext"
+                      :class="`is-${docKind(row.fileName)}`"
+                      :title="row.mime || '未知类型'"
+                    >
+                      {{ docExt(row.fileName) }}
+                    </span>
                     <div class="doc-meta">
                       <div class="cell-main">{{ row.fileName }}</div>
-                      <div class="cell-sub">{{ formatSize(row.size) }} · {{ row.mime || '未知类型' }}</div>
+                      <div class="cell-sub">
+                        {{ docFormatLabel(row.fileName) }} · {{ formatSize(row.size) }}
+                      </div>
                     </div>
                   </div>
                 </template>
@@ -3449,70 +3545,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </el-tabs>
       </div>
 
-      <div class="detail-actions">
-          <el-button
-            v-if="detail.status === 'APPROVING' && canApproveProject"
-            type="danger"
-            link
-            @click="doReject"
-          >
-            驳回
-          </el-button>
-          <el-button
-            v-if="canTerminate && canEdit"
-            type="danger"
-            plain
-            @click="doTerminate"
-          >
-            终止项目
-          </el-button>
-          <span class="footer-spacer"></span>
-          <el-button v-if="detail.status === 'DRAFT' && canCreateProject" type="primary" @click="doSubmit">
-            提交审批
-          </el-button>
-          <!-- 先开工后补审批：已开工项目在期限内提交补审批，逾期仅提示 -->
-          <el-button
-            v-if="detail.status === 'IN_PROGRESS' && detail.retroApproval && canCreateProject"
-            :type="retroDuePassed ? 'warning' : 'primary'"
-            plain
-            @click="doSubmit"
-          >
-            {{ detail.retroApproval === 2 ? '重新提交补审批' : '提交补审批' }}
-          </el-button>
-          <el-button v-if="detail.status === 'APPROVING' && canApproveProject" type="primary" @click="doApprove">
-            审批通过
-          </el-button>
-          <el-button v-if="detail.status === 'APPROVED' && canEdit" type="primary" @click="doStatus('IN_PROGRESS')">
-            启动项目
-          </el-button>
-          <el-button
-            v-if="detail.status === 'IN_PROGRESS' && canEdit"
-            type="warning"
-            plain
-            @click="doStatus('SUSPENDED')"
-          >
-            暂停
-          </el-button>
-          <el-button v-if="detail.status === 'SUSPENDED' && canEdit" type="primary" plain @click="doStatus('IN_PROGRESS')">
-            恢复
-          </el-button>
-          <el-button
-            v-if="detail.status === 'IN_PROGRESS' && canEdit"
-            type="primary"
-            @click="doStatus('COMPLETED')"
-          >
-            完成
-          </el-button>
-          <el-button v-if="detail.status === 'COMPLETED' && canEdit" @click="doStatus('IN_PROGRESS')">
-            重新打开
-          </el-button>
-          <el-button v-if="detail.status === 'COMPLETED' && canEdit" type="primary" @click="doStatus('ACCEPTED')">
-            验收
-          </el-button>
-          <el-button v-if="detail.status === 'ACCEPTED' && canEdit" type="primary" @click="doStatus('CLOSED')">
-            关闭项目
-          </el-button>
-      </div>
       </div>
 
       <div v-else v-loading="detailLoading" class="pms-card detail-loading">
@@ -3668,46 +3700,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       <template #footer>
         <el-button @click="riskVisible = false">取消</el-button>
         <el-button type="primary" @click="saveRisk">保存</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog v-model="baselineListVisible" title="项目基线" width="min(760px, 94vw)" align-center>
-      <p class="form-hint">立项通过与每次变更通过各冻结一次，可查看当时的阶段 / 任务 / 进度快照。</p>
-      <el-table :data="baselines" size="small">
-        <template #empty>
-          <el-empty description="尚未冻结基线：立项审批通过后自动生成 V1.0" :image-size="64" />
-        </template>
-        <el-table-column prop="version" label="版本" width="90" />
-        <el-table-column prop="baselineName" label="名称" min-width="150" />
-        <el-table-column label="类型" width="110">
-          <template #default="{ row }">
-            <el-tag size="small" effect="plain" :type="row.baselineType === 'CHANGE' ? 'warning' : 'info'">
-              {{ row.baselineTypeLabel || BASELINE_TYPE[row.baselineType] || row.baselineType }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="冻结人" width="100">
-          <template #default="{ row }">{{ row.frozenByName || userName(row.frozenBy) }}</template>
-        </el-table-column>
-        <el-table-column prop="frozenTime" label="冻结时间" width="120" />
-        <el-table-column label="操作" width="110">
-          <template #default="{ row }">
-            <el-button link type="primary" @click="openBaseline(row)">查看快照</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-      <template #footer>
-        <el-button @click="baselineListVisible = false">关闭</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog v-model="baselineVisible" :title="baselineTitle" width="min(760px, 94vw)" align-center>
-      <div v-loading="baselineLoading" class="baseline-body">
-        <pre v-if="baselineContent" class="json-block">{{ baselineContent }}</pre>
-        <el-empty v-else description="暂无快照内容" :image-size="64" />
-      </div>
-      <template #footer>
-        <el-button type="primary" @click="baselineVisible = false">关闭</el-button>
       </template>
     </el-dialog>
   </div>
@@ -4422,18 +4414,22 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   padding: 20px 20px 24px;
 }
 
-/* 项目状态流转按钮固定在卡片底部，长页签滚动时也能随手操作 */
-.detail-actions {
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
+/* 状态标签 + 全部操作同排靠右，与项目名共用一行 */
+.detail-head-ops {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
-  padding: 12px 20px;
-  border-top: 1px solid var(--pms-line-soft);
-  background: var(--pms-surface);
+  min-width: 0;
+  margin-left: auto;
+}
+
+.detail-head-ops .ops-divider {
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  background: var(--pms-line);
 }
 
 /* ---------------- 项目问题页签 ---------------- */
@@ -4590,13 +4586,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   font-size: 12px;
   color: var(--pms-text-3);
   font-variant-numeric: tabular-nums;
-}
-
-.detail-tags {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 
 .metrics {
@@ -4824,100 +4813,197 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 
 
 /* ---------------- 文档 ---------------- */
-.doc-head-side {
+.doc-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+/* 归属 / 状态筛选：药丸胶囊，刻意区别于上方 el-tabs 的导航样式 */
+.chip-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--pms-text-2);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease;
+}
+
+.chip:hover {
+  background: #f3f6fb;
+  color: var(--pms-text);
+}
+
+.chip.is-active {
+  border-color: #d5e3ff;
+  background: var(--pms-primary-weak);
+  color: var(--pms-primary-deep);
+}
+
+.chip-dot {
+  flex: none;
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #b9c4d6;
+}
+
+/* 文档归属：项目 / 阶段 / 其他 */
+.chip.is-PROJECT .chip-dot {
+  background: var(--pms-primary);
+}
+
+.chip.is-STAGE .chip-dot {
+  background: var(--pms-ok);
+}
+
+.chip.is-OTHER .chip-dot {
+  background: var(--pms-warn);
+}
+
+/* 风险与问题：风险 / 问题 / 已关闭（已关闭沿用默认灰点） */
+.chip.is-RISK .chip-dot {
+  background: var(--pms-danger);
+}
+
+.chip.is-ISSUE .chip-dot {
+  background: var(--pms-warn);
+}
+
+.chip em {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #eef2f8;
+  color: var(--pms-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.chip.is-active em {
+  background: #fff;
+  color: var(--pms-primary-deep);
+}
+
+.doc-toolbar-side {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-left: auto;
 }
 
-.doc-head-side :deep(.doc-search) {
+.doc-toolbar-side :deep(.doc-search) {
   width: 200px;
 }
 
-.seg button i {
-  margin-left: 4px;
-  font-style: normal;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--pms-text-3);
-}
-
-.seg button.is-active i {
-  color: var(--pms-primary-deep);
-}
-
-/* 左：归属字段（纵向排列）　右：拖拽区（始终撑满剩余宽高） */
-.upload-panel {
-  display: grid;
-  grid-template-columns: 208px minmax(0, 1fr);
-  align-items: stretch;
-  gap: 12px;
-  padding: 12px 14px;
-  border: 1px dashed var(--pms-line);
+/* 上传区：单行工具条，字段横排，拖拽区只留一条窄带 */
+.doc-upload {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--pms-line);
   border-radius: 10px;
   background: #fafbfe;
 }
 
-.upload-fields {
+.doc-upload-field {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
+  align-items: center;
+  flex: none;
+  gap: 6px;
 }
 
-.upload-fields .field {
-  width: 100%;
-  gap: 4px;
+.doc-upload-field > label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--pms-text-2);
+  white-space: nowrap;
 }
 
-.upload-fields .field :deep(.el-select) {
-  width: 100%;
+.doc-upload-field em {
+  margin-left: 2px;
+  font-style: normal;
+  color: var(--el-color-danger);
+}
+
+.doc-upload-field :deep(.el-select) {
+  width: 116px;
+}
+
+.doc-upload-field.is-stage :deep(.el-select) {
+  width: 148px;
 }
 
 .doc-drop {
   display: flex;
+  flex: 1 1 240px;
   min-width: 0;
-  /* 只有一行字段时也保留可拖拽高度 */
-  min-height: 96px;
 }
 
 .doc-drop :deep(.el-upload) {
   display: flex;
   width: 100%;
-  height: 100%;
 }
 
 .doc-drop :deep(.el-upload-dragger) {
   display: flex;
-  flex: 1;
   align-items: center;
   justify-content: center;
   width: 100%;
-  height: 100%;
-  padding: 10px 16px;
+  height: auto;
+  min-height: 34px;
+  padding: 0 12px;
   border-radius: 8px;
   background: #fff;
 }
 
 .doc-drop-text {
   display: flex;
-  flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 2px 10px;
-  line-height: 1.6;
+  gap: 0 8px;
 }
 
 .doc-drop-text b {
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
-  color: var(--pms-text);
+  color: var(--pms-text-2);
 }
 
 .doc-drop-text span {
   font-size: 11.5px;
+  color: var(--pms-text-3);
+}
+
+.perm-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
   color: var(--pms-text-3);
 }
 
@@ -4928,48 +5014,65 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   min-width: 0;
 }
 
+/* 文件格式块：按类型着色，扫列表时不必读后缀 */
 .doc-ext {
   flex: none;
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
   display: grid;
   place-items: center;
   border-radius: 8px;
+  background: #eef2f8;
+  color: var(--pms-text-2);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.doc-ext.is-pdf {
+  background: var(--pms-danger-weak);
+  color: var(--pms-danger);
+}
+
+.doc-ext.is-word {
   background: var(--pms-primary-weak);
   color: var(--pms-primary-deep);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+}
+
+.doc-ext.is-excel {
+  background: var(--pms-ok-weak);
+  color: var(--pms-ok);
+}
+
+.doc-ext.is-ppt {
+  background: var(--pms-warn-weak);
+  color: var(--pms-warn);
+}
+
+.doc-ext.is-image {
+  background: #f1edff;
+  color: #6c4bd8;
+}
+
+.doc-ext.is-archive {
+  background: #f3f5f9;
+  color: #6b7789;
 }
 
 .doc-meta {
   min-width: 0;
 }
 
+.doc-meta .cell-main {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .doc-scope {
   margin-left: 6px;
   font-size: 12px;
   color: var(--pms-text-3);
-}
-
-/* ---------------- 基线快照 ---------------- */
-.baseline-body {
-  max-height: min(62vh, 620px);
-  overflow: auto;
-}
-
-.json-block {
-  margin: 0;
-  padding: 12px 14px;
-  border: 1px solid var(--pms-line);
-  border-radius: 8px;
-  background: #f7f9fd;
-  color: var(--pms-text-2);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 
 @media (max-width: 900px) {
@@ -5020,8 +5123,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     padding: 16px 14px 20px;
   }
 
-  .detail-actions {
-    padding: 10px 14px;
+  .detail-head {
+    align-items: flex-start;
+  }
+
+  .detail-head-ops {
+    justify-content: flex-start;
+    margin-left: 0;
+    gap: 6px;
   }
 
   .alert-item {
@@ -5082,26 +5191,30 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     justify-content: space-between;
   }
 
-  .doc-head-side {
+  .doc-toolbar-side {
     width: 100%;
     margin-left: 0;
     flex-wrap: wrap;
   }
 
-  .doc-head-side :deep(.doc-search) {
-    width: 100%;
+  .doc-toolbar-side :deep(.doc-search) {
+    flex: 1 1 auto;
+    width: auto;
   }
 
-  .upload-panel {
-    grid-template-columns: 1fr;
+  .doc-upload-field,
+  .doc-upload-field.is-stage {
+    flex: 1 1 auto;
   }
 
-  .upload-fields .field {
-    width: 100%;
+  .doc-upload-field :deep(.el-select),
+  .doc-upload-field.is-stage :deep(.el-select) {
+    flex: 1 1 auto;
+    width: auto;
   }
 
   .doc-drop {
-    min-height: 84px;
+    flex: 1 1 100%;
   }
 
   .pager {

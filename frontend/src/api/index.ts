@@ -207,13 +207,6 @@ export const convertProjectAlert = (id: string, key: string) =>
 export const ignoreProjectAlert = (id: string, key: string, days = 7) =>
   post<{ mutedUntil: string }>(`/projects/${id}/alerts/ignore`, { key, days })
 
-/** 项目基线（立项基线 + 每次变更通过后的冻结快照）。 */
-export const listBaselines = (id: string) =>
-  get<Record<string, unknown>[]>(`/projects/${id}/baselines`)
-
-export const baselineDetail = (id: string, baselineId: string) =>
-  get<Record<string, unknown>>(`/projects/${id}/baselines/${baselineId}`)
-
 export const listMembers = (id: string) => get<Record<string, unknown>[]>(`/projects/${id}/members`)
 
 export const addMember = (id: string, data: Record<string, unknown>) =>
