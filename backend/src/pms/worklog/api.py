@@ -174,6 +174,19 @@ async def my_issues(
     return ok(await service.my_issues(session, context.user_id, issueType))
 
 
+@router.get("/day-targets", summary="某天已填报对象")
+async def day_targets(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("worklog:create"))],
+    logDate: Annotated[str, Query()] = "",
+) -> object:
+    """某天我已填的日志对象（左栏「已写」标记与当日清单）。
+
+    注：必须定义在 `/{worklog_id}` 之前，否则会被路径参数路由抢先匹配。
+    """
+    return ok(await service.day_targets(session, context.user_id, logDate))
+
+
 @router.get("/day-summary", summary="某天累计工时")
 async def day_summary(
     session: Annotated[AsyncSession, Depends(get_session)],

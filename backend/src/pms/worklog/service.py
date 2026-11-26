@@ -22,6 +22,7 @@ from pms.common.exceptions import (
     NotFoundError,
 )
 from pms.core.context import AuthContext
+from pms.crm.models import CrmProduct
 from pms.issue.models import IssIssue
 from pms.issue.state import IssueStatus, IssueType
 from pms.org.scope import project_visible, worklog_visible
@@ -84,6 +85,8 @@ LOG_TYPE_META: Final[dict[str, LogTypeMeta]] = {
     "PERSONAL": LogTypeMeta("个人", personal_only=True),
     "STUDY": LogTypeMeta("学习"),
     "OUTING": LogTypeMeta("外出"),
+    # 通用会议：不绑项目、不填明细，只记工时与内容（旧的三类会议保留兼容历史数据）
+    "MEETING": LogTypeMeta("会议"),
     "MEETING_COMPANY": LogTypeMeta("公司会议"),
     "MEETING_DEPT": LogTypeMeta("部门会议"),
     "MEETING_PROJECT": LogTypeMeta("项目会议"),
@@ -1559,6 +1562,7 @@ async def my_issues(
             IssIssue.issue_type,
             IssIssue.status,
             IssIssue.project_id,
+            IssIssue.product_id,
         )
         .where(*conditions)
         .order_by(IssIssue.issue_type, IssIssue.id.desc())
@@ -1566,6 +1570,16 @@ async def my_issues(
     )
     rows = result.all()
     names = await project_names(session, {int(row.project_id) for row in rows})
+    # 生产问题常挂产品：带上产品名，填报时能区分同一项目下的不同产品
+    product_ids = {int(row.product_id or 0) for row in rows if int(row.product_id or 0) > 0}
+    product_names: dict[int, str] = {}
+    if product_ids:
+        product_rows = await session.execute(
+            select(CrmProduct.id, CrmProduct.product_name).where(
+                CrmProduct.id.in_(product_ids), CrmProduct.deleted == 0
+            )
+        )
+        product_names = {int(pid): str(name or "") for pid, name in product_rows.all()}
     return [
         {
             "id": int(issue_id),
@@ -1575,9 +1589,113 @@ async def my_issues(
             "status": str(status or ""),
             "projectId": int(project_id),
             "projectName": names.get(int(project_id), ""),
+            "productId": int(product_id or 0),
+            "productName": product_names.get(int(product_id or 0), ""),
         }
-        for issue_id, issue_no, title, issue_type, status, project_id in rows
+        for issue_id, issue_no, title, issue_type, status, project_id, product_id in rows
     ]
+
+
+async def day_targets(
+    session: AsyncSession, user_id: int, log_date: str = ""
+) -> list[dict[str, object]]:
+    """某天我已填的日志对象清单（左栏「已写」标记 + 当日清单）。
+
+    一条日志对应一个对象：项目日志按明细拆成多行（历史多项目日志也能逐项标记），
+    会议 / 学习等非项目日志单独一行；返回 id 供前端直接打开详情。
+    """
+    raw = str(log_date or "").strip()
+    day = _as_date(raw) if raw else date.today()
+    rows = list(
+        (
+            await session.execute(
+                select(WlWorklog)
+                .where(
+                    WlWorklog.deleted == 0,
+                    WlWorklog.user_id == user_id,
+                    WlWorklog.log_date == day,
+                )
+                .order_by(WlWorklog.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        return []
+    worklog_ids = [int(row.id) for row in rows]
+    items = list(
+        (
+            await session.execute(
+                select(WlItem).where(
+                    WlItem.worklog_id.in_(worklog_ids), WlItem.deleted == 0
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    by_log: dict[int, list[WlItem]] = {}
+    for item in items:
+        by_log.setdefault(int(item.worklog_id), []).append(item)
+    project_ids = {int(item.project_id) for item in items} | {
+        int(row.project_id) for row in rows
+    }
+    names = await project_names(session, project_ids)
+    issue_ids = {int(item.issue_id) for item in items if int(item.issue_id or 0) > 0}
+    issue_map: dict[int, tuple[str, str, str]] = {}
+    if issue_ids:
+        issue_rows = await session.execute(
+            select(IssIssue.id, IssIssue.issue_no, IssIssue.title, IssIssue.issue_type).where(
+                IssIssue.id.in_(issue_ids)
+            )
+        )
+        issue_map = {
+            int(issue_id): (str(issue_no or ""), str(title or ""), str(issue_type or ""))
+            for issue_id, issue_no, title, issue_type in issue_rows.all()
+        }
+
+    out: list[dict[str, object]] = []
+    for row in rows:
+        entries = by_log.get(int(row.id)) or []
+        base = {
+            "logType": str(row.log_type or "PROJECT"),
+            "status": str(row.status or ""),
+            "content": str(row.content or ""),
+        }
+        if not log_type_meta(row.log_type).requires_project or not entries:
+            out.append(
+                {
+                    **base,
+                    "worklogId": int(row.id),
+                    "hours": float(row.total_hours or 0),
+                    "projectId": 0,
+                    "projectName": "",
+                    "issueId": 0,
+                    "issueNo": "",
+                    "issueTitle": "",
+                    "issueType": "",
+                }
+            )
+            continue
+        for item in entries:
+            project_id = int(item.project_id or 0)
+            issue_id = int(item.issue_id or 0)
+            issue_no, issue_title, issue_type = issue_map.get(issue_id, ("", "", ""))
+            out.append(
+                {
+                    **base,
+                    "worklogId": int(row.id),
+                    "hours": float(item.hours or 0),
+                    "projectId": project_id,
+                    "projectName": names.get(project_id, ""),
+                    "issueId": issue_id,
+                    "issueNo": issue_no,
+                    "issueTitle": issue_title,
+                    "issueType": issue_type,
+                }
+            )
+    return out
 
 
 async def get_worklog(session: AsyncSession, worklog_id: int) -> WlWorklog:

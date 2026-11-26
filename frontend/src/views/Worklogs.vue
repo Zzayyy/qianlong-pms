@@ -29,6 +29,7 @@ import {
   worklogAction,
   worklogComments,
   worklogDaySummary,
+  worklogDayTargets,
   worklogDetail,
   worklogIssues,
   worklogOptions,
@@ -36,6 +37,7 @@ import {
   worklogReminderTargets,
   worklogReminders,
   worklogSummary,
+  type WorklogDayTarget,
   type WorklogIssue,
   type WorklogMyIssue
 } from '@/api'
@@ -638,18 +640,54 @@ const filters = reactive({
   keyword: ''
 })
 
+/** 日期快捷筛选：当日 / 本周 / 最近两周（默认），手动改日期即视为自定义。 */
+type DatePreset = 'day' | 'week' | 'fortnight'
+const datePreset = ref<DatePreset | ''>('fortnight')
+/** 「当日」模式下的单日期 */
+const dayDate = ref(localToday())
+
+/** 列表/导出的日期区间：当日模式只看这一天。 */
+const listDates = (): (string | undefined)[] => {
+  if (datePreset.value === 'day') return [dayDate.value, dayDate.value]
+  const range = filters.dateRange || []
+  return [range[0], range[1]]
+}
+
+/** 快捷日期：写入单日/区间后立即查询。 */
+const applyPreset = (preset: DatePreset) => {
+  datePreset.value = preset
+  if (preset === 'day') {
+    dayDate.value = localToday()
+  } else if (preset === 'week') {
+    const end = new Date()
+    const start = new Date()
+    // 周一为一周起点
+    start.setDate(end.getDate() - ((end.getDay() + 6) % 7))
+    filters.dateRange = [isoOf(start), isoOf(end)]
+  } else {
+    filters.dateRange = defaultRange()
+  }
+  searchLogs()
+}
+
+/** 手选区间日期：取消快捷高亮。 */
+const onRangePicked = () => {
+  datePreset.value = ''
+  searchLogs()
+}
+
 const loadLogs = async () => {
   listLoading.value = true
   try {
-    const range = filters.dateRange || []
+    const [dateFrom, dateTo] = listDates()
     const params: Record<string, unknown> = {
-      scope: tab.value === 'mine' ? 'mine' : 'visible',
+      scope: tab.value === 'team' ? 'visible' : 'mine',
       pageNum: page.pageNum,
       pageSize: page.pageSize,
       projectId: filters.projectId || undefined,
       keyword: filters.keyword.trim() || undefined,
-      dateFrom: range[0],
-      dateTo: range[1]
+      dateFrom,
+      dateTo
     }
     if (tab.value === 'team') {
       // 团队日志只看已生效的日志，草稿仍仅作者可见
@@ -673,9 +711,11 @@ const searchLogs = () => {
 }
 
 const resetFilters = () => {
+  datePreset.value = 'fortnight'
   filters.dateRange = defaultRange()
   filters.projectId = ''
   filters.keyword = ''
+  dayDate.value = localToday()
   searchLogs()
 }
 
@@ -687,7 +727,7 @@ const switchTab = (key: TabKey) => {
 }
 
 const editable = (row: any) =>
-  tab.value === 'mine' &&
+  tab.value !== 'team' &&
   String(row.userId) === currentUserId.value &&
   ['DRAFT', 'REJECTED'].includes(String(row.status))
 
@@ -727,26 +767,34 @@ const loadOptions = async () => {
   }
 }
 
-/** 左侧项目栏：按关键字过滤我参与/负责的项目。 */
-const projectKeyword = ref('')
-const filteredProjects = computed(() => {
-  const key = projectKeyword.value.trim().toLowerCase()
-  if (!key) return options.value.projects
-  return options.value.projects.filter((item) =>
-    `${item.projectName} ${item.projectCode}`.toLowerCase().includes(key)
-  )
-})
+/* ------------------------------ 左栏：我的填报对象 ------------------------------ */
+/* 项目 / Bug / 生产问题 / 会议混排成一条列表；一条日志只对应一个对象 */
+const railKeyword = ref('')
+
+type RailKind = 'MEETING' | 'PROJECT' | 'BUG' | 'PROD'
+
+interface RailRow {
+  key: string
+  kind: RailKind
+  title: string
+  sub: string
+  project?: WorklogProject
+  issue?: WorklogMyIssue
+}
+
+const RAIL_KIND_LABEL: Record<RailKind, string> = {
+  MEETING: '会议',
+  PROJECT: '项目',
+  BUG: 'Bug',
+  PROD: '生产问题'
+}
 
 const projectOf = (projectId: string) =>
   options.value.projects.find((item) => String(item.id) === projectId) || null
 
-/* 左栏三个视图：我的项目 / 我的 Bug / 我的生产问题（问题点击即挂到日志明细） */
-type RailTab = 'PROJECT' | 'BUG' | 'PROD'
-const railTab = ref<RailTab>('PROJECT')
 const myIssues = ref<Record<'BUG' | 'PROD', WorklogMyIssue[]>>({ BUG: [], PROD: [] })
 const myIssuesLoaded = ref<Record<'BUG' | 'PROD', boolean>>({ BUG: false, PROD: false })
 const myIssuesLoading = ref<Record<'BUG' | 'PROD', boolean>>({ BUG: false, PROD: false })
-const issueKeyword = ref('')
 
 const loadMyIssues = async (type: 'BUG' | 'PROD') => {
   if (myIssuesLoaded.value[type] || myIssuesLoading.value[type]) return
@@ -762,63 +810,144 @@ const loadMyIssues = async (type: 'BUG' | 'PROD') => {
   }
 }
 
-const RAIL_TABS: { value: RailTab; label: string }[] = [
-  { value: 'PROJECT', label: '项目' },
-  { value: 'BUG', label: 'Bug' },
-  { value: 'PROD', label: '生产问题' }
-]
+const loadAllMyIssues = () =>
+  canCreate.value ? Promise.all([loadMyIssues('BUG'), loadMyIssues('PROD')]) : Promise.resolve()
 
-const switchRail = (tab: RailTab) => {
-  railTab.value = tab
-  projectKeyword.value = ''
-  issueKeyword.value = ''
-  if (tab !== 'PROJECT') void loadMyIssues(tab)
+/** 问题副标题：所属项目 · 关联产品（生产问题常见）。 */
+const issueSub = (issue: WorklogMyIssue) =>
+  [issue.projectName, issue.productName].filter(Boolean).join(' · ') || '未关联项目'
+
+/** 混排列表：会议固定在第一条，其后依次是项目、Bug、生产问题。 */
+const railRows = computed<RailRow[]>(() => {
+  const keyword = railKeyword.value.trim().toLowerCase()
+  const match = (...values: (string | undefined)[]) =>
+    !keyword || values.join(' ').toLowerCase().includes(keyword)
+  const rows: RailRow[] = []
+  if (match('会议', 'meeting')) {
+    rows.push({ key: 'MEETING', kind: 'MEETING', title: '会议', sub: '公司 / 部门会议' })
+  }
+  options.value.projects
+    .filter((item) => match(item.projectName, item.projectCode))
+    .forEach((item) =>
+      rows.push({
+        key: `P:${item.id}`,
+        kind: 'PROJECT',
+        title: item.projectName,
+        sub: item.projectCode,
+        project: item
+      })
+    )
+  ;(['BUG', 'PROD'] as const).forEach((type) => {
+    myIssues.value[type]
+      .filter((item) => match(item.issueNo, item.title, item.projectName, item.productName))
+      .forEach((item) =>
+        rows.push({
+          key: `I:${item.id}`,
+          kind: type,
+          title: `${item.issueNo} ${item.title}`.trim(),
+          sub: issueSub(item),
+          issue: item
+        })
+      )
+  })
+  return rows
+})
+
+const railLoading = computed(() => myIssuesLoading.value.BUG || myIssuesLoading.value.PROD)
+
+/** 当前日志绑定的对象：会议 / 问题 / 项目（单选）。 */
+const selectedKey = computed(() => {
+  if (!isProjectType(form.logType)) return 'MEETING'
+  const item = form.items[0]
+  if (!item) return ''
+  return item.issueId ? `I:${item.issueId}` : `P:${item.projectId}`
+})
+
+const isRowPicked = (row: RailRow) => selectedKey.value === row.key
+
+/** 编辑器标题右侧显示的当前对象名。 */
+const selectedTitle = computed(() => {
+  if (selectedKey.value === 'MEETING') return '会议'
+  const item = form.items[0]
+  if (!item) return ''
+  if (item.issueId) {
+    const issue = [...myIssues.value.BUG, ...myIssues.value.PROD].find(
+      (row) => String(row.id) === item.issueId
+    )
+    return issue ? `${issue.issueNo} ${issue.title}`.trim() : '关联问题'
+  }
+  return projectOf(item.projectId)?.projectName || '未知项目'
+})
+
+const pickedCount = computed(() => (selectedKey.value ? 1 : 0))
+
+/** 单选模式下日志只有一个归属项目，关联对象下拉/工时都取这一条。 */
+const currentProjectId = computed(() => form.items[0]?.projectId || '')
+
+/* ------------------------------ 已写清单（按所选日期） ------------------------------ */
+const dayTargets = ref<WorklogDayTarget[]>([])
+
+const loadDayTargets = async () => {
+  if (!canCreate.value) return
+  try {
+    const rows = await worklogDayTargets(form.logDate)
+    dayTargets.value = Array.isArray(rows) ? rows : []
+  } catch {
+    dayTargets.value = []
+  }
 }
 
-const railLoading = computed(() =>
-  railTab.value === 'PROJECT' ? false : myIssuesLoading.value[railTab.value]
-)
-
-const railTitle = computed(
-  () =>
-    ({ PROJECT: '我的项目', BUG: '我的 Bug', PROD: '我的生产问题' })[railTab.value]
-)
-
-const railIssues = computed<WorklogMyIssue[]>(() =>
-  railTab.value === 'PROJECT' ? [] : myIssues.value[railTab.value]
-)
-
-const filteredIssues = computed(() => {
-  const key = issueKeyword.value.trim().toLowerCase()
-  if (!key) return railIssues.value
-  return railIssues.value.filter((item) =>
-    `${item.issueNo} ${item.title} ${item.projectName}`.toLowerCase().includes(key)
+/** 左栏某一行对应的已写记录：问题按问题 ID，项目按项目 ID，会议按类型。 */
+const targetsOfRow = (row: RailRow): WorklogDayTarget[] => {
+  if (row.kind === 'MEETING') {
+    return dayTargets.value.filter((item) => !isProjectType(item.logType))
+  }
+  if (row.issue) {
+    const issueId = String(row.issue.id)
+    return dayTargets.value.filter(
+      (item) => String(item.issueId || '0') !== '0' && String(item.issueId) === issueId
+    )
+  }
+  const projectId = String(row.project?.id || '')
+  return dayTargets.value.filter(
+    (item) => String(item.projectId || '0') !== '0' && String(item.projectId) === projectId
   )
-})
+}
 
-const railCount = computed(() =>
-  railTab.value === 'PROJECT' ? options.value.projects.length : railIssues.value.length
+/** 行内「已写」标记：一条显示工时，多条显示条数 + 合计。 */
+const writtenText = (row: RailRow) => {
+  const list = targetsOfRow(row)
+  if (!list.length) return ''
+  const hours =
+    Math.round(list.reduce((sum, item) => sum + (Number(item.hours) || 0), 0) * 10) / 10
+  return list.length > 1 ? `已写 ${list.length} 条 · ${hours}h` : `已写 ${hours}h`
+}
+
+const writtenCount = computed(() => dayTargets.value.length)
+
+/** 当日已填清单：类型 + 对象名 + 工时，点条目打开日志详情。 */
+const dayRows = computed(() =>
+  dayTargets.value.map((item) => {
+    const isMeeting = !isProjectType(item.logType)
+    const isIssue = String(item.issueId || '0') !== '0'
+    return {
+      id: String(item.worklogId),
+      target: isMeeting
+        ? logTypeLabel(item.logType)
+        : isIssue
+          ? `${item.issueNo || '问题'} ${item.issueTitle || ''}`.trim()
+          : item.projectName || '未知项目',
+      kind: isMeeting ? logTypeLabel(item.logType) : isIssue ? (item.issueType === 'PROD' ? '生产问题' : 'Bug') : '项目',
+      kindClass: isMeeting ? 'MEETING' : isIssue ? (item.issueType === 'PROD' ? 'PROD' : 'BUG') : 'PROJECT',
+      hours: Number(item.hours || 0),
+      content: item.content
+    }
+  })
 )
 
-const isPicked = (projectId: string | number) =>
-  form.items.some((item) => item.projectId === String(projectId))
-
-const isIssuePicked = (issueId: string | number) =>
-  form.items.some((item) => item.issueId === String(issueId))
-
-/** 明细按项目去重计数：同一项目可以有多条任务/问题明细。 */
-const pickedCount = computed(() => new Set(form.items.map((item) => item.projectId)).size)
-
-const pickedProjectNames = computed(() => {
-  const names = form.items.map((item) => projectOf(item.projectId)?.projectName || '未知项目')
-  return names.filter((name, index) => names.indexOf(name) === index)
-})
-
-/** 合计工时 = 各项目工时之和（后端按明细合计校验）。 */
-const totalHours = computed(() => {
-  const sum = form.items.reduce((acc, item) => acc + (Number(item.hours) || 0), 0)
-  return Math.round(sum * 100) / 100
-})
+const openDayLog = (row: any) => {
+  void openDetail({ id: row.id })
+}
 
 /** 新增时第一个项目默认一整个工作日。 */
 const DEFAULT_DAY_HOURS = 8
@@ -888,75 +1017,74 @@ const issueLabel = (issue: {
     issue.title || issue.issueTitle || ''
   }`.trim()
 
-/** 点击左侧项目：多选，一次日志可覆盖多个项目；多选后自动平分工时。 */
-const toggleProject = (project: WorklogProject) => {
+/** 清空选择：回到空白的「写日志」状态。 */
+const clearSelection = () => {
   form.logType = 'PROJECT'
-  const key = String(project.id)
-  if (isPicked(key)) {
-    // 取消项目 = 移除该项目下的全部明细（含已挂的任务/问题）
-    const rest = form.items.filter((item) => item.projectId !== key)
-    form.items.splice(0, form.items.length, ...rest)
-    if (form.items.length > 1) distributeHours()
-    // 回到单项目时恢复整天工时，避免留下均分后的半天数字
-    else if (form.items.length === 1 && formMode.value === 'create') {
-      form.items[0].hours = DEFAULT_DAY_HOURS
-    }
+  form.items.splice(0, form.items.length)
+}
+
+/** 选中项目：一条日志只绑一个项目，再次点击即取消。 */
+const selectProject = (project: WorklogProject) => {
+  if (selectedKey.value === `P:${project.id}`) {
+    clearSelection()
     return
   }
-  form.items.push({
+  form.logType = 'PROJECT'
+  const key = String(project.id)
+  form.items.splice(0, form.items.length, {
     projectId: key,
     taskId: '',
     issueId: '',
-    hours: form.items.length === 0 ? defaultHours() : undefined,
+    hours: defaultHours(),
     progressAfter: 0
   })
   void loadProjectTasks(key)
   void loadProjectIssues(key)
-  if (form.items.length > 1) distributeHours()
-  if (form.items.length === 1) focusEditor()
+  focusEditor()
 }
 
-/**
- * 左侧点 Bug / 生产问题：自动带上所属项目并挂到明细。
- * 该项目下已有未关联对象的明细时直接复用它，避免多出一行空工时。
- */
-const pickIssue = (issue: WorklogMyIssue) => {
+/** 选中 Bug / 生产问题：以该问题为对象，所属项目自动带出。 */
+const selectIssue = (issue: WorklogMyIssue) => {
   const iid = String(issue.id)
-  const pid = String(issue.projectId || '')
-  if (isIssuePicked(iid)) {
-    const rest = form.items.filter((item) => item.issueId !== iid)
-    form.items.splice(0, form.items.length, ...rest)
-    if (form.items.length === 1 && formMode.value === 'create') {
-      form.items[0].hours = DEFAULT_DAY_HOURS
-    }
+  if (selectedKey.value === `I:${iid}`) {
+    clearSelection()
     return
   }
+  const pid = String(issue.projectId || '')
   if (!pid || !projectOf(pid)) {
     ElMessage.warning('该问题所属项目不在你的填报范围内')
     return
   }
   form.logType = 'PROJECT'
-  const plain = form.items.find(
-    (item) => item.projectId === pid && !item.taskId && !item.issueId
-  )
-  if (plain) {
-    plain.issueId = iid
-  } else {
-    form.items.push({
-      projectId: pid,
-      taskId: '',
-      issueId: iid,
-      hours: form.items.length === 0 ? defaultHours() : undefined,
-      progressAfter: 0
-    })
-  }
+  form.items.splice(0, form.items.length, {
+    projectId: pid,
+    taskId: '',
+    issueId: iid,
+    hours: defaultHours(),
+    progressAfter: 0
+  })
   void loadProjectTasks(pid)
   void loadProjectIssues(pid)
   focusEditor()
 }
 
-const removeItem = (index: number) => {
-  if (index >= 0) form.items.splice(index, 1)
+/** 选中会议：不绑项目、不填明细，只手工填工时与内容。 */
+const selectMeeting = () => {
+  if (selectedKey.value === 'MEETING') {
+    clearSelection()
+    return
+  }
+  form.logType = 'MEETING'
+  form.items.splice(0, form.items.length)
+  if (!form.totalHours || Number(form.totalHours) <= 0) form.totalHours = DEFAULT_DAY_HOURS
+  focusEditor()
+}
+
+/** 左栏点击分发：会议 / 项目 / 问题三选一。 */
+const selectRailRow = (row: RailRow) => {
+  if (row.kind === 'MEETING') selectMeeting()
+  else if (row.issue) selectIssue(row.issue)
+  else if (row.project) selectProject(row.project)
 }
 
 /** 工作内容里可 @ 的候选：当前已选项目（去重，按选择顺序）。 */
@@ -970,113 +1098,6 @@ const mentionOptions = computed(() => {
 })
 
 const mentionRef = ref<any>()
-
-/** 把一段 @ 文本插到光标处（还没渲染编辑器时追加到末尾）。 */
-const insertMentionToken = async (token: string, hadEditor: boolean) => {
-  const textarea = mentionRef.value?.input?.textarea as HTMLTextAreaElement | undefined
-  if (!textarea || !hadEditor) {
-    const glue = form.content && !form.content.endsWith(' ') ? ' ' : ''
-    form.content = `${form.content}${glue}${token}`
-    return
-  }
-  const start = textarea.selectionStart ?? form.content.length
-  const end = textarea.selectionEnd ?? start
-  form.content = `${form.content.slice(0, start)}${token}${form.content.slice(end)}`
-  await nextTick()
-  textarea.focus()
-  const pos = start + token.length
-  textarea.setSelectionRange(pos, pos)
-}
-
-/** 左侧项目的 @ 按钮：先选中项目，再把 `@项目名` 插到光标处。 */
-const insertProjectMention = async (project: WorklogProject) => {
-  const hadEditor = Boolean(mentionRef.value)
-  if (!isPicked(project.id)) {
-    toggleProject(project)
-    await nextTick()
-  }
-  await insertMentionToken(`@${project.projectName} `, hadEditor)
-}
-
-/**
- * 左侧 Bug / 生产问题的 @ 按钮：先挂上该问题，再插入 `@项目名 问题编号`。
- * 保留 `@项目名` 前缀，工作内容仍能按项目拆分给周报。
- */
-const insertIssueMention = async (issue: WorklogMyIssue) => {
-  const projectName = projectOf(String(issue.projectId || ''))?.projectName || ''
-  if (!projectName) {
-    ElMessage.warning('该问题所属项目不在你的填报范围内')
-    return
-  }
-  const hadEditor = Boolean(mentionRef.value)
-  if (!isIssuePicked(issue.id)) {
-    pickIssue(issue)
-    await nextTick()
-  }
-  await insertMentionToken(`@${projectName} ${issue.issueNo} `, hadEditor)
-}
-
-const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-
-/**
- * 按「@项目名」把工作内容拆到各项目。
- * 没写 @ 时返回空 Map，沿用原来的整段内容。
- */
-const splitContentByProject = (text: string): Map<string, string> => {
-  const result = new Map<string, string>()
-  const items = form.items
-    .map((item) => ({ id: item.projectId, name: projectOf(item.projectId)?.projectName || '' }))
-    .filter((item) => item.name)
-  if (!items.length) return result
-  // 长名优先，避免「期权宝1」抢先匹配「期权宝12」
-  const sorted = [...items].sort((a, b) => b.name.length - a.name.length)
-  const pattern = new RegExp(
-    `@(${sorted.map((item) => escapeRegExp(item.name)).join('|')})`,
-    'g'
-  )
-  const matches = Array.from(text.matchAll(pattern))
-  if (!matches.length) return result
-  matches.forEach((match, index) => {
-    const target = items.find((item) => item.name === match[1])
-    if (!target) return
-    const start = (match.index || 0) + match[0].length
-    const end =
-      index + 1 < matches.length ? matches[index + 1].index || text.length : text.length
-    const segment = text.slice(start, end).trim()
-    if (!segment) return
-    const prev = result.get(target.id) || ''
-    result.set(target.id, prev ? `${prev}\n${segment}` : segment)
-  })
-  return result
-}
-
-/**
- * 平均分配：把当前合计（没填过就按 8h）按步长均分到各项目，
- * 除不尽的余数留给最后一个，保证合计不变。
- */
-const distributeHours = () => {
-  const count = form.items.length
-  if (count < 2) {
-    ElMessage.info('两条以上明细后可以平均分配')
-    return
-  }
-  const total = totalHours.value > 0 ? totalHours.value : DEFAULT_DAY_HOURS
-  const step = Number(options.value.step || 0.5) || 0.5
-  const base = Math.floor(total / count / step) * step
-  if (base <= 0) {
-    ElMessage.warning('工时太少，无法均分到每个项目')
-    return
-  }
-  let assigned = 0
-  form.items.forEach((item, index) => {
-    if (index === count - 1) {
-      item.hours = Math.round((total - assigned) * 100) / 100
-    } else {
-      item.hours = Math.round(base * 100) / 100
-      assigned += item.hours
-    }
-  })
-}
 
 const disabledDate = (time: Date) => {
   const maxDays = Number(options.value.backfillMaxDays ?? 5)
@@ -1092,6 +1113,7 @@ const LOG_TYPE_LABELS: Record<string, string> = {
   PERSONAL: '个人',
   STUDY: '学习',
   OUTING: '外出',
+  MEETING: '会议',
   MEETING_COMPANY: '公司会议',
   MEETING_DEPT: '部门会议',
   MEETING_PROJECT: '项目会议'
@@ -1119,19 +1141,25 @@ const form = reactive({
   logType: 'PROJECT',
   logDate: localToday(),
   items: [] as LogFormItem[],
+  /** 会议等非项目日志没有明细，工时单独填写 */
+  totalHours: DEFAULT_DAY_HOURS,
   riskFlag: false,
   content: '',
   problem: '',
   plan: ''
 })
 const daySummary = ref<DaySummary | null>(null)
+/** 「问题与阻塞」默认收起，编辑已有内容或点开时才展开 */
+const problemOpen = ref(false)
 
 const resetForm = () => {
+  problemOpen.value = false
   Object.assign(form, {
     id: '',
     logType: 'PROJECT',
     logDate: localToday(),
     items: [] as LogFormItem[],
+    totalHours: DEFAULT_DAY_HOURS,
     riskFlag: false,
     content: '',
     problem: '',
@@ -1196,11 +1224,15 @@ const openEdit = async (row: any) => {
           progressAfter: Number(item.progressAfter || 0)
         }))
         .filter((item) => item.projectId),
+      // 会议/学习等非项目日志没有明细，工时取主表
+      totalHours: Number(worklog.totalHours || DEFAULT_DAY_HOURS),
       riskFlag: Boolean(worklog.riskFlag),
       content: worklog.content || '',
       problem: worklog.problem || '',
       plan: worklog.plan || ''
     })
+    // 已有问题描述时展开，避免编辑时看不到内容
+    problemOpen.value = Boolean(worklog.problem)
     // 回显关联下拉：编辑历史日志时按项目把任务/问题列表补回来
     form.items.forEach((item) => {
       void loadProjectTasks(item.projectId)
@@ -1222,6 +1254,8 @@ const cancelEdit = () => {
 }
 
 const loadDaySummary = async () => {
+  // 日期一变，左栏「已写」标记与当日清单同步刷新
+  void loadDayTargets()
   try {
     daySummary.value = (await worklogDaySummary(form.logDate)) as unknown as DaySummary
   } catch {
@@ -1244,13 +1278,16 @@ const dayStrip = computed(() => {
 const validateForm = () => {
   if (isProjectType(form.logType)) {
     if (!form.items.length) {
-      ElMessage.warning('请从左侧选择项目')
+      ElMessage.warning('请从左侧选择一个项目或问题')
       return false
     }
     if (form.items.some((item) => !item.hours || Number(item.hours) <= 0)) {
-      ElMessage.warning('请为每条明细填写大于 0 的工时')
+      ElMessage.warning('请填写大于 0 的工时')
       return false
     }
+  } else if (!form.totalHours || Number(form.totalHours) <= 0) {
+    ElMessage.warning('请填写大于 0 的工时')
+    return false
   }
   if (!form.content.trim()) {
     ElMessage.warning('请填写工作内容')
@@ -1270,15 +1307,14 @@ const persistForm = async (submitAfter: boolean) => {
   else formSaving.value = true
   try {
     const isProject = isProjectType(form.logType)
-    // 用 @项目名 分段时，顺便把每段内容写给对应明细，周报/统计按项目取用
-    const contentByProject = splitContentByProject(form.content.trim())
+    // 一条日志只对应一个项目/问题，内容整段写入该明细，周报按项目取用
     const items = isProject
       ? form.items.map((item) => ({
           projectId: String(item.projectId),
           taskId: String(item.taskId || 0),
           issueId: String(item.issueId || 0),
           hours: Number(item.hours || 0),
-          content: contentByProject.get(item.projectId) || '',
+          content: form.content.trim(),
           progressAfter: Number(item.progressAfter || 0)
         }))
       : []
@@ -1289,7 +1325,9 @@ const persistForm = async (submitAfter: boolean) => {
       projectId: items[0]?.projectId || 0,
       taskId: items[0]?.taskId || 0,
       issueId: items[0]?.issueId || 0,
-      totalHours: items.reduce((sum, item) => sum + item.hours, 0),
+      totalHours: isProject
+        ? items.reduce((sum, item) => sum + item.hours, 0)
+        : Number(form.totalHours || 0),
       content: form.content.trim(),
       problem: form.problem,
       plan: form.plan,
@@ -1542,15 +1580,14 @@ const exportLogs = async () => {
   if (exporting.value) return
   exporting.value = true
   try {
-    const range = filters.dateRange || []
+    const [dateFrom, dateTo] = listDates()
     const params: Record<string, unknown> = {
-      scope: tab.value === 'mine' ? 'mine' : 'visible',
+      scope: tab.value === 'team' ? 'visible' : 'mine',
       projectId: filters.projectId || undefined,
       keyword: filters.keyword.trim() || undefined,
-      dateFrom: range[0],
-      dateTo: range[1],
-      excludeUserId:
-        tab.value === 'mine' ? undefined : currentUserId.value || undefined
+      dateFrom,
+      dateTo,
+      excludeUserId: tab.value === 'team' ? currentUserId.value || undefined : undefined
     }
     if (tab.value === 'team') {
       params.status = 'SUBMITTED,PENDING_APPROVE,CONFIRMED'
@@ -1623,7 +1660,8 @@ onMounted(() => {
     loadSummary(),
     loadReminderBadge(),
     loadDaySummary(),
-    loadHeatmap()
+    loadHeatmap(),
+    loadAllMyIssues()
   ]).then(() => handleNoticeQuery())
 })
 
@@ -1703,120 +1741,60 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     </transition>
 
     <div v-if="canCreate" class="log-layout">
-      <!-- 左侧：我的项目 / 我的 Bug / 我的生产问题（点问题直接挂到明细） -->
+      <!-- 左侧：项目 / Bug / 生产问题 / 会议混排，单选后右侧填这一条日志 -->
       <aside class="pms-card project-rail">
         <div class="rail-head">
-          <h3>{{ railTitle }}</h3>
+          <h3>我的填报对象</h3>
           <span class="rail-count">
-            {{ railCount }} 个<template v-if="pickedCount"> · 已选 {{ pickedCount }}</template>
+            {{ railRows.length }} 条<template v-if="writtenCount"> · 已写 {{ writtenCount }}</template>
           </span>
         </div>
-        <div class="rail-tabs">
-          <button
-            v-for="tab in RAIL_TABS"
-            :key="tab.value"
-            type="button"
-            class="rail-tab"
-            :class="{ 'is-active': railTab === tab.value }"
-            @click="switchRail(tab.value)"
+        <el-input
+          v-model="railKeyword"
+          class="rail-search"
+          size="small"
+          placeholder="搜索项目 / Bug / 生产问题 / 会议"
+          clearable
+          :prefix-icon="Search"
+        />
+        <div v-loading="railLoading" class="rail-list">
+          <div
+            v-for="row in railRows"
+            :key="row.key"
+            class="rail-item"
+            :class="{ 'is-active': isRowPicked(row) }"
+            :title="row.title"
+            role="button"
+            tabindex="0"
+            @click="selectRailRow(row)"
+            @keydown.enter="selectRailRow(row)"
+            @keydown.space.prevent="selectRailRow(row)"
           >
-            {{ tab.label }}
-          </button>
+            <span class="rail-check" :class="{ 'is-on': isRowPicked(row) }">
+              <Check v-if="isRowPicked(row)" :size="12" :stroke-width="3" />
+            </span>
+            <span class="rail-item-main">
+              <span class="rail-item-name">{{ row.title }}</span>
+              <span class="rail-item-sub">
+                <span class="rail-item-code">{{ row.sub }}</span>
+                <em
+                  v-if="writtenText(row)"
+                  class="rail-written"
+                  :title="`${form.logDate} ${writtenText(row)}`"
+                >
+                  {{ writtenText(row) }}
+                </em>
+              </span>
+            </span>
+            <span class="rail-kind" :class="`is-${row.kind}`">
+              {{ RAIL_KIND_LABEL[row.kind] }}
+            </span>
+          </div>
+          <div v-if="!railRows.length" class="rail-empty">
+            {{ railKeyword ? '没有匹配的对象' : '暂无可填报的项目或问题' }}
+          </div>
         </div>
-        <el-input
-          v-if="railTab === 'PROJECT'"
-          v-model="projectKeyword"
-          class="rail-search"
-          size="small"
-          placeholder="搜索项目名称 / 编号"
-          clearable
-          :prefix-icon="Search"
-        />
-        <el-input
-          v-else
-          v-model="issueKeyword"
-          class="rail-search"
-          size="small"
-          :placeholder="railTab === 'BUG' ? '搜索 Bug 编号 / 标题' : '搜索生产问题编号 / 标题'"
-          clearable
-          :prefix-icon="Search"
-        />
-        <p v-if="railTab === 'PROJECT'" class="rail-hint">
-          可多选项目，一次写完；多选后自动平分工时
-        </p>
-        <p v-else class="rail-hint">
-          点击直接加入并关联该问题；只显示未关闭且已关联项目的问题
-        </p>
-        <div class="rail-list">
-          <template v-if="railTab === 'PROJECT'">
-            <div
-              v-for="item in filteredProjects"
-              :key="String(item.id)"
-              class="rail-item"
-              :class="{ 'is-active': isPicked(item.id) }"
-              :title="`${item.projectName}（${item.projectCode}）`"
-              role="button"
-              tabindex="0"
-              @click="toggleProject(item)"
-              @keydown.enter="toggleProject(item)"
-              @keydown.space.prevent="toggleProject(item)"
-            >
-              <span class="rail-check" :class="{ 'is-on': isPicked(item.id) }">
-                <Check v-if="isPicked(item.id)" :size="12" :stroke-width="3" />
-              </span>
-              <span class="rail-item-main">
-                <span class="rail-item-name">{{ item.projectName }}</span>
-                <span class="rail-item-code">{{ item.projectCode }}</span>
-              </span>
-              <button
-                type="button"
-                class="rail-at"
-                title="在工作内容中插入 @项目名"
-                @click.stop="insertProjectMention(item)"
-              >
-                @
-              </button>
-            </div>
-            <div v-if="!filteredProjects.length" class="rail-empty">
-              {{ options.projects.length ? '没有匹配的项目' : '暂无可填报项目' }}
-            </div>
-          </template>
-          <template v-else>
-            <div
-              v-for="item in filteredIssues"
-              :key="String(item.id)"
-              class="rail-item"
-              :class="{ 'is-active': isIssuePicked(item.id) }"
-              :title="`${item.issueNo} ${item.title}`"
-              role="button"
-              tabindex="0"
-              @click="pickIssue(item)"
-              @keydown.enter="pickIssue(item)"
-              @keydown.space.prevent="pickIssue(item)"
-            >
-              <span class="rail-check" :class="{ 'is-on': isIssuePicked(item.id) }">
-                <Check v-if="isIssuePicked(item.id)" :size="12" :stroke-width="3" />
-              </span>
-              <span class="rail-item-main">
-                <span class="rail-item-name">{{ item.issueNo }} {{ item.title }}</span>
-                <span class="rail-item-code">{{ item.projectName || '未关联项目' }}</span>
-              </span>
-              <button
-                type="button"
-                class="rail-at"
-                title="在工作内容中插入 @项目名 问题编号"
-                @click.stop="insertIssueMention(item)"
-              >
-                @
-              </button>
-            </div>
-            <div v-if="railLoading" class="rail-empty">加载中…</div>
-            <div v-else-if="!filteredIssues.length" class="rail-empty">
-              {{ issueKeyword ? '没有匹配的问题' : '暂无待处理的问题' }}
-            </div>
-          </template>
-        </div>
-        <p v-if="railTab === 'PROJECT' && !options.projects.length" class="rail-tip">
+        <p v-if="!options.projects.length" class="rail-tip">
           请联系项目经理把你加入项目成员后再填写
         </p>
       </aside>
@@ -1826,141 +1804,117 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         <div class="editor-head">
           <div class="editor-title">
             <h3>{{ formMode === 'edit' ? '编辑日志' : '写日志' }}</h3>
-            <span v-if="pickedCount" class="editor-project">
-              {{ pickedProjectNames.join('、') }}
-            </span>
-            <span v-else>从左侧选择项目或 Bug / 生产问题</span>
+            <span v-if="selectedTitle" class="editor-project">{{ selectedTitle }}</span>
           </div>
-          <el-tag v-if="!pickedCount" type="info" size="small" effect="plain">
-            未选项目
-          </el-tag>
-          <el-tag v-else type="primary" size="small" effect="plain">
-            {{ pickedCount }} 个项目
-          </el-tag>
+          <div class="editor-head-ops">
+            <el-tag v-if="!pickedCount" type="info" size="small" effect="plain">
+              未选对象
+            </el-tag>
+            <el-tag
+              v-else
+              size="small"
+              effect="plain"
+              :type="isProjectType(form.logType) ? 'primary' : 'success'"
+            >
+              {{ isProjectType(form.logType) ? '项目日志' : logTypeLabel(form.logType) }}
+            </el-tag>
+          </div>
         </div>
 
         <div class="log-meta">
-          <div class="field meta-date">
-            <label>日期 <em>*</em></label>
-            <el-date-picker
-              v-model="form.logDate"
-              type="date"
-              value-format="YYYY-MM-DD"
-              :disabled-date="disabledDate"
-              @change="loadDaySummary"
-            />
-          </div>
-          <div class="field meta-risk">
-            <label>风险标记</label>
-            <el-switch v-model="form.riskFlag" active-text="存在风险" />
-          </div>
-          <div class="meta-total">
-            合计 <b>{{ totalHours }}</b> h
+          <div class="log-meta-fields">
+            <div class="field meta-date">
+              <label>日期 <em>*</em></label>
+              <el-date-picker
+                v-model="form.logDate"
+                type="date"
+                value-format="YYYY-MM-DD"
+                :disabled-date="disabledDate"
+                @change="loadDaySummary"
+              />
+            </div>
+            <div v-if="!isProjectType(form.logType)" class="field meta-hours">
+              <label>工时 <em>*</em></label>
+              <el-input-number
+                v-model="form.totalHours"
+                :step="Number(options.step || 0.5)"
+                :min="0"
+                :max="Number(options.maxHours || 24)"
+                controls-position="right"
+              />
+            </div>
+            <div v-if="form.items.length" class="field meta-target">
+              <label>关联对象</label>
+              <el-select
+                :model-value="targetValue(form.items[0])"
+                clearable
+                filterable
+                placeholder="任务 / Bug / 生产问题（选填）"
+                :loading="taskLoading[currentProjectId] || issueLoading[currentProjectId]"
+                @update:model-value="(value: string) => setTarget(form.items[0], String(value || ''))"
+                @visible-change="
+                  (open: boolean) => {
+                    if (!open) return
+                    loadProjectTasks(currentProjectId)
+                    loadProjectIssues(currentProjectId)
+                  }
+                "
+              >
+                <el-option-group v-if="tasksOf(currentProjectId).length" label="任务">
+                  <el-option
+                    v-for="task in tasksOf(currentProjectId)"
+                    :key="`task-${task.id}`"
+                    :label="task.taskName"
+                    :value="`task:${task.id}`"
+                  >
+                    <span class="task-opt">
+                      <span class="task-opt-name">{{ task.taskName }}</span>
+                      <span class="task-opt-meta">
+                        {{ Math.round(Number(task.progress || 0)) }}%
+                      </span>
+                    </span>
+                  </el-option>
+                </el-option-group>
+                <el-option-group v-if="issuesOf(currentProjectId, 'BUG').length" label="Bug">
+                  <el-option
+                    v-for="issue in issuesOf(currentProjectId, 'BUG')"
+                    :key="`bug-${issue.id}`"
+                    :label="issueLabel(issue)"
+                    :value="`issue:${issue.id}`"
+                  />
+                </el-option-group>
+                <el-option-group
+                  v-if="issuesOf(currentProjectId, 'PROD').length"
+                  label="生产问题"
+                >
+                  <el-option
+                    v-for="issue in issuesOf(currentProjectId, 'PROD')"
+                    :key="`prod-${issue.id}`"
+                    :label="issueLabel(issue)"
+                    :value="`issue:${issue.id}`"
+                  />
+                </el-option-group>
+              </el-select>
+            </div>
+            <div v-if="form.items.length" class="field meta-hours">
+              <label>工时 <em>*</em></label>
+              <el-input-number
+                v-model="form.items[0].hours"
+                :step="Number(options.step || 0.5)"
+                :min="0"
+                :max="Number(options.maxHours || 24)"
+                controls-position="right"
+              />
+            </div>
+            <div v-if="isProjectType(form.logType)" class="field meta-risk">
+              <label>风险</label>
+              <el-switch v-model="form.riskFlag" />
+            </div>
           </div>
         </div>
 
         <div class="form-grid">
-          <div class="field span-full">
-            <div class="field-label">
-              <label>项目与工时 <em>*</em></label>
-              <el-button
-                v-if="form.items.length > 1"
-                link
-                type="primary"
-                size="small"
-                @click="distributeHours"
-              >
-                平均分配
-              </el-button>
-            </div>
-            <div class="ph-list">
-              <div
-                v-for="(item, index) in form.items"
-                :key="`${item.projectId}-${item.taskId}-${item.issueId}-${index}`"
-                class="ph-row"
-              >
-                <span class="ph-name" :title="projectOf(item.projectId)?.projectName">
-                  {{ projectOf(item.projectId)?.projectName || '未知项目' }}
-                </span>
-                <span class="ph-task">
-                  <el-select
-                    :model-value="targetValue(item)"
-                    size="small"
-                    clearable
-                    filterable
-                    placeholder="任务 / Bug / 生产问题（选填）"
-                    :loading="taskLoading[item.projectId] || issueLoading[item.projectId]"
-                    @update:model-value="(value: string) => setTarget(item, String(value || ''))"
-                    @visible-change="
-                      (open: boolean) => {
-                        if (!open) return
-                        loadProjectTasks(item.projectId)
-                        loadProjectIssues(item.projectId)
-                      }
-                    "
-                  >
-                    <el-option-group v-if="tasksOf(item.projectId).length" label="任务">
-                      <el-option
-                        v-for="task in tasksOf(item.projectId)"
-                        :key="`task-${task.id}`"
-                        :label="task.taskName"
-                        :value="`task:${task.id}`"
-                      >
-                        <span class="task-opt">
-                          <span class="task-opt-name">{{ task.taskName }}</span>
-                          <span class="task-opt-meta">
-                            {{ Math.round(Number(task.progress || 0)) }}%
-                          </span>
-                        </span>
-                      </el-option>
-                    </el-option-group>
-                    <el-option-group v-if="issuesOf(item.projectId, 'BUG').length" label="Bug">
-                      <el-option
-                        v-for="issue in issuesOf(item.projectId, 'BUG')"
-                        :key="`bug-${issue.id}`"
-                        :label="issueLabel(issue)"
-                        :value="`issue:${issue.id}`"
-                      />
-                    </el-option-group>
-                    <el-option-group
-                      v-if="issuesOf(item.projectId, 'PROD').length"
-                      label="生产问题"
-                    >
-                      <el-option
-                        v-for="issue in issuesOf(item.projectId, 'PROD')"
-                        :key="`prod-${issue.id}`"
-                        :label="issueLabel(issue)"
-                        :value="`issue:${issue.id}`"
-                      />
-                    </el-option-group>
-                  </el-select>
-                </span>
-                <span class="ph-hours">
-                  <el-input-number
-                    v-model="item.hours"
-                    size="small"
-                    placeholder="工时"
-                    :step="Number(options.step || 0.5)"
-                    :min="0"
-                    :max="Number(options.maxHours || 24)"
-                    controls-position="right"
-                  />
-                </span>
-                <el-button
-                  link
-                  type="danger"
-                  size="small"
-                  @click="removeItem(index)"
-                >
-                  移除
-                </el-button>
-              </div>
-              <div v-if="!form.items.length" class="ph-empty">
-                从左侧点击项目或 Bug / 生产问题加入，再为每条明细填工时
-              </div>
-            </div>
-          </div>
-          <div class="field span-full">
+          <div class="field span-3">
             <label>工作内容 <em>*</em></label>
             <el-mention
               v-if="form.items.length"
@@ -1982,48 +1936,42 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               show-word-limit
               placeholder="今天完成了什么？建议写清产出与结果"
             />
-            <p v-if="form.items.length > 1" class="field-tip">
-              多个项目建议用 @ 标注每段内容：项目周报只取该项目的段落，避免互相串项。
-            </p>
           </div>
           <div class="field span-3">
             <label>明日计划 <em>*</em></label>
             <el-input
               v-model="form.plan"
               type="textarea"
-              :rows="5"
+              :rows="6"
               maxlength="500"
               show-word-limit
               placeholder="明天要做什么？没有计划可写「暂无」"
             />
           </div>
-          <div class="field span-3">
-            <label>问题与阻塞</label>
+          <!-- 问题与阻塞默认收起，点开才占版面；填写过自动展开 -->
+          <div class="field span-full">
+            <button type="button" class="problem-toggle" @click="problemOpen = !problemOpen">
+              <span class="problem-sign">{{ problemOpen ? '−' : '+' }}</span>
+              问题与阻塞
+              <span class="problem-note">
+                {{ form.problem ? '已填写' : '可选，遇到阻碍时再填' }}
+              </span>
+            </button>
             <el-input
+              v-if="problemOpen"
               v-model="form.problem"
               type="textarea"
-              :rows="5"
+              :rows="3"
               maxlength="500"
+              show-word-limit
               placeholder="遇到的技术/协作/资源问题（可选）"
             />
           </div>
         </div>
 
         <div class="editor-foot">
-          <span class="day-text">
-            当天已填
-            <b :class="{ over: dayStrip.over }">{{ dayStrip.hours }}h</b>
-            · 预警线 {{ dayStrip.warn }}h · {{ dayStrip.count }} 条
-            <el-tag v-if="dayStrip.over" type="warning" size="small" effect="plain">
-              已超预警线
-            </el-tag>
-          </span>
           <span class="footer-spacer"></span>
           <el-button v-if="formMode === 'edit'" @click="cancelEdit">取消编辑</el-button>
-          <el-button v-else @click="cancelEdit">清空</el-button>
-          <el-button :loading="formSaving" :disabled="formSubmitting" @click="persistForm(false)">
-            保存草稿
-          </el-button>
           <el-button
             type="primary"
             :loading="formSubmitting"
@@ -2033,7 +1981,247 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             提交
           </el-button>
         </div>
+
+        <!-- 当日已填清单：填满卡片底部剩余空间，点条目看日志详情 -->
+        <div class="editor-day">
+          <div class="editor-day-head">
+            <span>当日已填清单</span>
+            <span class="editor-day-count">
+              {{ dayRows.length }} 条 ·
+              <b :class="{ over: dayStrip.over }">{{ dayStrip.hours }}h</b>
+              <el-tag v-if="dayStrip.over" type="warning" size="small" effect="plain">
+                超预警
+              </el-tag>
+            </span>
+          </div>
+          <div class="editor-day-list">
+            <button
+              v-for="(row, index) in dayRows"
+              :key="`${row.id}-${index}`"
+              type="button"
+              class="editor-day-item"
+              :title="row.content || row.target"
+              @click="openDayLog(row)"
+            >
+              <span class="rail-kind" :class="`is-${row.kindClass}`">{{ row.kind }}</span>
+              <span class="editor-day-name">{{ row.target }}</span>
+              <span class="editor-day-hours">{{ row.hours }}h</span>
+            </button>
+            <p v-if="!dayRows.length" class="editor-day-empty">
+              {{ form.logDate }} 还没有填日志
+            </p>
+          </div>
+        </div>
       </section>
+    </div>
+
+    <div class="pms-card list-card">
+      <div class="list-head">
+        <div class="seg">
+          <button
+            type="button"
+            :class="{ 'is-active': tab === 'mine' }"
+            @click="switchTab('mine')"
+          >
+            我的日志
+          </button>
+          <button
+            type="button"
+            :class="{ 'is-active': tab === 'team' }"
+            @click="switchTab('team')"
+          >
+            团队日志
+          </button>
+        </div>
+        <div class="list-ops">
+          <span class="list-total">
+            <template v-if="tab === 'team'">
+              <el-tooltip
+                content="同一项目内按组内角色隔离：普通成员只看与自己角色相同的成员日志；项目经理、项目总监、部门领导、PMO / 公司领导可看全部"
+                placement="top"
+              >
+                <span style="border-bottom: 1px dashed currentColor; cursor: help">按角色可见</span>
+              </el-tooltip>
+              · 仅展示已生效日志 ·
+            </template>
+            共 {{ total }} 条
+          </span>
+          <el-tooltip content="按周汇总日志，AI 生成周报 / 个人周总结" placement="top">
+            <el-button size="small" :icon="FileText" @click="router.push('/weeklies')">
+              周报总结
+            </el-button>
+          </el-tooltip>
+          <el-button v-if="canManageWorklog" size="small" @click="openReminderDialog">
+            发起催办
+          </el-button>
+          <el-tooltip content="刷新日志与概览" placement="top">
+            <el-button
+              circle
+              size="small"
+              aria-label="刷新"
+              :icon="RefreshCw"
+              :loading="listLoading || summaryLoading"
+              @click="refreshAll"
+            />
+          </el-tooltip>
+          <el-tooltip content="导出当前筛选结果" placement="top">
+            <el-button
+              circle
+              size="small"
+              aria-label="导出"
+              :icon="Download"
+              :loading="exporting"
+              @click="exportLogs"
+            />
+          </el-tooltip>
+        </div>
+      </div>
+
+      <div class="filter-row">
+        <div class="date-presets" role="group" aria-label="日期快捷筛选">
+          <button
+            type="button"
+            :class="{ 'is-active': datePreset === 'day' }"
+            @click="applyPreset('day')"
+          >
+            当日
+          </button>
+          <button
+            type="button"
+            :class="{ 'is-active': datePreset === 'week' }"
+            @click="applyPreset('week')"
+          >
+            本周
+          </button>
+          <button
+            type="button"
+            :class="{ 'is-active': datePreset === 'fortnight' }"
+            @click="applyPreset('fortnight')"
+          >
+            近两周
+          </button>
+        </div>
+        <el-date-picker
+          v-if="datePreset === 'day'"
+          v-model="dayDate"
+          class="f-range"
+          type="date"
+          placeholder="选择日期"
+          value-format="YYYY-MM-DD"
+          @change="searchLogs"
+        />
+        <el-date-picker
+          v-else
+          v-model="filters.dateRange"
+          class="f-range"
+          type="daterange"
+          unlink-panels
+          range-separator="至"
+          start-placeholder="开始日期"
+          end-placeholder="结束日期"
+          value-format="YYYY-MM-DD"
+          @change="onRangePicked"
+        />
+        <el-select v-model="filters.projectId" class="f-project" placeholder="全部项目" clearable filterable>
+          <el-option
+            v-for="item in options.projects"
+            :key="String(item.id)"
+            :label="`${item.projectName}（${item.projectCode}）`"
+            :value="String(item.id)"
+          />
+        </el-select>
+        <el-input
+          v-model="filters.keyword"
+          class="f-keyword"
+          placeholder="搜索工作内容 / 问题 / 编号"
+          clearable
+          @keyup.enter="searchLogs"
+        />
+        <div class="filter-actions">
+          <el-button type="primary" :loading="listLoading" @click="searchLogs">查询</el-button>
+          <el-button @click="resetFilters">重置</el-button>
+        </div>
+      </div>
+
+      <el-table v-loading="listLoading" :data="rows" size="small">
+        <el-table-column label="日期" width="110">
+          <template #default="{ row }">{{ row.logDate }}</template>
+        </el-table-column>
+        <el-table-column label="项目 / 类型" min-width="170">
+          <template #default="{ row }">
+            <span
+              v-if="isProjectType(row.logType)"
+              class="project-cell"
+              :title="rowProjectTitle(row)"
+            >
+              {{ rowProjectText(row) }}
+            </span>
+            <el-tag
+              v-else
+              size="small"
+              :type="row.logType === 'PERSONAL' ? 'info' : 'success'"
+              effect="plain"
+            >
+              {{ logTypeLabel(row.logType) }}
+            </el-tag>
+            <el-tag v-if="row.riskFlag" size="small" type="danger" effect="plain" class="risk-tag">
+              风险
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column
+          prop="content"
+          label="工作内容"
+          min-width="240"
+          show-overflow-tooltip
+          class-name="pms-mobile-hide"
+        />
+        <el-table-column label="工时" width="80" align="right">
+          <template #default="{ row }">
+            <span class="hours-cell">{{ row.totalHours }}h</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="110">
+          <template #default="{ row }">
+            <el-tag size="small" :type="statusMeta(row.status).type">
+              {{ statusMeta(row.status).label }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="tab === 'team'" label="提交人" width="120">
+          <template #default="{ row }">{{ authorLabel(row) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="160">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openDetail(row)">详情</el-button>
+            <template v-if="editable(row)">
+              <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+              <el-button link type="primary" @click="submitRow(row)">提交</el-button>
+            </template>
+          </template>
+        </el-table-column>
+        <template #empty>
+          <el-empty
+            :description="
+              tab === 'mine'
+                ? '最近两周还没有日志，在上方直接填写即可'
+                : '当前没有可查看的团队日志'
+            "
+            :image-size="76"
+          />
+        </template>
+      </el-table>
+
+      <el-pagination
+        v-model:current-page="page.pageNum"
+        v-model:page-size="page.pageSize"
+        :total="total"
+        :page-sizes="[10, 20, 50]"
+        :layout="isNarrow ? 'prev, pager, next' : 'total, sizes, prev, pager, next'"
+        class="pager"
+        @current-change="loadLogs"
+        @size-change="searchLogs"
+      />
     </div>
 
     <div class="pms-card insight-card">
@@ -2143,181 +2331,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <span>{{ heatTip.hours }} 小时 · {{ heatTip.count }} 条日志</span>
           </div>
         </div>
-    </div>
-
-    <div class="pms-card list-card">
-      <div class="list-head">
-        <div class="seg">
-          <button
-            type="button"
-            :class="{ 'is-active': tab === 'mine' }"
-            @click="switchTab('mine')"
-          >
-            我的日志
-          </button>
-          <button
-            type="button"
-            :class="{ 'is-active': tab === 'team' }"
-            @click="switchTab('team')"
-          >
-            团队日志
-          </button>
-        </div>
-        <div class="list-ops">
-          <span class="list-total">
-            <template v-if="tab === 'team'">
-              <el-tooltip
-                content="同一项目内按组内角色隔离：普通成员只看与自己角色相同的成员日志；项目经理、项目总监、部门领导、PMO / 公司领导可看全部"
-                placement="top"
-              >
-                <span style="border-bottom: 1px dashed currentColor; cursor: help">按角色可见</span>
-              </el-tooltip>
-              · 仅展示已生效日志 ·
-            </template>
-            共 {{ total }} 条
-          </span>
-          <el-tooltip content="按周汇总日志，AI 生成周报 / 个人周总结" placement="top">
-            <el-button size="small" :icon="FileText" @click="router.push('/weeklies')">
-              周报总结
-            </el-button>
-          </el-tooltip>
-          <el-button v-if="canManageWorklog" size="small" @click="openReminderDialog">
-            发起催办
-          </el-button>
-          <el-tooltip content="刷新日志与概览" placement="top">
-            <el-button
-              circle
-              size="small"
-              aria-label="刷新"
-              :icon="RefreshCw"
-              :loading="listLoading || summaryLoading"
-              @click="refreshAll"
-            />
-          </el-tooltip>
-          <el-tooltip content="导出当前筛选结果" placement="top">
-            <el-button
-              circle
-              size="small"
-              aria-label="导出"
-              :icon="Download"
-              :loading="exporting"
-              @click="exportLogs"
-            />
-          </el-tooltip>
-        </div>
-      </div>
-
-      <div class="filter-row">
-        <el-date-picker
-          v-model="filters.dateRange"
-          class="f-range"
-          type="daterange"
-          unlink-panels
-          range-separator="至"
-          start-placeholder="开始日期"
-          end-placeholder="结束日期"
-          value-format="YYYY-MM-DD"
-        />
-        <el-select v-model="filters.projectId" class="f-project" placeholder="全部项目" clearable filterable>
-          <el-option
-            v-for="item in options.projects"
-            :key="String(item.id)"
-            :label="`${item.projectName}（${item.projectCode}）`"
-            :value="String(item.id)"
-          />
-        </el-select>
-        <el-input
-          v-model="filters.keyword"
-          class="f-keyword"
-          placeholder="搜索工作内容 / 问题 / 编号"
-          clearable
-          @keyup.enter="searchLogs"
-        />
-        <div class="filter-actions">
-          <el-button type="primary" :loading="listLoading" @click="searchLogs">查询</el-button>
-          <el-button @click="resetFilters">重置</el-button>
-        </div>
-      </div>
-
-      <el-table v-loading="listLoading" :data="rows" size="small">
-        <el-table-column label="日期" width="110">
-          <template #default="{ row }">{{ row.logDate }}</template>
-        </el-table-column>
-        <el-table-column label="项目 / 类型" min-width="170">
-          <template #default="{ row }">
-            <span
-              v-if="isProjectType(row.logType)"
-              class="project-cell"
-              :title="rowProjectTitle(row)"
-            >
-              {{ rowProjectText(row) }}
-            </span>
-            <el-tag
-              v-else
-              size="small"
-              :type="row.logType === 'PERSONAL' ? 'info' : 'success'"
-              effect="plain"
-            >
-              {{ logTypeLabel(row.logType) }}
-            </el-tag>
-            <el-tag v-if="row.riskFlag" size="small" type="danger" effect="plain" class="risk-tag">
-              风险
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column
-          prop="content"
-          label="工作内容"
-          min-width="240"
-          show-overflow-tooltip
-          class-name="pms-mobile-hide"
-        />
-        <el-table-column label="工时" width="80" align="right">
-          <template #default="{ row }">
-            <span class="hours-cell">{{ row.totalHours }}h</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" width="110">
-          <template #default="{ row }">
-            <el-tag size="small" :type="statusMeta(row.status).type">
-              {{ statusMeta(row.status).label }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column v-if="tab !== 'mine'" label="提交人" width="120">
-          <template #default="{ row }">{{ authorLabel(row) }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="160">
-          <template #default="{ row }">
-            <el-button link type="primary" @click="openDetail(row)">详情</el-button>
-            <template v-if="editable(row)">
-              <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-              <el-button link type="primary" @click="submitRow(row)">提交</el-button>
-            </template>
-          </template>
-        </el-table-column>
-        <template #empty>
-          <el-empty
-            :description="
-              tab === 'mine'
-                ? '最近两周还没有日志，在上方直接填写即可'
-                : '当前没有可查看的团队日志'
-            "
-            :image-size="76"
-          />
-        </template>
-      </el-table>
-
-      <el-pagination
-        v-model:current-page="page.pageNum"
-        v-model:page-size="page.pageSize"
-        :total="total"
-        :page-sizes="[10, 20, 50]"
-        :layout="isNarrow ? 'prev, pager, next' : 'total, sizes, prev, pager, next'"
-        class="pager"
-        @current-change="loadLogs"
-        @size-change="searchLogs"
-      />
     </div>
 
     <el-drawer v-model="detailVisible" title="日志详情" size="min(680px, 94vw)">
@@ -2696,6 +2709,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </el-button>
       </template>
     </el-dialog>
+
   </div>
 </template>
 
@@ -2994,57 +3008,50 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   font-variant-numeric: tabular-nums;
 }
 
-.rail-hint {
-  margin: 0;
-  font-size: 11.5px;
+/* 行尾类型标签：固定宽度保证「项目 / 会议 / Bug / 生产问题」左右对齐 */
+.rail-kind {
+  flex: 0 0 56px;
+  box-sizing: border-box;
+  align-self: center;
+  padding: 1px 0;
+  border-radius: 999px;
+  background: #eef2f8;
   color: var(--pms-text-3);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 16px;
+  text-align: center;
+  white-space: nowrap;
 }
 
-/* 左栏三视图切换：项目 / Bug / 生产问题 */
-.rail-tabs {
-  display: flex;
-  gap: 4px;
-  padding: 3px;
-  border: 1px solid var(--pms-line-soft);
-  border-radius: 8px;
-  background: #f5f7fb;
-}
-
-.rail-tab {
-  flex: 1 1 0;
-  padding: 5px 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--pms-text-3);
-  font-size: 12.5px;
-  line-height: 1.4;
-  cursor: pointer;
-  transition:
-    background-color 0.16s ease,
-    color 0.16s ease;
-}
-
-.rail-tab:hover {
-  color: var(--pms-primary);
-}
-
-.rail-tab.is-active {
-  background: #fff;
+.rail-kind.is-PROJECT {
+  background: var(--pms-primary-weak);
   color: var(--pms-primary-deep);
-  font-weight: 600;
-  box-shadow: 0 1px 2px rgba(20, 60, 120, 0.08);
 }
 
-/* 项目很多时单独滚动，不把右侧表单顶长；弹性填充让底边与右栏对齐 */
+.rail-kind.is-BUG {
+  background: var(--pms-warn-weak);
+  color: var(--pms-warn);
+}
+
+.rail-kind.is-PROD {
+  background: var(--pms-danger-weak);
+  color: var(--pms-danger);
+}
+
+.rail-kind.is-MEETING {
+  background: var(--pms-ok-weak);
+  color: var(--pms-ok);
+}
+
+/* 左栏高度不再由条目数决定：卡片高度跟随右侧表单，列表内部滚动，
+   这样左右两张卡片始终等高，也不会因为项目多把整行顶得很长 */
 .rail-list {
   display: flex;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   flex-direction: column;
   gap: 6px;
   min-height: 140px;
-  max-height: 560px;
-  /* 只竖向滚动：横向滚动条会把 @ 按钮挤到边缘 */
   overflow-x: hidden;
   overflow-y: auto;
   padding-right: 4px;
@@ -3069,7 +3076,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
     box-shadow 0.16s ease;
 }
 
-/* 多选勾选框：一眼看出可以选多个 */
+/* 单选勾选框：一条日志只对应一个对象 */
 .rail-check {
   display: inline-flex;
   flex: none;
@@ -3100,41 +3107,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   min-width: 0;
 }
 
-/* 项目行右侧的 @ 快捷按钮：hover / 选中时才出现，平时不占视觉 */
-.rail-at {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  align-self: center;
-  width: 20px;
-  height: 20px;
-  margin-left: 2px;
-  border: 1px solid var(--pms-line);
-  border-radius: 6px;
-  background: #fff;
-  color: var(--pms-text-3);
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0;
-  transition:
-    opacity 0.16s ease,
-    color 0.16s ease,
-    border-color 0.16s ease;
-}
-
-.rail-item:hover .rail-at,
-.rail-item:focus-within .rail-at,
-.rail-item.is-active .rail-at {
-  opacity: 1;
-}
-
-.rail-at:hover {
-  border-color: var(--pms-primary);
-  color: var(--pms-primary);
-}
 
 .rail-item:hover {
   border-color: var(--pms-primary);
@@ -3165,11 +3137,30 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--pms-primary-deep);
 }
 
+.rail-item-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .rail-item-code {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   font-size: 11px;
   color: var(--pms-text-3);
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 该对象在所选日期已写过：绿色小字标记 */
+.rail-written {
+  flex: none;
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--pms-ok);
   white-space: nowrap;
 }
 
@@ -3189,7 +3180,10 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: #b8770f;
 }
 
+/* 右栏卡片纵向撑满：表单在上，当日已填清单吃掉底部剩余空间 */
 .editor-card {
+  display: flex;
+  flex-direction: column;
   margin-bottom: 0;
 }
 
@@ -3211,6 +3205,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   margin-bottom: 16px;
 }
 
+.log-meta-fields {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 16px;
+  min-width: 0;
+}
+
 .log-meta .meta-date {
   flex: none;
   width: 180px;
@@ -3220,61 +3222,20 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   flex: none;
 }
 
-.meta-total {
-  margin-left: auto;
-  padding-bottom: 6px;
-  font-size: 12.5px;
-  color: var(--pms-text-3);
+/* 单选模式：关联对象与工时并到日期这一行，不再单独占一块 */
+.log-meta .meta-target {
+  flex: 0 0 240px;
 }
 
-.meta-total b {
-  margin: 0 2px;
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--pms-text);
-  font-variant-numeric: tabular-nums;
+/* 会议等非项目日志没有明细，工时在顶部单独填 */
+.log-meta .meta-hours {
+  flex: none;
+  width: 130px;
 }
 
-/* 多项目工时：一行一个项目，只填工时 */
-.ph-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--pms-line-soft);
-  border-radius: 8px;
-  background: #fbfcff;
-}
 
-.ph-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-}
 
-/* 项目名固定较窄一列：避免把关联下拉顶到行尾，中间留一大片空白 */
-.ph-name {
-  flex: 0 0 168px;
-  overflow: hidden;
-  min-width: 0;
-  font-size: 13px;
-  color: var(--pms-text-2);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 关联下拉（选填）：任务 / Bug / 生产问题，不选时工时只记到项目 */
-.ph-task {
-  flex: 1 1 240px;
-  min-width: 200px;
-  max-width: 420px;
-}
-
-.ph-task :deep(.el-select) {
-  width: 100%;
-}
-
+/* 关联对象下拉（选填）：任务 / Bug / 生产问题，不选时工时只记到项目 */
 .task-opt {
   display: flex;
   align-items: center;
@@ -3293,22 +3254,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   font-size: 12px;
   color: var(--pms-text-3);
   font-variant-numeric: tabular-nums;
-}
-
-.ph-hours {
-  display: block;
-  flex: none;
-  width: 120px;
-}
-
-.ph-hours :deep(.el-input-number) {
-  width: 100%;
-}
-
-.ph-empty {
-  padding: 6px 2px;
-  font-size: 12.5px;
-  color: var(--pms-text-3);
 }
 
 /* 本周工时分布（移到底部）：左侧统计与项目工时，右侧热力图 */
@@ -3642,7 +3587,53 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-  margin-bottom: 14px;
+  margin-bottom: 10px;
+}
+
+.editor-head-ops {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* 问题与阻塞：默认收起的折叠入口 */
+.problem-toggle {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--pms-text-2);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.problem-toggle:hover {
+  color: var(--pms-primary-deep);
+}
+
+.problem-sign {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--pms-line);
+  border-radius: 4px;
+  background: #fff;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.problem-note {
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--pms-text-3);
 }
 
 .editor-title {
@@ -3674,20 +3665,99 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   border-top: 1px solid var(--pms-line-soft);
 }
 
-.day-text {
-  display: inline-flex;
-  align-items: center;
+/* 当日已填清单：撑满卡片底部，超出时列表内部滚动，不会把卡片越撑越高 */
+.editor-day {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   gap: 6px;
-  font-size: 12.5px;
+  min-height: 72px;
+  max-height: 280px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--pms-line);
+}
+
+.editor-day-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--pms-text-2);
+}
+
+.editor-day-count {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--pms-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 清单双列排布：同样高度能多放一倍条目，视觉也更整齐 */
+.editor-day-list {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  align-content: start;
+  gap: 6px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.editor-day-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: #fafbfe;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    background-color 0.16s ease;
+}
+
+.editor-day-item:hover {
+  border-color: var(--pms-primary);
+  background: #f4f8ff;
+}
+
+.editor-day-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--pms-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-day-hours {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--pms-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.editor-day-empty {
+  margin: 0;
+  padding: 6px 2px;
+  font-size: 11.5px;
   color: var(--pms-text-3);
 }
 
-.day-text b {
+.editor-day-count b {
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   color: var(--pms-text-2);
 }
 
-.day-text b.over {
+.editor-day-count b.over {
   color: #c47f17;
 }
 
@@ -3756,6 +3826,43 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   align-items: center;
   gap: 10px;
   margin-bottom: 14px;
+}
+
+/* 日期快捷：独立胶囊，不用页签那套方框，避免和「我的日志 / 团队日志」撞脸 */
+.date-presets {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.date-presets button {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--pms-line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--pms-text-2);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    color 0.16s ease,
+    border-color 0.16s ease,
+    background-color 0.16s ease;
+}
+
+.date-presets button:hover {
+  border-color: var(--pms-primary);
+  color: var(--pms-primary-deep);
+}
+
+.date-presets button.is-active {
+  border-color: var(--pms-primary);
+  background: var(--pms-primary-weak);
+  color: var(--pms-primary-deep);
+  font-weight: 600;
 }
 
 /* Element Plus 组件根节点不带 scoped 属性，尺寸规则需用 :deep 命中 */
@@ -3871,6 +3978,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .field.span-3 {
   grid-column: span 3;
 }
+
+
 
 .field :deep(.el-date-editor),
 .field :deep(.el-select),
@@ -4079,6 +4188,11 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 @media (max-width: 1080px) {
   .log-layout {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* 单列布局下卡片按内容撑高，清单限制高度避免越写越长 */
+  .editor-day-list {
+    max-height: 160px;
   }
 
   .rail-list {

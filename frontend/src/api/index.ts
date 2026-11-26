@@ -358,11 +358,32 @@ export interface WorklogIssue {
 export interface WorklogMyIssue extends WorklogIssue {
   projectId: string
   projectName: string
+  /** 关联产品（生产问题常见），0/空串表示未关联 */
+  productId?: string
+  productName?: string
 }
 
 /** 某人某天的累计工时与预警提示（不禁止提交）。 */
 export const worklogDaySummary = (date: string, userId?: number) =>
   get<Record<string, unknown>>('/worklogs/day-summary', { date, userId })
+
+/** 某天我已填的日志对象（左栏「已写」标记与当日清单）。 */
+export const worklogDayTargets = (date: string) =>
+  get<WorklogDayTarget[]>('/worklogs/day-targets', { logDate: date })
+
+export interface WorklogDayTarget {
+  worklogId: string
+  logType: string
+  status: string
+  content: string
+  hours: number
+  projectId: string
+  projectName: string
+  issueId: string
+  issueNo: string
+  issueTitle: string
+  issueType: string
+}
 
 export const worklogDetail = (id: string) => get<Record<string, unknown>>(`/worklogs/${id}`)
 
