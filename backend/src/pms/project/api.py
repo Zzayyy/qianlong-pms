@@ -1384,6 +1384,19 @@ async def _refresh_health(session: AsyncSession, project_id: int) -> None:
     await report_service.refresh_project_health(session, project_id)
 
 
+@router.get("/{project_id}/activities", summary="近期动态")
+async def list_activities(
+    project_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[AuthContext, Depends(require_permissions("project:view"))],
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+) -> object:
+    """项目近期动态：最近的变更与风险 / 问题，按最后更新时间倒序。"""
+    project = await service.get_project(session, project_id)
+    await ensure_project_visible(session, context, project)
+    return ok(await service.list_recent_activities(session, project_id, limit=limit))
+
+
 @router.get("/{project_id}/risks", summary="风险与问题列表")
 async def list_risks(
     project_id: int,

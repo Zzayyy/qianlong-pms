@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Final
 
 from sqlalchemy import func, select
@@ -1857,6 +1857,86 @@ async def list_risks(
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def list_recent_activities(
+    session: AsyncSession, project_id: int, *, limit: int = 10
+) -> list[dict[str, object]]:
+    """项目近期动态：变更申请与风险/问题按最后更新时间倒序合并。
+
+    只取需要的列，避免把正文（原因/内容/应对措施）读进列表；
+    操作人风险取负责人、变更取提交人，取不到名字时留空由前端兜底。
+    """
+    from pms.change.models import ChgRequest
+    from pms.org.models import SysUser
+
+    risks = list(
+        (
+            await session.execute(
+                select(PrjRisk)
+                .where(PrjRisk.project_id == project_id, PrjRisk.deleted == 0)
+                .order_by(PrjRisk.update_time.desc(), PrjRisk.id.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+    )
+    changes = list(
+        (
+            await session.execute(
+                select(ChgRequest)
+                .where(ChgRequest.project_id == project_id, ChgRequest.deleted == 0)
+                .order_by(ChgRequest.update_time.desc(), ChgRequest.id.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+    )
+    user_ids = {risk.owner_id for risk in risks if risk.owner_id}
+    user_ids |= {change.submitter_id for change in changes if change.submitter_id}
+    names: dict[int, str] = {}
+    if user_ids:
+        rows = await session.execute(
+            select(SysUser.id, SysUser.real_name).where(SysUser.id.in_(user_ids))
+        )
+        names = {int(user_id): str(real_name or "") for user_id, real_name in rows.all()}
+
+    def time_of(updated: object, created: object) -> str:
+        """取最后更新时间，缺失时回落到创建时间。"""
+        value = updated or created
+        return value.strftime("%Y-%m-%d %H:%M") if isinstance(value, datetime) else ""
+
+    items: list[dict[str, object]] = []
+    for risk in risks:
+        items.append(
+            {
+                "id": risk.id,
+                "type": risk.risk_type,
+                "typeLabel": "问题" if risk.risk_type == "ISSUE" else "风险",
+                "title": risk.title,
+                "level": risk.level,
+                "status": risk.status,
+                "operatorName": names.get(int(risk.owner_id), ""),
+                "time": time_of(risk.update_time, risk.create_time),
+                "_sort": risk.update_time or risk.create_time,
+            }
+        )
+    for change in changes:
+        items.append(
+            {
+                "id": change.id,
+                "type": "CHANGE",
+                "typeLabel": "变更",
+                "title": change.title,
+                "level": change.level,
+                "status": change.status,
+                "operatorName": names.get(int(change.submitter_id), ""),
+                "time": time_of(change.update_time, change.create_time),
+                "_sort": change.update_time or change.create_time,
+            }
+        )
+    items.sort(key=lambda item: item["_sort"] or datetime.min, reverse=True)
+    for item in items:
+        item.pop("_sort", None)
+    return items[:limit]
 
 
 async def _get_risk(session: AsyncSession, project_id: int, risk_id: int) -> PrjRisk:

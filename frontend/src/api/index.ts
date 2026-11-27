@@ -178,6 +178,24 @@ export const deleteProjectFile = (fileId: string) => del<unknown>(`/files/${file
 export const downloadProjectFile = (fileId: string, fileName: string) =>
   download(`/files/${fileId}/download`, fileName)
 
+/** 项目近期动态：变更与风险/问题按最后更新时间倒序合并。 */
+export interface ProjectActivity {
+  id: string
+  /** RISK / ISSUE 来自风险台账，CHANGE 来自变更记录 */
+  type: 'RISK' | 'ISSUE' | 'CHANGE'
+  typeLabel: string
+  title: string
+  /** 风险等级 HIGH/MEDIUM/LOW，变更级别 L1/L2/L3（可能为空） */
+  level: string
+  status: string
+  operatorName: string
+  /** YYYY-MM-DD HH:mm */
+  time: string
+}
+
+export const projectActivities = (id: string, limit = 10) =>
+  get<ProjectActivity[]>(`/projects/${id}/activities`, { limit })
+
 /** 风险与问题（risk_type 区分 RISK / ISSUE）。 */
 export const listRisks = (id: string, params: Record<string, unknown> = {}) =>
   get<Record<string, unknown>[]>(`/projects/${id}/risks`, params)

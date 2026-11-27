@@ -28,6 +28,7 @@ import {
   listRisks,
   listStages,
   listWeeklies,
+  projectActivities,
   projectAttachments,
   projectDetail,
   projectDirectors,
@@ -47,6 +48,7 @@ import {
   uploadProjectFile,
   userOptions,
   weeklyDetail,
+  type ProjectActivity,
   type ProjectIssueStats,
   type TeamWorklogSummary,
   type WeeklyItem
@@ -1283,6 +1285,40 @@ const backToList = async () => {
 
 const pageEl = ref<HTMLElement | null>(null)
 
+/* ------------------------------ 近期动态 ------------------------------ */
+const activities = ref<ProjectActivity[]>([])
+const activitiesLoading = ref(false)
+
+/** 近期动态：变更与风险 / 问题按最后更新时间倒序，最多 10 条。 */
+const loadActivities = async (id: string) => {
+  activitiesLoading.value = true
+  try {
+    activities.value = await projectActivities(id)
+  } catch {
+    activities.value = []
+  } finally {
+    activitiesLoading.value = false
+  }
+}
+
+/** 小卡片里时间只留「月-日 时:分」，完整时间放 title 提示。 */
+const shortTime = (value: string) => (value ? value.slice(5, 16) : '—')
+
+const activityTagType = (item: ProjectActivity): 'primary' | 'warning' | 'danger' => {
+  if (item.type === 'CHANGE') return 'primary'
+  return item.type === 'ISSUE' ? 'danger' : 'warning'
+}
+
+/** 点条目跳到对应明细页签：变更无查看权限时回落到风险台账。 */
+const openActivity = (item: ProjectActivity) => {
+  if (!item) return
+  if (item.type === 'CHANGE') {
+    activeTab.value = store.has('change:view') ? 'changes' : 'risks'
+    return
+  }
+  activeTab.value = 'risks'
+}
+
 /**
  * 详情页取数：只依赖路由里的项目 ID，支持直接打开 / 刷新 / 分享链接。
  * 落地页签由 `?tab=` 决定（缺省「计划」），变更记录 / 周报按权限决定是否可用，不可用时回落到「计划」。
@@ -1300,6 +1336,7 @@ const loadDetail = async (id: string, tab?: unknown) => {
     await loadAlerts()
     // 页签标题要显示问题数量，详情加载时就取一次（切页签时再刷新）
     await loadIssueStats()
+    await loadActivities(id)
     weeklyFilter.value = { weekStart: '', status: '' }
     weeklyPage.value.pageNum = 1
     weeklyTargetReport.value = null
@@ -1325,6 +1362,8 @@ const loadDetail = async (id: string, tab?: unknown) => {
 watch(activeTab, (value) => {
   if (isDetailView && value === 'risks' && detail.value.id) void loadAlerts()
   if (isDetailView && value === 'issues' && detail.value.id) void loadIssueStats()
+  // 明细页签里改过风险 / 变更后回到概览，动态要跟上
+  if (isDetailView && detail.value.id) void loadActivities(String(detail.value.id))
 })
 
 /** 页签同步到地址栏，刷新后还能回到同一个页签。 */
@@ -1997,13 +2036,6 @@ const hoursText = (plan: unknown, actual: unknown) => {
   const real = Math.round(Number(actual || 0))
   return real > 0 ? `${planned}h / ${real}h` : `${planned}h`
 }
-
-/** 未分配任务工时 = 项目实际工时 - 任务工时合计（日志没挑任务的部分）。 */
-const unassignedHours = computed(() => {
-  const actual = Number(detail.value.actualHours || 0)
-  const assigned = Number(detail.value.assignedHours || 0)
-  return Math.max(0, Math.round((actual - assigned) * 10) / 10)
-})
 
 /** 入口参数：`?scope=pm|member` 落到对应视角，`?create=1` 直接打开立项弹窗。 */
 const applyEntryQuery = () => {
@@ -2695,7 +2727,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               · 项目经理 {{ detail.pmName || userName(detail.pmId) }}
             </p>
           </div>
-          <!-- 状态标签 + 全部操作同排靠右，只占标题一行的高度 -->
+          <!-- 第一行：状态与设置；第二行：状态流转按钮（用 ops-break 强制换行） -->
           <div class="detail-head-ops">
             <el-tag :type="statusMeta(detail.status).type">{{ statusMeta(detail.status).label }}</el-tag>
             <el-tag v-if="detail.retroApproval === 1" :type="retroDuePassed ? 'danger' : 'warning'">
@@ -2723,6 +2755,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               />
             </span>
             <!-- 终止项目排在最前，竖线后是状态流转按钮 -->
+            <span class="ops-break"></span>
             <el-button
               v-if="canTerminate && canEdit"
               size="small"
@@ -2834,11 +2867,8 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <b>{{ Math.round(Number(detail.progress || 0)) }}%</b>
           </div>
           <div class="metric">
-            <span>工时（计划 / 实际）</span>
+            <span>工时</span>
             <b>{{ hoursText(detail.planHours, detail.actualHours) }}</b>
-            <em v-if="unassignedHours > 0" class="metric-note">
-              未分配任务 {{ unassignedHours }}h
-            </em>
           </div>
           <div class="metric">
             <span>计划周期</span>
@@ -3563,6 +3593,38 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
         </el-tabs>
       </div>
 
+      <!-- 近期动态：挂在详情卡片右侧边缘，默认只露一条把手，鼠标移上去展开面板 -->
+      <div v-if="activities.length" class="activity-dock">
+        <div class="dock-tab">
+          <span>动态</span>
+          <em>{{ activities.length }}</em>
+        </div>
+        <div v-loading="activitiesLoading" class="dock-panel">
+          <div class="dock-head">
+            <b>近期动态</b>
+            <span>风险与变更 · 按更新时间</span>
+          </div>
+          <ul class="activity-list">
+            <li
+              v-for="item in activities"
+              :key="`${item.type}-${item.id}`"
+              class="activity-item"
+              :title="`${item.typeLabel} · ${item.title}（${item.time}）`"
+              @click="openActivity(item)"
+            >
+              <el-tag size="small" effect="plain" :type="activityTagType(item)">
+                {{ item.typeLabel }}
+              </el-tag>
+              <span class="activity-title">{{ item.title || '未命名记录' }}</span>
+              <span class="activity-time">{{ shortTime(item.time) }}</span>
+            </li>
+          </ul>
+          <div class="dock-foot">
+            <span @click="activeTab = 'risks'">风险台账</span>
+            <span v-if="store.has('change:view')" @click="activeTab = 'changes'">变更记录</span>
+          </div>
+        </div>
+      </div>
       </div>
 
       <div v-else v-loading="detailLoading" class="pms-card detail-loading">
@@ -4420,6 +4482,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 .detail-card {
+  position: relative;
   padding: 0;
 }
 
@@ -4497,6 +4560,159 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   margin: 10px 0 0;
   font-size: 12px;
   color: var(--pms-text-3);
+}
+
+/* ---------------- 头部操作两行 + 近期动态悬浮把手 ---------------- */
+/* 头部操作区强制两行：状态/设置一行，业务按钮一行 */
+.ops-break {
+  flex-basis: 100%;
+  height: 0;
+}
+
+/* 挂在详情卡片顶部右侧，像卡片上的一个小页签 */
+.activity-dock {
+  position: absolute;
+  right: 24px;
+  top: 0;
+  z-index: 10;
+  transform: translateY(-100%);
+}
+
+/* 默认只露这条横向小页签，不占用卡片内容区 */
+.dock-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 14px 5px;
+  border: 1px solid var(--pms-line);
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  background: #fff;
+  box-shadow: 0 -2px 8px rgba(16, 35, 70, 0.06);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--pms-text-2);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.activity-dock:hover .dock-tab {
+  background: #f2f7ff;
+  color: var(--pms-primary, #3370ff);
+}
+
+.dock-tab em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--pms-primary, #3370ff);
+}
+
+.dock-panel {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  width: 340px;
+  max-height: 360px;
+  padding: 10px 12px;
+  border: 1px solid var(--pms-line);
+  border-top: 0;
+  border-radius: 0 0 10px 10px;
+  background: #fff;
+  box-shadow: 0 10px 26px rgba(16, 35, 70, 0.16);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-6px);
+  transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s;
+  pointer-events: none;
+}
+
+.activity-dock:hover .dock-panel {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.dock-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.dock-head b {
+  font-size: 13px;
+  color: var(--pms-text);
+}
+
+.dock-head span {
+  font-size: 11.5px;
+  color: var(--pms-text-3);
+}
+
+.dock-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--pms-line-soft, #f0f3f8);
+  font-size: 11.5px;
+}
+
+.dock-foot span {
+  color: var(--pms-primary, #3370ff);
+  cursor: pointer;
+}
+
+.activity-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 264px;
+  overflow-y: auto;
+}
+
+.activity-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.activity-item:hover {
+  background: #f0f5ff;
+}
+
+.activity-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--pms-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-time {
+  flex: none;
+  font-size: 11px;
+  color: var(--pms-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 900px) {
+  .activity-dock {
+    right: 12px;
+  }
+
+  .dock-panel {
+    width: min(340px, calc(100vw - 40px));
+  }
 }
 
 /* ---------------- 风险预警 ---------------- */
@@ -4643,14 +4859,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   color: var(--pms-text);
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-/* 工时卡片里的口径提示：有多少日志工时还没归到任务 */
-.metric-note {
-  font-size: 11.5px;
-  font-style: normal;
-  color: var(--pms-warning, #b88230);
   font-variant-numeric: tabular-nums;
 }
 

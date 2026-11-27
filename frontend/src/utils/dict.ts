@@ -102,6 +102,27 @@ export const HEALTH_STATUS: Record<string, DictItem> = {
   RED: { label: '风险', type: 'danger' }
 }
 
+/** 变更状态（`t_chg_request.status`）。 */
+export const CHANGE_STATUS: Record<string, DictItem> = {
+  DRAFT: { label: '草稿', type: 'info' },
+  SUBMITTED: { label: '已提交', type: 'warning' },
+  ASSESSED: { label: '已评估', type: 'warning' },
+  APPROVED: { label: '已批准', type: 'success' },
+  EXECUTING: { label: '执行中', type: 'primary' },
+  VERIFIED: { label: '已验证', type: 'success' },
+  CLOSED: { label: '已关闭', type: 'info' },
+  REJECTED: { label: '已驳回', type: 'danger' },
+  WITHDRAWN: { label: '已撤回', type: 'info' },
+  EFFECTIVE: { label: '已生效', type: 'success' }
+}
+
+/** 变更级别。 */
+export const CHANGE_LEVEL: Record<string, DictItem> = {
+  L1: { label: 'L1 一般', type: 'info' },
+  L2: { label: 'L2 重要', type: 'warning' },
+  L3: { label: 'L3 重大', type: 'danger' }
+}
+
 /** 健康度对应的圆点颜色修饰（配合 .health.is-xxx 使用）。 */
 export const HEALTH_KEY: Record<string, string> = {
   GREEN: 'green',
