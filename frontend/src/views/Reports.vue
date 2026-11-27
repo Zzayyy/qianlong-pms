@@ -2,13 +2,13 @@
 import { computed, onMounted, ref, type Component } from 'vue'
 import {
   Building2,
+  CalendarClock,
   CirclePlay,
   FolderKanban,
   Gauge,
   NotebookPen,
   ShieldAlert,
-  TrendingDown,
-  TrendingUp,
+  Timer,
   TriangleAlert
 } from 'lucide-vue-next'
 import { deptBoard, deptMembers, deptTrend, projectBoard, reportDepts } from '@/api'
@@ -59,6 +59,25 @@ interface BoardSummary {
   actualHours: number
   avgLogFillRate: number
   byHealth: Record<string, number>
+}
+
+interface MeetingRecent {
+  logDate: string
+  userName: string
+  hours: number
+  content: string
+}
+
+/** 部门会议日志统计（近 N 天，后端按已生效日志汇总）。 */
+interface MeetingStats {
+  days: number
+  logCount: number
+  hours: number
+  userCount: number
+  avgHours: number
+  /** 会议工时占同期全部日志工时的比例（0~100）。 */
+  hourRatio: number
+  recent: MeetingRecent[]
 }
 
 interface StageItem {
@@ -120,6 +139,15 @@ const summary = ref<BoardSummary>({
   byHealth: {}
 })
 const projects = ref<ProjectMetric[]>([])
+const meeting = ref<MeetingStats>({
+  days: 30,
+  logCount: 0,
+  hours: 0,
+  userCount: 0,
+  avgHours: 0,
+  hourRatio: 0,
+  recent: []
+})
 /** 是否连同下级部门一起统计（部门领导看整棵子树）。 */
 const includeSub = ref(false)
 /** 项目明细的快捷筛选与关键字（纯前端过滤，KPI 卡片可联动）。 */
@@ -389,16 +417,17 @@ const kpis = computed<KpiItem[]>(() => [
     value: `${num(summary.value.avgProgress, 1)}%`
   },
   {
-    key: 'avgSpi',
-    label: '平均 SPI',
-    icon: TrendingUp,
-    value: num(summary.value.avgSpi, 2)
+    key: 'meetingLogCount',
+    label: '会议日志',
+    icon: CalendarClock,
+    tone: 'primary',
+    value: `${num(meeting.value.logCount)} 条`
   },
   {
-    key: 'avgCpi',
-    label: '平均 CPI',
-    icon: TrendingDown,
-    value: num(summary.value.avgCpi, 2)
+    key: 'meetingHours',
+    label: '会议工时',
+    icon: Timer,
+    value: `${num(meeting.value.hours, 1)}h`
   },
   {
     key: 'riskOpen',
@@ -437,6 +466,8 @@ const loadBoard = async () => {
   try {
     const data = await deptBoard(selectedDeptIds(), includeSub.value)
     summary.value = (data.summary as unknown as BoardSummary) || summary.value
+    const meetingData = data.meeting as unknown as MeetingStats | undefined
+    if (meetingData) meeting.value = meetingData
     const rows = ((data.projects as unknown as ProjectMetric[]) || []).slice()
     const healthOrder: Record<string, number> = { RED: 0, YELLOW: 1, GREEN: 2 }
     rows.sort(
@@ -588,6 +619,57 @@ onMounted(async () => {
             <span>风险项</span>
             <b class="danger-text">{{ num(summary.riskOpen) }}</b>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pms-card meeting-card">
+      <h3>
+        会议日志
+        <span class="card-note">近 {{ meeting.days }} 天 · 已生效日志</span>
+      </h3>
+      <div class="meeting-body">
+        <div class="meeting-main">
+          <div class="mini-stats meeting-stats">
+            <div class="mini-stat">
+              <span>会议日志</span>
+              <b>{{ num(meeting.logCount) }} 条</b>
+            </div>
+            <div class="mini-stat">
+              <span>会议工时</span>
+              <b>{{ num(meeting.hours, 1) }}h</b>
+            </div>
+            <div class="mini-stat">
+              <span>参与人数</span>
+              <b>{{ num(meeting.userCount) }} 人</b>
+            </div>
+            <div class="mini-stat">
+              <span>场均工时</span>
+              <b>{{ num(meeting.avgHours, 1) }}h</b>
+            </div>
+          </div>
+          <div class="ratio-row">
+            <span>会议工时占日志工时</span>
+            <b class="ratio-value">{{ num(meeting.hourRatio, 1) }}%</b>
+          </div>
+          <div class="hours-track">
+            <span
+              class="hours-fill"
+              :style="{ width: `${Math.min(Number(meeting.hourRatio) || 0, 100)}%` }"
+            ></span>
+          </div>
+        </div>
+        <div class="meeting-recent">
+          <h4>最近会议记录</h4>
+          <ul v-if="meeting.recent.length">
+            <li v-for="(item, index) in meeting.recent" :key="index">
+              <span class="recent-date">{{ formatDate(item.logDate).slice(5) }}</span>
+              <span class="recent-user">{{ item.userName || '—' }}</span>
+              <span class="recent-content">{{ item.content || '（无内容）' }}</span>
+              <b class="recent-hours">{{ num(item.hours, 1) }}h</b>
+            </li>
+          </ul>
+          <el-empty v-else description="该范围暂无会议日志" :image-size="54" />
         </div>
       </div>
     </div>
@@ -1237,6 +1319,91 @@ onMounted(async () => {
   font-variant-numeric: tabular-nums;
 }
 
+/* ---------------- 会议日志卡 ---------------- */
+.meeting-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: 16px;
+}
+
+.meeting-stats {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.ratio-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 14px 0 8px;
+  font-size: 12.5px;
+  color: var(--pms-text-3);
+}
+
+.ratio-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--pms-primary-deep);
+  font-variant-numeric: tabular-nums;
+}
+
+.meeting-recent h4 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--pms-text-2);
+}
+
+.meeting-recent ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.meeting-recent li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--pms-line);
+  border-radius: 8px;
+  background: #fafbfe;
+  font-size: 12.5px;
+  color: var(--pms-text-2);
+}
+
+.recent-date {
+  flex: none;
+  width: 38px;
+  color: var(--pms-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.recent-user {
+  flex: none;
+  max-width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--pms-text);
+}
+
+.recent-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-hours {
+  flex: none;
+  color: var(--pms-primary-deep);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------------- 项目表 ---------------- */
 .progress-cell {
   display: flex;
@@ -1395,6 +1562,14 @@ onMounted(async () => {
 @media (max-width: 900px) {
   .insight-grid {
     grid-template-columns: 1fr;
+  }
+
+  .meeting-body {
+    grid-template-columns: 1fr;
+  }
+
+  .meeting-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

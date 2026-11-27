@@ -30,6 +30,14 @@ from pms.worklog.rules import workdays_between
 
 _CONFIRMED: Final[str] = "CONFIRMED"
 
+#: 会议类日志（含兼容历史数据的三类会议）——不绑项目、工时只落在主表 `total_hours`
+_MEETING_LOG_TYPES: Final[tuple[str, ...]] = (
+    "MEETING",
+    "MEETING_COMPANY",
+    "MEETING_DEPT",
+    "MEETING_PROJECT",
+)
+
 #: 只有进行中的项目才判定健康度；已交付/关闭的项目不再因为延期与日志率被标红
 _HEALTH_ACTIVE: Final[frozenset[str]] = frozenset(
     {"APPROVING", "APPROVED", "IN_PROGRESS", "SUSPENDED"}
@@ -417,13 +425,85 @@ async def project_dashboard(session: AsyncSession, project_id: int) -> dict[str,
     }
 
 
+async def _meeting_stats(
+    session: AsyncSession, dept_ids: list[int], days: int = 30
+) -> dict[str, object]:
+    """部门近 N 天会议日志统计（条数、工时、参与人数、工时占比与最近记录）。
+
+    口径：只统计已生效（`CONFIRMED`）的日志——会议日志提交即确认，
+    草稿不计；会议工时取主表 `total_hours`（会议日志没有明细子表）。
+    """
+    span = max(int(days), 1)
+    date_to = date.today()
+    date_from = date_to - timedelta(days=span - 1)
+    scope = (
+        WlWorklog.deleted == 0,
+        WlWorklog.status == _CONFIRMED,
+        WlWorklog.log_date >= date_from.isoformat(),
+        WlWorklog.log_date <= date_to.isoformat(),
+        WlWorklog.dept_id.in_(dept_ids or [0]),
+    )
+    meeting_scope = (*scope, WlWorklog.log_type.in_(_MEETING_LOG_TYPES))
+    log_count, hours, user_count = (
+        await session.execute(
+            select(
+                func.count(WlWorklog.id),
+                func.coalesce(func.sum(WlWorklog.total_hours), 0),
+                func.count(func.distinct(WlWorklog.user_id)),
+            ).where(*meeting_scope)
+        )
+    ).one()
+    all_hours = float(
+        (
+            await session.execute(
+                select(func.coalesce(func.sum(WlWorklog.total_hours), 0)).where(*scope)
+            )
+        ).scalar_one()
+        or 0
+    )
+    recent = (
+        await session.execute(
+            select(
+                WlWorklog.log_date,
+                WlWorklog.total_hours,
+                WlWorklog.content,
+                SysUser.real_name,
+            )
+            .outerjoin(SysUser, SysUser.id == WlWorklog.user_id)
+            .where(*meeting_scope)
+            .order_by(WlWorklog.log_date.desc(), WlWorklog.id.desc())
+            .limit(5)
+        )
+    ).all()
+    meeting_hours = round(float(hours or 0), 2)
+    return {
+        "days": span,
+        "logCount": int(log_count or 0),
+        "hours": meeting_hours,
+        "userCount": int(user_count or 0),
+        "avgHours": round(meeting_hours / int(log_count), 2) if log_count else 0.0,
+        # 会议工时占同期全部日志工时的比例（0~100）
+        "hourRatio": round(meeting_hours / all_hours * 100, 2) if all_hours > 0 else 0.0,
+        "recent": [
+            {
+                "logDate": str(log_date or ""),
+                "userName": str(real_name or ""),
+                "hours": round(float(item_hours or 0), 2),
+                "content": " ".join(str(content or "").split())[:60],
+            }
+            for log_date, item_hours, content, real_name in recent
+        ],
+    }
+
+
 async def dept_dashboard(session: AsyncSession, dept_ids: list[int]) -> dict[str, object]:
-    """部门看板：本部门项目汇总 + 延期 Top5。"""
+    """部门看板：本部门项目汇总 + 延期 Top5 + 会议日志统计。"""
     metrics = await _metrics_of(session, dept_ids)
     return {
         "summary": summarize(metrics),
         "topDelayed": [_metric_out(item) for item in top_delayed(metrics, 5)],
         "projects": [_metric_out(item) for item in metrics],
+        "meeting": await _meeting_stats(session, dept_ids),
     }
 
 
