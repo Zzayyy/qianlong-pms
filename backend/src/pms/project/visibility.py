@@ -52,13 +52,16 @@ async def is_project_manager(
         return True
     if project.pm_id == context.user_id:
         return True
-    stmt = select(PrjMember.id).where(
+    stmt = select(PrjMember.role_in_project).where(
         PrjMember.project_id == project.id,
         PrjMember.user_id == context.user_id,
-        PrjMember.role_in_project == "PM",
         PrjMember.deleted == 0,
     )
-    return (await session.execute(stmt)).scalar_one_or_none() is not None
+    # 组内角色支持一人多角色（逗号分隔），这里按「包含 PM」判断
+    for value in (await session.execute(stmt)).scalars().all():
+        if "PM" in service.split_member_roles(value):
+            return True
+    return False
 
 
 async def ensure_project_manager(

@@ -151,10 +151,32 @@ def _status_text(value: object) -> str:
     return _PROJECT_STATUS_TEXT.get(text, text)
 
 
-def _member_role_text(value: object) -> str:
-    """组内角色中文名（未收录的原样返回）。"""
+def split_member_roles(value: object) -> list[str]:
+    """解析组内角色：兼容单值与逗号分隔的多值（`DEV,TEST`），保序去重。"""
     text = str(value or "")
-    return _MEMBER_ROLE_TEXT.get(text, text)
+    roles: list[str] = []
+    for item in text.split(","):
+        code = item.strip().upper()
+        if code and code not in roles:
+            roles.append(code)
+    return roles
+
+
+def join_member_roles(value: object) -> str:
+    """把单值 / 多值 / 列表统一成落库用的逗号分隔字符串（大写、去重）。"""
+    if isinstance(value, (list, tuple, set)):
+        raw = ",".join(str(item or "") for item in value)
+    else:
+        raw = str(value or "")
+    return ",".join(split_member_roles(raw))
+
+
+def _member_role_text(value: object) -> str:
+    """组内角色中文名（多角色用 / 分隔，未收录的原样返回）。"""
+    roles = split_member_roles(value)
+    if not roles:
+        return ""
+    return " / ".join(_MEMBER_ROLE_TEXT.get(code, code) for code in roles)
 
 
 def _notify_text(value: object) -> str:
@@ -544,13 +566,16 @@ async def add_members(
         dept_id = int(item.get("deptId") or 0) or await _user_dept_id(session, user_id)
         if await is_member(session, project_id, user_id):
             continue
+        raw_roles = item.get("roleInProjects")
+        if raw_roles is None:
+            raw_roles = item.get("roleInProject") or "MEMBER"
         added.append(
             await add_member(
                 session,
                 project_id,
                 user_id,
                 dept_id,
-                role_in_project=str(item.get("roleInProject") or "MEMBER"),
+                role_in_project=join_member_roles(raw_roles) or "MEMBER",
                 allocation=float(item.get("allocation") or 100),  # type: ignore[arg-type]
             )
         )
@@ -918,27 +943,32 @@ async def update_member_role(
     session: AsyncSession,
     project_id: int,
     member_id: int,
-    role_in_project: str,
+    role_in_project: str | list[str],
     operator_id: int = 0,
     reason: str = "",
 ) -> PrjMember:
-    """调整成员组内角色（写变更留痕，`reason` 可选）。
+    """调整成员组内角色（可多选，写变更留痕，`reason` 可选）。
 
     说明：`PM` 只对应项目负责人，走「变更项目经理」转移；`DIRECTOR` 走项目总监
     设置接口。这里只接受普通组内角色，避免出现两个「项目经理」。
-    `reason` 为空时自动生成「调整组内角色：开发 → 测试」，不打断日常分工调整。
+    一人可同时承担多个角色（如「开发 + 测试」），落库用逗号拼接。
+    `reason` 为空时自动生成「调整组内角色：开发 → 开发 / 测试」，不打断日常分工调整。
     """
     member = await session.get(PrjMember, member_id)
     if member is None or member.deleted != 0 or member.project_id != project_id:
         raise NotFoundError("成员不存在")
-    role = (role_in_project or "").strip().upper()
-    if role not in _ASSIGNABLE_MEMBER_ROLES:
+    roles = split_member_roles(join_member_roles(role_in_project))
+    if not roles:
+        raise ParamError("请至少选择一个组内角色")
+    invalid = [code for code in roles if code not in _ASSIGNABLE_MEMBER_ROLES]
+    if invalid:
         raise ParamError("组内角色不合法")
     project = await _get_project(session, project_id)
     if int(member.user_id) == int(project.pm_id or 0):
         raise ConflictError("项目经理角色请在「变更项目经理」中调整")
     before = member.role_in_project
-    if before == role:
+    role = ",".join(roles)
+    if split_member_roles(before) == roles:
         return member
     member.role_in_project = role
     member.update_by = operator_id
@@ -1675,7 +1705,9 @@ async def set_directors(
         # 已有成员默认是 MEMBER（ensure_member 不会改角色），这里升级为 DIRECTOR，
         # 让成员列表与会签权一致；已是开发/测试等业务角色的保持不动，
         # 界面上再用「总监」标签叠加展示，不覆盖业务身份。
-        if member.role_in_project in {"", "MEMBER"}:
+        if not split_member_roles(member.role_in_project) or set(
+            split_member_roles(member.role_in_project)
+        ) <= {"MEMBER"}:
             member.role_in_project = "DIRECTOR"
             member.update_by = operator_id
             await session.flush()

@@ -3,7 +3,7 @@ defineOptions({ name: 'ProjectsPage' })
 import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, ArrowLeft, Check, ClipboardCheck, Plus, Timer, Zap } from 'lucide-vue-next'
+import { ArrowDown, ArrowLeft, Check, ClipboardCheck, Plus, Timer, X, Zap } from 'lucide-vue-next'
 import {
   addMember,
   approveProject,
@@ -237,8 +237,8 @@ const createForm = ref<any>({
   planStart: '',
   planEnd: '',
   memberIds: [] as string[],
-  /** 组内角色：userId -> 角色编码，未指定按「成员」入组 */
-  memberRoles: {} as Record<string, string>,
+  /** 组内角色：userId -> 角色编码数组（一人可多角色），未指定按「成员」入组 */
+  memberRoles: {} as Record<string, string[]>,
   directorIds: [] as string[],
   // 创建方式：NONE=直接立项 / RETRO=先开工后补审批 / PRE=先审批后开工
   approvalMode: 'NONE' as 'NONE' | 'RETRO' | 'PRE',
@@ -329,17 +329,24 @@ const setStageRange = (stage: any, value: any) => {
   stage.planStart = start || ''
   stage.planEnd = end || ''
 }
+/** 该成员是否是本次选中的项目总监（总监身份由「项目总监」入口管理） */
+const isDraftDirector = (id: any) =>
+  (createForm.value.directorIds || []).map(String).includes(String(id || ''))
 /** 组内角色跟随人员选择同步：新选的人默认「成员」，移除的人清掉遗留角色 */
 watch(
   () => createForm.value.memberIds,
   (next: string[]) => {
-    const roles: Record<string, string> = { ...(createForm.value.memberRoles || {}) }
+    const roles: Record<string, string[]> = { ...(createForm.value.memberRoles || {}) }
     const ids = (next || []).map(String)
     for (const id of Object.keys(roles)) {
       if (!ids.includes(id)) delete roles[id]
     }
     for (const id of ids) {
-      if (!roles[id]) roles[id] = 'MEMBER'
+      // 项目经理 / 总监不占组内业务角色，默认留空，避免显示成「成员」
+      if (roles[id] === undefined) {
+        roles[id] =
+          isDraftDirector(id) || id === String(createForm.value.pmId) ? [] : ['MEMBER']
+      }
     }
     createForm.value.memberRoles = roles
     // 阶段负责人只能从项目组成员里选：人员被移出组后清空，回到「默认项目经理」
@@ -354,9 +361,52 @@ watch(
 )
 const memberName = (id: string) =>
   users.value.find((user: any) => String(user.id) === String(id))?.realName || '未知人员'
-/** 组内角色：项目经理由「项目经理」字段决定，其余人员可自由选择分工角色 */
-const setMemberRole = (id: string, role: string) => {
-  createForm.value.memberRoles = { ...(createForm.value.memberRoles || {}), [String(id)]: role }
+/** 组内角色：项目经理由「项目经理」字段决定，其余人员可多选分工角色 */
+const setMemberRole = (id: string, roles: string[]) => {
+  // 同一角色不重复；项目经理 / 总监允许留空（身份由各自字段表达）
+  const next: string[] = []
+  for (const code of (roles || []).map(String)) {
+    if (code && !next.includes(code)) next.push(code)
+  }
+  const keepEmpty = isDraftDirector(id) || String(id) === String(createForm.value.pmId)
+  createForm.value.memberRoles = {
+    ...(createForm.value.memberRoles || {}),
+    [String(id)]: next.length ? next : keepEmpty ? [] : ['MEMBER']
+  }
+}
+
+/** 可分配的组内角色码（顺序与下拉一致） */
+const assignableRoleCodes = Object.keys(ASSIGNABLE_MEMBER_ROLE)
+/** 该成员当前的角色列表（总监/经理可为空，其余默认「成员」） */
+const draftRoleCodes = (id: string): string[] => {
+  const list = createForm.value.memberRoles?.[String(id)]
+  if (Array.isArray(list)) return list.map(String)
+  return isDraftDirector(id) || String(id) === String(createForm.value.pmId) ? [] : ['MEMBER']
+}
+/** 修改第 index 个角色（传空表示清空该角色） */
+const setMemberRoleAt = (id: string, index: number, code: string) => {
+  const codes = [...draftRoleCodes(id)]
+  if (!code) {
+    codes.splice(index, 1)
+    setMemberRole(id, codes)
+    return
+  }
+  codes[index] = String(code)
+  setMemberRole(id, codes)
+}
+/** 追加一个尚未使用的角色（一人多角色是少数情况，用「+」按需添加） */
+const addMemberRole = (id: string) => {
+  const codes = [...draftRoleCodes(id)]
+  const next = assignableRoleCodes.find((code) => !codes.includes(code))
+  if (!next) return
+  setMemberRole(id, [...codes, next])
+}
+/** 移除第 index 个角色（最后一个不允许移除，改为切换） */
+const removeMemberRole = (id: string, index: number) => {
+  const codes = [...draftRoleCodes(id)]
+  if (codes.length <= 1) return
+  codes.splice(index, 1)
+  setMemberRole(id, codes)
 }
 
 interface MemberSummaryRow {
@@ -397,8 +447,12 @@ const memberSummary = computed<MemberSummaryRow[]>(() => {
     const roles: string[] = []
     if (id === pm) roles.push('项目经理')
     if (directors.has(id)) roles.push('项目总监')
-    if (members.has(id)) {
-      roles.push(MEMBER_ROLE[createForm.value.memberRoles?.[id] || 'MEMBER']?.label || '成员')
+    // 项目经理本身就在项目组里，不再额外显示「成员」，避免「项目经理 / 成员」的重复
+    if (members.has(id) && id !== pm) {
+      for (const code of draftRoleCodes(id)) {
+        const label = MEMBER_ROLE[code]?.label || '成员'
+        if (!roles.includes(label)) roles.push(label)
+      }
     }
     if (stageOwners.has(id)) roles.push('阶段负责人')
     // 主要成员橙色、含阶段负责人蓝色，其余灰色，扫一眼能分出层级
@@ -409,16 +463,34 @@ const memberSummary = computed<MemberSummaryRow[]>(() => {
 })
 
 
-/** 项目经理改选时，仍指向原项目经理的阶段跟着调整；已单独指定的阶段保持不变。 */
+/** 把某人补进项目组：项目经理 / 总监在后端会自动入组，前端保持一致便于分工 */
+const ensureMemberId = (id: any) => {
+  const key = String(id || '')
+  if (!key) return
+  const ids = (createForm.value.memberIds || []).map(String)
+  if (ids.includes(key)) return
+  createForm.value.memberIds = [...ids, key]
+}
+
+/** 项目经理改选时：补进项目组；仍指向原项目经理的阶段跟着调整，已单独指定的保持不变。 */
 watch(
   () => createForm.value.pmId,
   (next, prev) => {
     const before = String(prev || '')
     const after = String(next || '')
+    ensureMemberId(after)
     for (const stage of createForm.value.stages || []) {
       if (!stage.ownerId || String(stage.ownerId) === before) stage.ownerId = after
     }
   }
+)
+/** 项目总监同样自动入组：选中即出现在「成员安排」，可以继续给他分角色。 */
+watch(
+  () => createForm.value.directorIds,
+  (next: string[]) => {
+    for (const id of next || []) ensureMemberId(id)
+  },
+  { deep: true }
 )
 
 const detailLoading = ref(false)
@@ -1390,10 +1462,10 @@ const doCreate = async (startNow = false) => {
     contractAmount: Number(createForm.value.contractAmount || 0),
     planStart: createForm.value.planStart || null,
     planEnd: createForm.value.planEnd || null,
-    // 立项即带入项目组成员与组内角色；项目经理和阶段负责人会自动入组，重复会被忽略
+    // 立项即带入项目组成员与组内角色（可多选）；项目经理和阶段负责人会自动入组，重复会被忽略
     members: memberIds.map((userId) => ({
       userId,
-      roleInProject: createForm.value.memberRoles?.[userId] || 'MEMBER'
+      roleInProjects: createForm.value.memberRoles?.[userId] || ['MEMBER']
     })),
     directorIds: createForm.value.directorIds || [],
     approvalMode: mode,
@@ -1978,11 +2050,31 @@ watch(addMemberIds, (next) => {
   void doAddMember(next.map(String))
 })
 
-/** 行内调整组内角色（PM 角色走「变更项目经理」，这里不出现）。 */
-const changeMemberRole = async (row: any, role: string) => {
-  if (!role || role === row.roleInProject) return
+/** 成员组内角色：优先读数组，兼容旧的单值字符串（逗号分隔也能解析）。 */
+const rowRoleCodes = (row: any): string[] => {
+  const list = row?.roleInProjects
+  if (Array.isArray(list) && list.length) return list.map(String)
+  const raw = String(row?.roleInProject || '')
+  return raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+const rowRoleLabel = (row: any) =>
+  rowRoleCodes(row)
+    .map((code) => dictOf(MEMBER_ROLE, code).label)
+    .join(' / ') || '—'
+const rowRoleTagType = (row: any) => dictOf(MEMBER_ROLE, rowRoleCodes(row)[0] || '').type
+const rowIsDirector = (row: any) => rowRoleCodes(row).includes('DIRECTOR')
+
+/** 行内调整组内角色（可多选；PM 角色走「变更项目经理」，这里不出现）。 */
+const changeMemberRole = async (row: any, roles: string[]) => {
+  const next = (roles || []).map(String).filter(Boolean)
+  if (!next.length) return
+  const before = rowRoleCodes(row)
+  if (before.length === next.length && before.every((code, index) => code === next[index])) return
   // 组内角色属于日常分工微调：不弹原因输入框，留痕原因由后端自动生成
-  await updateProjectMember(detail.value.id, String(row.id), { roleInProject: role })
+  await updateProjectMember(detail.value.id, String(row.id), { roleInProjects: next })
   ElMessage.success('组内角色已更新')
   members.value = await listMembers(detail.value.id)
 }
@@ -2456,12 +2548,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <el-input v-model="createForm.projectName" maxlength="50" show-word-limit placeholder="如：XX 客户订单系统中台建设（50 字以内）" />
             </div>
             <div class="field">
-              <label>所属部门</label>
-              <el-select v-model="createForm.deptId" filterable clearable placeholder="默认总公司">
-                <el-option v-for="dept in depts" :key="dept.id" :label="dept.deptName" :value="dept.id" />
-              </el-select>
-            </div>
-            <div class="field">
               <label>项目经理 <em>*</em></label>
               <el-select v-model="createForm.pmId" filterable placeholder="选择项目经理">
                 <el-option
@@ -2472,7 +2558,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 />
               </el-select>
             </div>
-            <div class="field span-2">
+            <div class="field">
               <label>项目总监</label>
               <PersonPicker
                 v-model="createForm.directorIds"
@@ -2485,6 +2571,12 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
             <div class="field">
               <label>合同金额（元）</label>
               <el-input-number v-model="createForm.contractAmount" :min="0" :step="1000" />
+            </div>
+            <div class="field">
+              <label>所属部门</label>
+              <el-select v-model="createForm.deptId" filterable clearable placeholder="默认总公司">
+                <el-option v-for="dept in depts" :key="dept.id" :label="dept.deptName" :value="dept.id" />
+              </el-select>
             </div>
             <div class="field">
               <label>关联客户</label>
@@ -2503,7 +2595,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 />
               </el-select>
             </div>
-            <div class="field span-2">
+            <div class="field">
               <label>关联原始需求<span class="optional">可选，可多选</span></label>
               <el-select
                 v-model="createForm.requirementIds"
@@ -2559,20 +2651,66 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                   <el-tag v-if="String(id) === String(createForm.pmId)" size="small" type="warning">
                     项目经理
                   </el-tag>
-                  <el-select
-                    v-else
-                    :model-value="createForm.memberRoles?.[id] || 'MEMBER'"
-                    size="small"
-                    class="member-role-select"
-                    @change="(value: any) => setMemberRole(String(id), String(value))"
-                  >
-                    <el-option
-                      v-for="(label, code) in ASSIGNABLE_MEMBER_ROLE"
-                      :key="code"
-                      :label="label"
-                      :value="code"
+                  <!-- 默认一个角色，多个角色时用「+」追加，避免下拉里塞一堆标签 -->
+                  <div v-else class="role-editor">
+                    <el-tag v-if="isDraftDirector(id)" size="small" type="warning" effect="plain">
+                      总监
+                    </el-tag>
+                    <el-select
+                      :model-value="draftRoleCodes(id)[0] || ''"
+                      size="small"
+                      :clearable="isDraftDirector(id)"
+                      :placeholder="isDraftDirector(id) ? '兼角色' : '选择角色'"
+                      @change="
+                        (value: any) => setMemberRoleAt(String(id), 0, value ? String(value) : '')
+                      "
+                    >
+                      <el-option
+                        v-for="(label, code) in ASSIGNABLE_MEMBER_ROLE"
+                        :key="code"
+                        :label="label"
+                        :value="code"
+                        :disabled="draftRoleCodes(id).includes(code) && draftRoleCodes(id)[0] !== code"
+                      />
+                    </el-select>
+                    <span
+                      v-for="(code, index) in draftRoleCodes(id).slice(1)"
+                      :key="`role-${id}-${index}`"
+                      class="role-extra"
+                    >
+                      <el-select
+                        :model-value="code"
+                        size="small"
+                        @change="
+                          (value: any) => setMemberRoleAt(String(id), index + 1, String(value))
+                        "
+                      >
+                        <el-option
+                          v-for="(label, optionCode) in ASSIGNABLE_MEMBER_ROLE"
+                          :key="optionCode"
+                          :label="label"
+                          :value="optionCode"
+                          :disabled="draftRoleCodes(id).includes(optionCode) && optionCode !== code"
+                        />
+                      </el-select>
+                      <el-button
+                        link
+                        :icon="X"
+                        title="移除该角色"
+                        @click="removeMemberRole(String(id), index + 1)"
+                      />
+                    </span>
+                    <!-- 用浏览器原生 title：悬停才显示，不遮挡表单 -->
+                    <el-button
+                      class="role-add"
+                      circle
+                      size="small"
+                      :icon="Plus"
+                      title="再添加一个角色"
+                      :disabled="draftRoleCodes(id).length >= assignableRoleCodes.length"
+                      @click="addMemberRole(String(id))"
                     />
-                  </el-select>
+                  </div>
                 </div>
               </div>
             </div>
@@ -3772,7 +3910,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                 </template>
               </el-table-column>
               <el-table-column prop="username" label="账号" min-width="120" class-name="pms-mobile-hide" />
-              <el-table-column label="组内角色" width="176">
+              <el-table-column label="组内角色" width="200">
                 <template #default="{ row }">
                   <div class="role-cell">
                     <!-- 角色直接行内调整：添加成员时不用先选角色，减少一次判断 -->
@@ -3780,11 +3918,14 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                       v-if="
                         canManageMembers &&
                         String(row.userId) !== String(detail.pmId) &&
-                        row.roleInProject !== 'DIRECTOR'
+                        !rowIsDirector(row)
                       "
                       size="small"
-                      :model-value="row.roleInProject"
-                      @change="(value: any) => changeMemberRole(row, String(value))"
+                      multiple
+                      collapse-tags
+                      collapse-tags-tooltip
+                      :model-value="rowRoleCodes(row)"
+                      @change="(value: any) => changeMemberRole(row, value)"
                     >
                       <el-option
                         v-for="(label, code) in ASSIGNABLE_MEMBER_ROLE"
@@ -3797,13 +3938,13 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
                       v-else
                       size="small"
                       effect="plain"
-                      :type="dictOf(MEMBER_ROLE, row.roleInProject).type"
+                      :type="rowRoleTagType(row)"
                     >
-                      {{ dictOf(MEMBER_ROLE, row.roleInProject).label }}
+                      {{ rowRoleLabel(row) }}
                     </el-tag>
                     <!-- 总监身份由「项目总监」入口管理，这里只读叠加，避免与会签权脱节 -->
                     <el-tag
-                      v-if="isProjectDirector(row) && row.roleInProject !== 'DIRECTOR'"
+                      v-if="isProjectDirector(row) && !rowIsDirector(row)"
                       size="small"
                       type="warning"
                       effect="plain"
@@ -4502,6 +4643,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 /* 组内角色：与「阶段负责人」左右并排，块内一人一行 */
 .member-role-list {
   display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: 6px;
   padding: 8px 10px;
@@ -4509,14 +4651,16 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   border-radius: 6px;
 }
 
+/* 角色多了整行可换行：姓名在上、角色编辑掉到下一行，不会撑破半宽栏 */
 .member-role-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px 8px;
 }
 
 .member-role-name {
-  flex: 1;
+  flex: 1 1 88px;
   min-width: 0;
   overflow: hidden;
   font-size: 12.5px;
@@ -4524,9 +4668,35 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   white-space: nowrap;
 }
 
-.member-role-row :deep(.el-select) {
+/* 组内角色编辑：默认一个角色，需要多个时用「+」追加 */
+.role-editor {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px 6px;
+}
+
+.role-editor :deep(.el-select) {
+  width: 112px;
   flex: none;
-  width: 132px;
+}
+
+.role-extra {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* 去掉 Element Plus 相邻按钮的左边距，避免额外角色挤不下 */
+.role-editor :deep(.el-button) {
+  margin-left: 0;
+}
+
+.role-add {
+  flex: none;
 }
 
 /* 组内角色与阶段负责人并排时两块等高，避免长短不一显得参差 */

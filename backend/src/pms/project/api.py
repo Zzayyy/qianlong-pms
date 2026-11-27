@@ -309,11 +309,13 @@ class DirectorsIn(BaseModel):
 
 
 class MemberIn(BaseModel):
-    """成员入参。"""
+    """成员入参（组内角色支持多选，旧字段 `roleInProject` 仍然兼容）。"""
 
     userId: int
     deptId: int = 0
     roleInProject: str = "MEMBER"
+    #: 一人多角色（如 DEV + TEST）；传了就以它为准
+    roleInProjects: list[str] | None = None
     allocation: float = 100
 
 
@@ -1143,6 +1145,8 @@ async def members(
                 "userId": item.user_id,
                 "deptId": item.dept_id,
                 "roleInProject": item.role_in_project,
+                # 一人多角色：数组形式，前端按多个标签展示
+                "roleInProjects": service.split_member_roles(item.role_in_project),
                 "allocation": float(item.allocation),
                 "joinDate": item.join_date,
                 # 账号可能已被删除（历史数据），不要把雪花 ID 当姓名展示
@@ -1170,7 +1174,10 @@ async def add_member(
         project_id,
         body.userId,
         body.deptId,
-        role_in_project=body.roleInProject,
+        role_in_project=service.join_member_roles(
+            body.roleInProjects if body.roleInProjects is not None else body.roleInProject
+        )
+        or "MEMBER",
         allocation=body.allocation,
         operator_id=context.user_id,
     )
@@ -1179,10 +1186,17 @@ async def add_member(
 
 
 class MemberRoleIn(BaseModel):
-    """成员组内角色入参。"""
+    """成员组内角色入参（多选，兼容旧版单值字段 `roleInProject`）。"""
 
-    roleInProject: str = Field(min_length=1, max_length=32)
+    roleInProject: str | None = Field(default=None, max_length=64)
+    roleInProjects: list[str] | None = None
     reason: str = Field(default="", max_length=500)
+
+    def resolved_roles(self) -> list[str]:
+        """优先取多选数组，其次回落旧的单值字段。"""
+        if self.roleInProjects is not None:
+            return [str(item) for item in self.roleInProjects]
+        return [self.roleInProject] if self.roleInProject else []
 
 
 @router.put("/{project_id}/members/{member_id}", summary="修改成员组内角色")
@@ -1204,12 +1218,18 @@ async def update_member(
         session,
         project_id,
         member_id,
-        body.roleInProject,
+        body.resolved_roles(),
         context.user_id,
         reason=body.reason,
     )
     await session.commit()
-    return ok({"id": member.id, "roleInProject": member.role_in_project})
+    return ok(
+        {
+            "id": member.id,
+            "roleInProject": member.role_in_project,
+            "roleInProjects": service.split_member_roles(member.role_in_project),
+        }
+    )
 
 
 @router.put("/{project_id}/pm", summary="变更项目负责人")

@@ -49,14 +49,18 @@ class PrjProject(Base, CommonMixin):
 
 
 class PrjMember(Base, CommonMixin):
-    """项目成员 `t_prj_member`。"""
+    """项目成员 `t_prj_member`。
+
+    `role_in_project` 支持一人多角色：多个角色码用英文逗号拼接（如 `DEV,TEST`），
+    单值时与历史数据完全兼容（如 `PM` / `MEMBER`）。
+    """
 
     __tablename__ = "t_prj_member"
 
     project_id: Mapped[int] = mapped_column(BigInteger, default=0)
     user_id: Mapped[int] = mapped_column(BigInteger, default=0)
     dept_id: Mapped[int] = mapped_column(BigInteger, default=0)
-    role_in_project: Mapped[str] = mapped_column(String(32), default="MEMBER")
+    role_in_project: Mapped[str] = mapped_column(String(64), default="MEMBER")
     allocation: Mapped[float] = mapped_column(Numeric(5, 2), default=100)
     join_date: Mapped[str | None] = mapped_column(Date, default=None)
     leave_date: Mapped[str | None] = mapped_column(Date, default=None)
