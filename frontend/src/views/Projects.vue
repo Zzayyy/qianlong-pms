@@ -22,9 +22,11 @@ import {
   downloadProjectFile,
   generateWeekly,
   ignoreProjectAlert,
+  listCustomers,
   listMembers,
   listProjectAlerts,
   listProjects,
+  listRequirements,
   listRisks,
   listStages,
   listWeeklies,
@@ -202,8 +204,11 @@ const applyStatusFilter = (code: string) => {
 }
 
 const createVisible = ref(false)
-/** 立项即按这几段建立阶段；阶段负责人默认取项目经理，可在同一界面改。 */
-const DEFAULT_STAGES = ['设计', '开发', '测试', '交付', '在线问题修复', '结项']
+/**
+ * 立项即按这几段建立阶段；阶段负责人默认取项目经理，可在同一界面改。
+ * 「结项」是状态流转动作（标记完成）而不是阶段，故不再作为默认阶段。
+ */
+const DEFAULT_STAGES = ['设计', '开发', '测试', '交付', '在线问题修复']
 /** 默认权重按阶段数均分，保持合计 100（后端计算进度时仍会归一化）。 */
 const DEFAULT_STAGE_WEIGHT = Math.round((100 / DEFAULT_STAGES.length) * 100) / 100
 const createOptions = ref({
@@ -225,6 +230,9 @@ const createForm = ref<any>({
   projectName: '',
   deptId: '',
   pmId: '',
+  customerId: '',
+  summary: '',
+  requirementIds: [] as string[],
   contractAmount: 0,
   planStart: '',
   planEnd: '',
@@ -236,6 +244,91 @@ const createForm = ref<any>({
   approvalMode: 'NONE' as 'NONE' | 'RETRO' | 'PRE',
   stages: [] as any[]
 })
+
+/** 新建表单页签：基本信息 / 成员安排 / 时间安排（创建方式固定在最底部）。 */
+const createTab = ref<'basic' | 'member' | 'time'>('basic')
+
+/** 关联客户：可搜索下拉（客户数量有限，一次拉取后在本地过滤）。 */
+const customerOptions = ref<{ id: string; label: string }[]>([])
+const customerLoading = ref(false)
+const loadCustomers = async () => {
+  if (customerOptions.value.length) return
+  customerLoading.value = true
+  try {
+    const data = await listCustomers({ pageNum: 1, pageSize: 200 })
+    customerOptions.value = ((data?.list || []) as any[]).map((item) => ({
+      id: String(item.id),
+      label: `${item.customerName || '未命名客户'}${item.customerCode ? `（${item.customerCode}）` : ''}`
+    }))
+  } catch {
+    // 无 CRM 权限或接口异常：保留空列表，客户非必填不影响立项
+    customerOptions.value = []
+  } finally {
+    customerLoading.value = false
+  }
+}
+
+/** 原始需求：远程搜索多选，已选项的展示名单独记住，避免换关键词后丢标签。 */
+const requirementOptions = ref<{ id: string; label: string }[]>([])
+const requirementPicked = ref<Record<string, string>>({})
+const requirementLoading = ref(false)
+const searchRequirements = async (keyword = '') => {
+  requirementLoading.value = true
+  const picked = Object.entries(requirementPicked.value)
+  try {
+    const data = await listRequirements({ pageNum: 1, pageSize: 20, keyword: String(keyword || '') })
+    const options = ((data?.list || []) as any[]).map((item) => ({
+      id: String(item.id),
+      label: `${item.reqName || '未命名需求'}${item.reqCode ? `（${item.reqCode}）` : ''}`
+    }))
+    requirementOptions.value = [
+      ...picked
+        .filter(([id]) => !options.some((item) => item.id === id))
+        .map(([id, label]) => ({ id, label })),
+      ...options
+    ]
+  } catch {
+    requirementOptions.value = picked.map(([id, label]) => ({ id, label }))
+  } finally {
+    requirementLoading.value = false
+  }
+}
+/** 选中项标签回填：接口分页只回当前页，已选项靠这里兜住显示名。 */
+watch(
+  () => createForm.value.requirementIds,
+  (ids: string[]) => {
+    const next: Record<string, string> = {}
+    for (const id of (ids || []).map(String)) {
+      next[id] =
+        requirementOptions.value.find((item) => item.id === id)?.label ||
+        requirementPicked.value[id] ||
+        id
+    }
+    requirementPicked.value = next
+  },
+  { deep: true }
+)
+
+/** 计划周期：一个范围选择器同时选开始与结束，落库仍是 planStart / planEnd。 */
+const createPlanRange = computed<any>({
+  get: () =>
+    createForm.value.planStart && createForm.value.planEnd
+      ? [createForm.value.planStart, createForm.value.planEnd]
+      : null,
+  set: (value: any) => {
+    const [start, end] = Array.isArray(value) ? value : []
+    createForm.value.planStart = start || ''
+    createForm.value.planEnd = end || ''
+  }
+})
+/** 阶段排期同样是范围选择（可留空）。 */
+const stageRange = (stage: any) =>
+  stage.planStart && stage.planEnd ? [stage.planStart, stage.planEnd] : null
+const setStageRange = (stage: any, value: any) => {
+  const [start, end] = Array.isArray(value) ? value : []
+  stage.planStart = start || ''
+  stage.planEnd = end || ''
+}
 /** 组内角色跟随人员选择同步：新选的人默认「成员」，移除的人清掉遗留角色 */
 watch(
   () => createForm.value.memberIds,
@@ -249,6 +342,13 @@ watch(
       if (!roles[id]) roles[id] = 'MEMBER'
     }
     createForm.value.memberRoles = roles
+    // 阶段负责人只能从项目组成员里选：人员被移出组后清空，回到「默认项目经理」
+    for (const stage of createForm.value.stages || []) {
+      const owner = String(stage.ownerId || '')
+      if (owner && owner !== String(createForm.value.pmId) && !ids.includes(owner)) {
+        stage.ownerId = ''
+      }
+    }
   },
   { deep: true, immediate: true }
 )
@@ -258,6 +358,57 @@ const memberName = (id: string) =>
 const setMemberRole = (id: string, role: string) => {
   createForm.value.memberRoles = { ...(createForm.value.memberRoles || {}), [String(id)]: role }
 }
+
+interface MemberSummaryRow {
+  id: string
+  name: string
+  /** 本人在项目中承担的全部身份（可同时是开发 + 阶段负责人），按标签展示 */
+  roles: string[]
+  /** 标签配色：主要成员橙色、含阶段负责人蓝色、其余灰色 */
+  tone: 'warning' | 'primary' | 'info'
+}
+
+/**
+ * 成员概览：按后端立项时的自动入组规则汇总最终成员——
+ * 项目组 + 项目经理 + 项目总监 + 阶段负责人（后三者由后端自动补进项目组）。
+ * 一个人可身兼多职（如开发 + 阶段负责人），这里把身份全部列出来，不做合并取舍。
+ */
+const memberSummary = computed<MemberSummaryRow[]>(() => {
+  const pm = String(createForm.value.pmId || '')
+  const directors = new Set<string>((createForm.value.directorIds || []).map(String))
+  const members = new Set<string>((createForm.value.memberIds || []).map(String))
+  const stageOwners = new Set<string>(
+    (createForm.value.stages || [])
+      .map((stage: any) => String(stage.ownerId || createForm.value.pmId || ''))
+      .filter(Boolean)
+  )
+  // 按「经理 → 总监 → 组员 → 阶段负责人」的顺序合并去重，保持直觉排序
+  const ids: string[] = []
+  const add = (id: any) => {
+    const key = String(id || '')
+    if (key && !ids.includes(key)) ids.push(key)
+  }
+  add(pm)
+  for (const id of createForm.value.directorIds || []) add(id)
+  for (const id of createForm.value.memberIds || []) add(id)
+  for (const id of stageOwners) add(id)
+
+  return ids.map((id) => {
+    const roles: string[] = []
+    if (id === pm) roles.push('项目经理')
+    if (directors.has(id)) roles.push('项目总监')
+    if (members.has(id)) {
+      roles.push(MEMBER_ROLE[createForm.value.memberRoles?.[id] || 'MEMBER']?.label || '成员')
+    }
+    if (stageOwners.has(id)) roles.push('阶段负责人')
+    // 主要成员橙色、含阶段负责人蓝色，其余灰色，扫一眼能分出层级
+    const tone: MemberSummaryRow['tone'] =
+      id === pm || directors.has(id) ? 'warning' : stageOwners.has(id) ? 'primary' : 'info'
+    return { id, name: memberName(id), roles, tone }
+  })
+})
+
+
 /** 项目经理改选时，仍指向原项目经理的阶段跟着调整；已单独指定的阶段保持不变。 */
 watch(
   () => createForm.value.pmId,
@@ -1149,6 +1300,9 @@ const openCreate = () => {
     projectName: '',
     deptId: createOptions.value.defaultDeptId || rootDept?.id || 0,
     pmId: store.profile?.id || 0,
+    customerId: '',
+    summary: '',
+    requirementIds: [],
     contractAmount: 0,
     planStart: '',
     planEnd: '',
@@ -1158,6 +1312,11 @@ const openCreate = () => {
     approvalMode: createOptions.value.approvalEnabled ? 'PRE' : 'NONE',
     stages: buildStageDrafts(me)
   }
+  createTab.value = 'basic'
+  requirementOptions.value = []
+  requirementPicked.value = {}
+  void loadCustomers()
+  void searchRequirements()
   createVisible.value = true
 }
 
@@ -1168,20 +1327,24 @@ const openCreate = () => {
 const doCreate = async (startNow = false) => {
   const mode = createForm.value.approvalMode
   const effectiveStart = mode === 'NONE' && startNow
-  if (!createForm.value.projectName.trim()) {
+  // 校验失败要跳到对应页签，否则提示了但用户看不到出错字段
+  const projectName = String(createForm.value.projectName || '').trim()
+  if (!projectName) {
+    createTab.value = 'basic'
     ElMessage.warning('请填写项目名称')
     return
   }
+  if (projectName.length > 50) {
+    createTab.value = 'basic'
+    ElMessage.warning('项目名称不能超过 50 字')
+    return
+  }
   if (!createForm.value.pmId) {
+    createTab.value = 'basic'
     ElMessage.warning('请选择项目经理')
     return
   }
   const stages: any[] = createForm.value.stages || []
-  const ownerMissing = stages.filter((stage) => !stage.ownerId)
-  if (ownerMissing.length) {
-    ElMessage.warning(`请为「${ownerMissing.map((stage) => stage.stageName).join('、')}」选择负责人`)
-    return
-  }
   if (
     createForm.value.planStart &&
     createForm.value.planEnd &&
@@ -1218,9 +1381,12 @@ const doCreate = async (startNow = false) => {
   }
   const memberIds: string[] = createForm.value.memberIds || []
   const result = await createProject({
-    projectName: createForm.value.projectName,
+    projectName,
     deptId: createForm.value.deptId || 0,
     pmId: createForm.value.pmId,
+    customerId: createForm.value.customerId || null,
+    summary: String(createForm.value.summary || '').trim(),
+    requirementIds: (createForm.value.requirementIds || []).map(String),
     contractAmount: Number(createForm.value.contractAmount || 0),
     planStart: createForm.value.planStart || null,
     planEnd: createForm.value.planEnd || null,
@@ -1234,7 +1400,8 @@ const doCreate = async (startNow = false) => {
     startNow: effectiveStart,
     stages: stages.map((stage, index) => ({
       stageName: stage.stageName,
-      ownerId: stage.ownerId,
+      // 阶段负责人留空即由项目经理默认负责，避免每个阶段都要重复选一次
+      ownerId: stage.ownerId || createForm.value.pmId,
       weight: Number(stage.weight || 0),
       seq: index + 1,
       planStart: stage.planStart || null,
@@ -2023,11 +2190,11 @@ const ownerOptions = computed(() => {
   return groupUsers(preferred)
 })
 
-/** 立项阶段负责人候选：本次已勾选的项目成员与项目经理排前面。 */
-const draftOwnerOptions = computed(() => {
-  const preferred = new Set<string>((createForm.value.memberIds || []).map(String))
-  if (createForm.value.pmId) preferred.add(String(createForm.value.pmId))
-  return groupUsers(preferred)
+/** 立项阶段负责人候选：只列本次已选的项目组成员（项目经理默认在组内），避免和成员选择重复。 */
+const stageOwnerOptions = computed(() => {
+  const ids = new Set<string>((createForm.value.memberIds || []).map(String))
+  if (createForm.value.pmId) ids.add(String(createForm.value.pmId))
+  return users.value.filter((user) => ids.has(String(user.id)))
 })
 
 /** 工时文案：实际为 0（还没有工作日志）时只显示计划，避免「8h / 0h」的噪音。 */
@@ -2281,10 +2448,225 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       :close-on-click-modal="false"
     >
       <div class="dialog-body">
-        <section class="form-section">
+        <el-tabs v-model="createTab" class="create-tabs">
+          <el-tab-pane label="基本信息" name="basic">
+          <div class="form-grid">
+            <div class="field span-2">
+              <label>项目名称 <em>*</em></label>
+              <el-input v-model="createForm.projectName" maxlength="50" show-word-limit placeholder="如：XX 客户订单系统中台建设（50 字以内）" />
+            </div>
+            <div class="field">
+              <label>所属部门</label>
+              <el-select v-model="createForm.deptId" filterable clearable placeholder="默认总公司">
+                <el-option v-for="dept in depts" :key="dept.id" :label="dept.deptName" :value="dept.id" />
+              </el-select>
+            </div>
+            <div class="field">
+              <label>项目经理 <em>*</em></label>
+              <el-select v-model="createForm.pmId" filterable placeholder="选择项目经理">
+                <el-option
+                  v-for="user in users"
+                  :key="user.id"
+                  :label="`${user.realName}（${user.username}）`"
+                  :value="user.id"
+                />
+              </el-select>
+            </div>
+            <div class="field span-2">
+              <label>项目总监</label>
+              <PersonPicker
+                v-model="createForm.directorIds"
+                :users="users"
+                :depts="depts"
+                title="选择项目总监"
+                placeholder="选择总监"
+              />
+            </div>
+            <div class="field">
+              <label>合同金额（元）</label>
+              <el-input-number v-model="createForm.contractAmount" :min="0" :step="1000" />
+            </div>
+            <div class="field">
+              <label>关联客户</label>
+              <el-select
+                v-model="createForm.customerId"
+                filterable
+                clearable
+                :loading="customerLoading"
+                placeholder="搜索客户名称 / 编码"
+              >
+                <el-option
+                  v-for="item in customerOptions"
+                  :key="item.id"
+                  :label="item.label"
+                  :value="item.id"
+                />
+              </el-select>
+            </div>
+            <div class="field span-2">
+              <label>关联原始需求<span class="optional">可选，可多选</span></label>
+              <el-select
+                v-model="createForm.requirementIds"
+                multiple
+                filterable
+                remote
+                reserve-keyword
+                collapse-tags
+                collapse-tags-tooltip
+                :remote-method="searchRequirements"
+                :loading="requirementLoading"
+                placeholder="输入需求名称 / 编号搜索"
+              >
+                <el-option
+                  v-for="item in requirementOptions"
+                  :key="item.id"
+                  :label="item.label"
+                  :value="item.id"
+                />
+              </el-select>
+            </div>
+            <div class="field span-2">
+              <label>简要说明<span class="optional">200 字以内</span></label>
+              <el-input
+                v-model="createForm.summary"
+                type="textarea"
+                :rows="3"
+                maxlength="200"
+                show-word-limit
+                placeholder="一句话说清项目要解决什么问题、交付什么"
+              />
+            </div>
+          </div>
+          </el-tab-pane>
+
+          <el-tab-pane label="成员安排" name="member">
+          <div class="form-grid">
+            <div class="field span-2">
+              <label>项目组成员</label>
+              <PersonPicker
+                v-model="createForm.memberIds"
+                :users="users"
+                :depts="depts"
+                title="选择项目组成员"
+                placeholder="选择成员"
+              />
+            </div>
+            <div v-if="createForm.memberIds?.length" class="field">
+              <label>组内角色</label>
+              <div class="member-role-list">
+                <div v-for="id in createForm.memberIds" :key="id" class="member-role-row">
+                  <span class="member-role-name">{{ memberName(id) }}</span>
+                  <el-tag v-if="String(id) === String(createForm.pmId)" size="small" type="warning">
+                    项目经理
+                  </el-tag>
+                  <el-select
+                    v-else
+                    :model-value="createForm.memberRoles?.[id] || 'MEMBER'"
+                    size="small"
+                    class="member-role-select"
+                    @change="(value: any) => setMemberRole(String(id), String(value))"
+                  >
+                    <el-option
+                      v-for="(label, code) in ASSIGNABLE_MEMBER_ROLE"
+                      :key="code"
+                      :label="label"
+                      :value="code"
+                    />
+                  </el-select>
+                </div>
+              </div>
+            </div>
+            <div class="field" :class="{ 'span-2': !createForm.memberIds?.length }">
+              <label>阶段负责人<span class="optional">限项目组成员</span></label>
+              <div class="stage-owner-list">
+                <div
+                  v-for="(stage, index) in createForm.stages"
+                  :key="stage.stageName"
+                  class="stage-draft-row"
+                >
+                  <span class="stage-draft-index">{{ index + 1 }}</span>
+                  <span class="stage-draft-name">{{ stage.stageName }}</span>
+                  <el-select
+                    v-model="stage.ownerId"
+                    filterable
+                    clearable
+                    class="stage-owner"
+                    placeholder="默认项目经理"
+                  >
+                    <el-option
+                      v-for="user in stageOwnerOptions"
+                      :key="user.id"
+                      :label="`${user.realName}（${user.username}）`"
+                      :value="user.id"
+                    />
+                  </el-select>
+                </div>
+              </div>
+              <span v-if="!stageOwnerOptions.length" class="field-hint">
+                先在「项目组成员」里选人，阶段负责人从这里挑
+              </span>
+            </div>
+            <div class="field span-2">
+              <label>成员概览<span class="optional">橙色主要成员 · 蓝色阶段负责人</span></label>
+              <div class="member-overview">
+                <el-tag
+                  v-for="item in memberSummary"
+                  :key="`all-${item.id}`"
+                  size="small"
+                  :type="item.tone"
+                  :effect="item.tone === 'info' ? 'plain' : 'light'"
+                >
+                  {{ item.name }} · {{ item.roles.join(' / ') }}
+                </el-tag>
+                <span v-if="!memberSummary.length" class="overview-empty">还没有选择成员</span>
+              </div>
+            </div>
+          </div>
+          </el-tab-pane>
+
+          <el-tab-pane label="时间安排" name="time">
+          <div class="form-grid">
+            <div class="field span-2">
+              <label>计划周期<span class="optional">开始与结束一次选完</span></label>
+              <el-date-picker
+                v-model="createPlanRange"
+                type="daterange"
+                value-format="YYYY-MM-DD"
+                start-placeholder="计划开始"
+                end-placeholder="计划结束"
+                range-separator="~"
+                unlink-panels
+              />
+            </div>
+          </div>
+          <div class="stage-section">
+            <div class="stage-section-head">
+              <h4>阶段排期</h4>
+              <span class="section-note">时间可留空；阶段负责人到「成员安排」里选</span>
+            </div>
+            <div v-for="(stage, index) in createForm.stages" :key="stage.stageName" class="stage-draft-row">
+              <span class="stage-draft-index">{{ index + 1 }}</span>
+              <span class="stage-draft-name">{{ stage.stageName }}</span>
+              <el-date-picker
+                :model-value="stageRange(stage)"
+                type="daterange"
+                value-format="YYYY-MM-DD"
+                class="stage-date"
+                start-placeholder="开始"
+                end-placeholder="结束"
+                range-separator="~"
+                unlink-panels
+                @update:model-value="(value: any) => setStageRange(stage, value)"
+              />
+            </div>
+          </div>
+          </el-tab-pane>
+        </el-tabs>
+
+        <section class="form-section create-mode">
           <div class="section-head">
-            <span class="section-no">1</span>
             <h4>创建方式</h4>
+            <span class="section-note">决定审批与开工时机</span>
           </div>
           <div class="mode-grid">
             <button
@@ -2329,149 +2711,6 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               </span>
               <el-icon v-if="createForm.approvalMode === 'PRE'" class="mode-check"><Check /></el-icon>
             </button>
-          </div>
-        </section>
-
-        <section class="form-section">
-          <div class="section-head">
-            <span class="section-no">2</span>
-            <h4>项目信息</h4>
-          </div>
-          <div class="form-grid">
-            <div class="field span-2">
-              <label>项目名称 <em>*</em></label>
-              <el-input v-model="createForm.projectName" maxlength="200" show-word-limit placeholder="如：XX 客户订单系统中台建设" />
-            </div>
-            <div class="field">
-              <label>所属部门</label>
-              <el-select v-model="createForm.deptId" filterable clearable placeholder="默认总公司">
-                <el-option v-for="dept in depts" :key="dept.id" :label="dept.deptName" :value="dept.id" />
-              </el-select>
-            </div>
-            <div class="field">
-              <label>项目经理 <em>*</em></label>
-              <el-select v-model="createForm.pmId" filterable placeholder="选择项目经理">
-                <el-option
-                  v-for="user in users"
-                  :key="user.id"
-                  :label="`${user.realName}（${user.username}）`"
-                  :value="user.id"
-                />
-              </el-select>
-            </div>
-            <div class="field">
-              <label>合同金额（元）</label>
-              <el-input-number v-model="createForm.contractAmount" :min="0" :step="1000" />
-            </div>
-            <div class="field">
-              <label>计划开始</label>
-              <el-date-picker v-model="createForm.planStart" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" />
-            </div>
-            <div class="field span-2">
-              <label>计划结束</label>
-              <el-date-picker v-model="createForm.planEnd" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" />
-            </div>
-          </div>
-        </section>
-
-        <section class="form-section">
-          <div class="section-head">
-            <span class="section-no">3</span>
-            <h4>项目人员</h4>
-          </div>
-          <div class="form-grid">
-            <div class="field span-2">
-              <label>项目组成员</label>
-              <PersonPicker
-                v-model="createForm.memberIds"
-                :users="users"
-                :depts="depts"
-                title="选择项目组成员"
-                placeholder="选择成员"
-              />
-            </div>
-            <div v-if="createForm.memberIds?.length" class="field span-2">
-              <label>组内角色</label>
-              <div class="member-role-list">
-                <div v-for="id in createForm.memberIds" :key="id" class="member-role-row">
-                  <span class="member-role-name">{{ memberName(id) }}</span>
-                  <el-tag v-if="String(id) === String(createForm.pmId)" size="small" type="warning">
-                    项目经理
-                  </el-tag>
-                  <el-select
-                    v-else
-                    :model-value="createForm.memberRoles?.[id] || 'MEMBER'"
-                    size="small"
-                    class="member-role-select"
-                    @change="(value: any) => setMemberRole(String(id), String(value))"
-                  >
-                    <el-option
-                      v-for="(label, code) in ASSIGNABLE_MEMBER_ROLE"
-                      :key="code"
-                      :label="label"
-                      :value="code"
-                    />
-                  </el-select>
-                </div>
-              </div>
-            </div>
-            <div class="field span-2">
-              <label>项目总监</label>
-              <PersonPicker
-                v-model="createForm.directorIds"
-                :users="users"
-                :depts="depts"
-                title="选择项目总监"
-                placeholder="选择总监"
-              />
-            </div>
-          </div>
-        </section>
-
-        <section class="form-section">
-          <div class="section-head">
-            <span class="section-no">4</span>
-            <h4>阶段安排</h4>
-            <span class="section-note">时间可留空</span>
-          </div>
-          <div class="stage-section">
-            <div v-for="(stage, index) in createForm.stages" :key="stage.stageName" class="stage-draft-row">
-              <span class="stage-draft-index">{{ index + 1 }}</span>
-              <span class="stage-draft-name">{{ stage.stageName }} <em>*</em></span>
-              <el-select v-model="stage.ownerId" filterable class="stage-owner" placeholder="阶段负责人">
-                <el-option-group v-if="draftOwnerOptions.picked.length" label="项目成员">
-                  <el-option
-                    v-for="user in draftOwnerOptions.picked"
-                    :key="user.id"
-                    :label="`${user.realName}（${user.username}）`"
-                    :value="user.id"
-                  />
-                </el-option-group>
-                <el-option-group label="其他人员">
-                  <el-option
-                    v-for="user in draftOwnerOptions.rest"
-                    :key="user.id"
-                    :label="`${user.realName}（${user.username}）`"
-                    :value="user.id"
-                  />
-                </el-option-group>
-              </el-select>
-              <el-date-picker
-                v-model="stage.planStart"
-                type="date"
-                value-format="YYYY-MM-DD"
-                class="stage-date"
-                placeholder="开始（可选）"
-              />
-              <span class="stage-draft-sep">~</span>
-              <el-date-picker
-                v-model="stage.planEnd"
-                type="date"
-                value-format="YYYY-MM-DD"
-                class="stage-date"
-                placeholder="结束（可选）"
-              />
-            </div>
           </div>
         </section>
       </div>
@@ -2726,6 +2965,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
               <template v-if="deptName(detail.deptId)"> · {{ deptName(detail.deptId) }}</template>
               · 项目经理 {{ detail.pmName || userName(detail.pmId) }}
             </p>
+            <p v-if="detail.summary" class="detail-summary">{{ detail.summary }}</p>
           </div>
           <!-- 第一行：状态与设置；第二行：状态流转按钮（用 ops-break 强制换行） -->
           <div class="detail-head-ops">
@@ -3994,9 +4234,17 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 /* ---------------- 弹窗表单 ---------------- */
+/*
+ * 新建项目：整体定高 + 页签内容区内部滚动。
+ * 三个页签内容长短不一，定高后切换不再改变弹窗尺寸；「创建方式」固定在底部，
+ * 始终与提交按钮相邻，不随页签内容滚走。
+ */
 .dialog-body {
-  max-height: min(64vh, 600px);
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  height: min(72vh, 640px);
+  min-height: 420px;
+  overflow: hidden;
   padding-right: 4px;
 }
 
@@ -4251,6 +4499,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 /* 立项时的人+组内角色分配：行内左对齐，下拉固定宽度避免被 .field 的 100% 规则撑满 */
+/* 组内角色：与「阶段负责人」左右并排，块内一人一行 */
 .member-role-list {
   display: flex;
   flex-direction: column;
@@ -4278,6 +4527,33 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 .member-role-row :deep(.el-select) {
   flex: none;
   width: 132px;
+}
+
+/* 组内角色与阶段负责人并排时两块等高，避免长短不一显得参差 */
+.field > .member-role-list,
+.field > .stage-owner-list {
+  flex: 1 1 auto;
+}
+
+/* 成员概览：主要成员（项目经理/总监）与所有成员并列，主要成员在下方高亮重复出现 */
+/* 成员概览：直接罗列「姓名 · 身份」标签，不再套卡片与小标题 */
+.member-overview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.member-overview :deep(.el-tag) {
+  max-width: 100%;
+  height: auto;
+  padding: 2px 8px;
+  line-height: 18px;
+  white-space: normal;
+}
+
+.overview-empty {
+  font-size: 12px;
+  color: var(--pms-text-3);
 }
 
 .form-section {
@@ -4405,8 +4681,56 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   font-size: 15px;
 }
 
+/* 新建项目：三个页签（基本信息 / 成员安排 / 时间安排）——
+   弹窗定高后，页签内容区自己滚动，切页签不再改变弹窗尺寸 */
+.create-tabs {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.create-tabs :deep(.el-tabs__header) {
+  flex: none;
+  margin-bottom: 16px;
+}
+
+.create-tabs :deep(.el-tabs__item) {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.create-tabs :deep(.el-tabs__content) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+/* 创建方式固定在表单最底部，与页签内容用分隔线隔开 */
+.create-mode {
+  flex: none;
+  margin-top: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
 .stage-section {
   padding: 2px 0 0;
+}
+
+.stage-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0 6px;
+}
+
+.stage-section-head h4 {
+  margin: 0;
+  color: var(--pms-text-1, var(--el-text-color-primary));
+  font-size: 13.5px;
+  font-weight: 600;
 }
 
 .stage-draft-row {
@@ -4415,6 +4739,24 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   gap: 8px;
   padding: 7px 0;
   border-bottom: 1px dashed var(--el-border-color-lighter);
+}
+
+/* 「成员安排」里的阶段负责人列表：整块虚线框，最后一行不画分隔线 */
+.stage-owner-list {
+  padding: 2px 10px;
+  border: 1px dashed var(--el-border-color-lighter);
+  border-radius: 6px;
+}
+
+.stage-owner-list .stage-draft-row:last-child {
+  border-bottom: none;
+}
+
+/* 阶段负责人的补充说明（候选为空时提示先去选成员） */
+.field-hint {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--pms-text-3);
 }
 
 .stage-draft-index {
@@ -4448,8 +4790,9 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
 }
 
 .stage-date {
-  flex: 1 1 140px;
-  min-width: 120px;
+  flex: 1 1 240px;
+  max-width: 460px;
+  min-width: 220px;
 }
 
 .stage-draft-sep {
@@ -4827,6 +5170,15 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
   font-size: 12px;
   color: var(--pms-text-3);
   font-variant-numeric: tabular-nums;
+}
+
+/* 立项时填写的简要说明，标题下方一行灰字 */
+.detail-summary {
+  margin: 6px 0 0;
+  max-width: 720px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--pms-text-2);
 }
 
 .metrics {

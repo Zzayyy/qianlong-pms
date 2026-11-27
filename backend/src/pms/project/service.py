@@ -6,7 +6,7 @@ import json
 from datetime import date, datetime, timedelta
 from typing import Final
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pms.common.exceptions import (
@@ -27,6 +27,7 @@ from pms.project.models import (
     PrjMember,
     PrjMilestone,
     PrjProject,
+    PrjRequirement,
     PrjRisk,
     PrjStage,
     PrjStageMember,
@@ -268,6 +269,34 @@ async def resolve_approval_level(session: AsyncSession, amount: float) -> int:
     return 1
 
 
+async def replace_requirements(
+    session: AsyncSession, project_id: int, requirement_ids: list[int] | None
+) -> list[int]:
+    """整体覆盖项目的关联原始需求（去重、忽略非正数 id）。
+
+    关联只是「这个项目承接了哪几条客户诉求」的弱引用，重建整组关系最简单可靠；
+    需求本身的生命周期仍在 CRM，删除关联不影响需求档案。
+    """
+    ids: list[int] = []
+    for item in requirement_ids or []:
+        value = int(item or 0)
+        if value > 0 and value not in ids:
+            ids.append(value)
+    await session.execute(delete(PrjRequirement).where(PrjRequirement.project_id == project_id))
+    for requirement_id in ids:
+        session.add(PrjRequirement(project_id=project_id, requirement_id=requirement_id))
+    await session.flush()
+    return ids
+
+
+async def requirement_ids_of(session: AsyncSession, project_id: int) -> list[int]:
+    """项目已关联的原始需求 id 列表。"""
+    rows = await session.execute(
+        select(PrjRequirement.requirement_id).where(PrjRequirement.project_id == project_id)
+    )
+    return [int(value) for value in rows.scalars().all()]
+
+
 async def create_project(
     session: AsyncSession,
     context: AuthContext,
@@ -280,10 +309,12 @@ async def create_project(
     sponsor_id: int = 0,
     customer_id: int | None = None,
     opportunity_id: int | None = None,
+    summary: str = "",
     contract_amount: float = 0,
     plan_start: str | None = None,
     plan_end: str | None = None,
     remark: str = "",
+    requirement_ids: list[int] | None = None,
     members: list[dict[str, object]] | None = None,
     stages: list[dict[str, object]] | None = None,
     director_ids: list[int] | None = None,
@@ -302,10 +333,12 @@ async def create_project(
     `auto_approve=True` 时跳过审批直接置为 APPROVED 并冻结立项基线；
     `start_now=True` 时在立项通过后继续流转到 IN_PROGRESS（审批模式下忽略）。
     部门传 0 时回落到「总公司」。
+    `requirement_ids` 为立项时关联的原始需求（可选、可多条）。
     """
     project = PrjProject(
         project_code=await next_project_code(session),
         project_name=project_name,
+        summary=summary or "",
         project_type=project_type,
         secret_level=secret_level,
         dept_id=dept_id or await default_dept_id(session),
@@ -322,6 +355,8 @@ async def create_project(
     )
     session.add(project)
     await session.flush()
+    if requirement_ids:
+        await replace_requirements(session, project.id, requirement_ids)
     if pm_id:
         await ensure_member(session, project.id, pm_id, 0, role_in_project="PM")
     if members:

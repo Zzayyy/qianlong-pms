@@ -16,6 +16,8 @@ class PrjProject(Base, CommonMixin):
 
     project_code: Mapped[str] = mapped_column(String(32), default="")
     project_name: Mapped[str] = mapped_column(String(200), default="")
+    #: 简要说明（前端限 200 字，用于列表/详情一句话说明项目做什么）
+    summary: Mapped[str] = mapped_column(String(200), default="")
     project_type: Mapped[str] = mapped_column(String(32), default="DEV")
     secret_level: Mapped[str] = mapped_column(String(16), default="INTERNAL")
     level: Mapped[str] = mapped_column(String(16), default="NORMAL")
@@ -73,6 +75,19 @@ class PrjDirector(Base, CommonMixin):
     project_id: Mapped[int] = mapped_column(BigInteger, default=0)
     user_id: Mapped[int] = mapped_column(BigInteger, default=0)
     assigned_by: Mapped[int] = mapped_column(BigInteger, default=0)
+
+
+class PrjRequirement(Base, CommonMixin):
+    """项目关联的原始需求 `t_prj_requirement`。
+
+    一个项目可以承接多条原始需求（如一次建设覆盖多条客户诉求），
+    关联在立项时选择、可选可不选；需求表在 CRM（`t_crm_requirement`）。
+    """
+
+    __tablename__ = "t_prj_requirement"
+
+    project_id: Mapped[int] = mapped_column(BigInteger, default=0, index=True)
+    requirement_id: Mapped[int] = mapped_column(BigInteger, default=0)
 
 
 class PrjStage(Base, CommonMixin):

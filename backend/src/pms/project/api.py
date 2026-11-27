@@ -126,6 +126,7 @@ def _project_out(
         "id": project.id,
         "projectCode": project.project_code,
         "projectName": project.project_name,
+        "summary": project.summary or "",
         "status": project.status,
         "health": project.health,
         "progress": float(project.progress),
@@ -163,17 +164,21 @@ class ProjectStageIn(BaseModel):
 class ProjectIn(BaseModel):
     """立项入参。"""
 
-    projectName: str = Field(min_length=1, max_length=200)
+    projectName: str = Field(min_length=1, max_length=50)
     deptId: int = 0
     pmId: int
     projectType: str = "DEV"
     secretLevel: str = "INTERNAL"
     customerId: int | None = None
     opportunityId: int | None = None
+    #: 简要说明（一句话讲清项目做什么，限 200 字）
+    summary: str = Field(default="", max_length=200)
     contractAmount: float = 0
     planStart: str | None = None
     planEnd: str | None = None
     remark: str = ""
+    #: 关联的原始需求（CRM `t_crm_requirement`），可选、可多条
+    requirementIds: list[int] = Field(default_factory=list)
     members: list[MemberIn] = Field(default_factory=list)
     stages: list[ProjectStageIn] = Field(default_factory=list)
     directorIds: list[int] = Field(default_factory=list)
@@ -350,10 +355,12 @@ async def create_project(
         secret_level=body.secretLevel,
         customer_id=body.customerId,
         opportunity_id=body.opportunityId,
+        summary=body.summary,
         contract_amount=body.contractAmount,
         plan_start=body.planStart,
         plan_end=body.planEnd,
         remark=body.remark,
+        requirement_ids=body.requirementIds,
         members=[item.model_dump() for item in body.members],
         stages=[item.model_dump() for item in body.stages],
         director_ids=body.directorIds,
@@ -479,6 +486,8 @@ async def project_detail(
     # 前端据此决定是否展示合同额列/指标（与后端下发口径一致）
     data["canViewAmount"] = can_view_amount
     data["canManage"] = await is_project_manager(session, context, project)
+    # 立项时关联的原始需求（可选、可多条），详情里回显
+    data["requirementIds"] = await service.requirement_ids_of(session, project_id)
     # 项目周报只对项目经理与领导层开放，前端据此决定是否显示「周报」页签
     from pms.weekly import service as weekly_service
 

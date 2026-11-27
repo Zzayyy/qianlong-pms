@@ -2501,7 +2501,7 @@ onUnmounted(() => window.removeEventListener('resize', syncWidth))
       />
       <el-form :model="convertForm" label-width="88px" class="form-grid">
         <el-form-item label="项目名称" class="span-2">
-          <el-input v-model="convertForm.projectName" />
+          <el-input v-model="convertForm.projectName" maxlength="50" show-word-limit />
         </el-form-item>
         <el-form-item label="项目经理" class="span-2">
           <el-select-v2

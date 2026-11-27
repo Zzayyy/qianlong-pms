@@ -153,7 +153,8 @@ const confirm = () => {
       <el-tooltip
         v-if="!single"
         content="选中当前部门 / 搜索条件下的全部人员"
-        placement="top"
+        placement="bottom-end"
+        :show-after="300"
       >
         <el-button
           class="picker-select-all"
